@@ -1,0 +1,24 @@
+name:                feed-reader-core
+category:            Data, Network
+version:             0.1.0.0
+license:             BSD3
+cabal-version:       >=1.10
+license-file:        LICENSE
+author:              Călin Ardelean
+maintainer:          Călin Ardelean <calinucs@gmail.com>
+stability:           experimental
+homepage:            https://github.com/clnx/feed-reader
+bug-reports:         https://github.com/clnx/feed-reader/issues
+copyright:           Copyright (C) 2015 Călin Ardelean
+synopsis:            RSS/Atom feed reader server
+description:
+  RSS/Atom feed reader server
+build-type:          Simple
+
+library
+  -- exposed-modules:
+  -- other-modules:
+  -- other-extensions:
+  build-depends:       base >=4.7 && <4.8
+  hs-source-dirs:      src
+  default-language:    Haskell2010
