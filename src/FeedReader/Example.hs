@@ -1,20 +1,18 @@
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Main (main) where
 
-import           Control.Monad         (replicateM, replicateM_)
+import           Control.Monad         (replicateM, replicateM_, forM_)
 import           Data.Acid
-import qualified Data.IntMap           as M
 import qualified Data.Sequence         as S
-import           Data.Time.Calendar
 import           Data.Time.Clock
 import           Data.Time.Clock.POSIX
 import           FeedReader.DB         as DB
-import           FeedReader.XML2DB
 import           Pipes
 import qualified Pipes.Prelude         as P
 import           Pipes.Safe
-import           System.Random         (randomIO, randomRIO)
+import           System.Random         (randomRIO, getStdGen, randomRs)
 
 introMessage = do
   yield "Welcome to the Jungle!"
@@ -23,28 +21,29 @@ introMessage = do
 
 helpMessage = do
   yield "Commands (use _ instead of space inside arguments):"
-  yield "  help       : Prints this helpful message."
-  yield "  date d     : Shows the result of parsing a RSS/Atom date field."
-  yield "  rand l r   : Generates a random string of length in range l..r."
-  yield "  stats      : Prints record counts."
-  yield "  next d     : Prints the first item with ID > d."
-  yield "  insert n   : Inserts n random entries into the DB."
-  yield "  checkpoint : Creates an acid-state checkpoint."
-  yield "  clean      : Wipes clean the database."
-  yield "  quit       : Quits the program."
+  yield "  help    : prints this helpful message"
+  yield "  stats   : prints record counts"
+  yield "  get t k : prints the item with ID == k"
+  yield "          : t is the table, one of 'cat', 'feed' or 'item'"
+  yield "  gen t n : inserts n random records into the DB (t as above)"
+  yield "  snap    : creates an acid-state checkpoint"
+  yield "  clean   : wipes clean the database"
+  -- yield "  date d  : shows the result of parsing a RSS/Atom date field"
+  -- yield "  rand l r: generates a random string of length in range l..r"
+  yield "  quit    : quits the program"
 
 processCommand acid = do
   args <- words <$> await
   case head args of
-    "help"       -> helpMessage
-    "date"       -> checkArgs 1 args acid cmdDate
-    "rand"       -> checkArgs 2 args acid cmdRand
-    "stats"      -> checkArgs 0 args acid cmdStats
-    "next"       -> checkArgs 1 args acid cmdNext
-    "insert"     -> checkArgs 1 args acid cmdInsert
-    "checkpoint" -> checkArgs 0 args acid cmdCheckpoint
-    "clean"      -> checkArgs 0 args acid cmdClean
-    _            -> yield $ "Command '" ++ head args ++ "' not understood."
+    "help"  -> helpMessage
+    "stats" -> checkArgs 0 args acid cmdStats
+    "get"   -> checkArgs 2 args acid cmdGet
+    "gen"   -> checkArgs 2 args acid cmdGen
+    "snap"  -> checkArgs 0 args acid cmdSnap
+    -- "date"  -> checkArgs 1 args acid cmdDate
+    -- "rand"  -> checkArgs 2 args acid cmdRand
+    "clean" -> checkArgs 0 args acid cmdClean
+    _       -> yield $ "Command '" ++ head args ++ "' not understood."
   processCommand acid
 
 checkArgs n args acid f =
@@ -52,8 +51,12 @@ checkArgs n args acid f =
   else yield $ "Command '" ++ head args ++ "' requires " ++ show n ++ " arguments\
                \ but " ++ show (length args) ++ " were supplied."
 
-under '_' = ' '
-under c   = c
+-- under '_' = ' '
+-- under c   = c
+
+------------------------------------------------------------------------------
+-- Random Utilities
+------------------------------------------------------------------------------
 
 randomString l r = do
   ln <- randomRIO (l, r)
@@ -67,12 +70,11 @@ randomTime = do
   return $ posixSecondsToUTCTime $ fromInteger ti
 
 randomCat =
-  DB.UserCategory <$> randomRIO (1, 1000) <*> randomString 10 30
+  DB.UserCategory <$> pure DB.unsetCatID <*> randomString 10 30
 
-randomFeed cs = do
-  catIdx <- randomRIO (0, S.length cs - 1)
-  DB.Feed <$> pure 0
-          <*> pure (S.index cs catIdx)
+randomFeed c =
+  DB.Feed <$> pure DB.unsetFeedID
+          <*> pure c
           <*> randomString 100 300
           <*> (DB.Text <$> randomString 100 300)
           <*> (DB.Text <$> randomString 100 300)
@@ -83,10 +85,9 @@ randomFeed cs = do
           <*> pure Nothing
           <*> randomTime
 
-randomItem fs = do
-  feedIdx <- randomRIO (0, S.length fs - 1)
-  DB.Item <$> pure 0
-          <*> pure (S.index fs feedIdx)
+randomItem f =
+  DB.Item <$> pure DB.unsetItemID
+          <*> pure f
           <*> randomString 100 300
           <*> (DB.Text <$> randomString 100 300)
           <*> (DB.Text <$> randomString 100 300)
@@ -98,56 +99,83 @@ randomItem fs = do
           <*> randomTime
           <*> randomTime
 
-cmdDate acid args = do
-  df <- liftBase getCurrentTime
-  yield $ "Using " ++ show df ++ " as default date."
-  let d = DB.text2UTCTime (under <$> args !! 1) df
-  yield $ "Date parsed as: " ++ show d
+------------------------------------------------------------------------------
+-- Command Functions
+------------------------------------------------------------------------------
 
-cmdRand acid args = do
-  let l = (read $ args !! 1) :: Int
-  let r = (read $ args !! 2) :: Int
-  str <- liftBase $ randomString l r
-  yield str
+-- cmdDate acid args = do
+--   df <- liftBase getCurrentTime
+--   yield $ "Using " ++ show df ++ " as default date."
+--   let d = DB.text2UTCTime (under <$> args !! 1) df
+--   yield $ "Date parsed as: " ++ show d
+--
+-- cmdRand acid args = do
+--   let l = (read $ args !! 1) :: Int
+--   let r = (read $ args !! 2) :: Int
+--   str <- liftBase $ randomString l r
+--   yield str
 
-dbCommand args f = do
+timed f = do
   t0 <- liftBase getCurrentTime
-  f t0
+  f
   t1 <- liftBase getCurrentTime
   let diff = (fromRational $ toRational $ diffUTCTime t1 t0) :: Float
   yield $ "Command: " ++ show (diff * 1000) ++ " ms"
 
-cmdStats acid args = dbCommand args $ \df -> do
+cmdStats acid args = timed $ do
   s <- liftBase $ query acid DB.GetStats
   yield $ "Category count: " ++ show (DB.countCats s)
   yield $ "Feed count    : " ++ show (DB.countFeeds s)
   yield $ "Entry count   : " ++ show (DB.countItems s)
 
-cmdNext acid args = dbCommand args $ \df -> do
-  let ix = (read $ args !! 1) :: Int
-  mbi <- liftBase $ query acid (DB.GetNextItem ix)
-  case mbi of
-    Nothing -> yield $ "No entry found with ID > " ++ show ix
-    Just i  -> each $ lines $ show i
+cmdGet acid args = timed $ do
+  let t = args !! 1
+  let k = (read $ args !! 2) :: Int
+  let out = \case
+              Just s -> each $ lines s
+              _      -> yield $ "No record found with ID == " ++ show k
+  case t of
+    "cat"  -> liftBase (query acid $ DB.LookupCat  k) >>= out . fmap show
+    "feed" -> liftBase (query acid $ DB.LookupFeed k) >>= out . fmap show
+    "item" -> liftBase (query acid $ DB.LookupItem k) >>= out . fmap show
+    _      -> yield $ t ++ " is not a valid table name."
 
-cmdInsert acid args = dbCommand args $ \df -> do
-  let n = (read $ args !! 1) :: Int
-  yield "Generating 20 random cats..."
-  cs <- liftBase $ S.replicateM 20 randomCat
-  yield "Generating 200 random feeds..."
-  fs <- liftBase $ S.replicateM 200 $ randomFeed cs
-  yield $ "Generating " ++ show n ++ " random entries..."
-  liftBase $ replicateM_ n $ do
-    item <- randomItem fs
-    update acid $ DB.InsertItem item
+cmdGen acid args = timed $ do
+  let t = args !! 1
+  let n = (read $ args !! 2) :: Int
+  g <- liftBase getStdGen
+  case t of
+    "cat"  ->
+       replicateM_ n $ do
+         a <- liftBase randomCat
+         liftBase $ update acid $ DB.InsertCat a
+    "feed" -> do
+      cs <- liftBase $ query acid DB.Cats2Seq
+      let rs = take n $ randomRs (0, S.length cs - 1) g
+      forM_ rs $ \r -> do
+        f <- liftBase $ randomFeed $ DB.catID $ S.index cs r
+        liftBase $ update acid $ DB.InsertFeed f
+    "item" -> do
+      fs <- liftBase $ query acid DB.Feeds2Seq
+      let rs = take n $ randomRs (0, S.length fs - 1) g
+      forM_ rs $ \r -> do
+        i <- liftBase $ randomItem $ DB.feedID $ S.index fs r
+        liftBase $ update acid $ DB.InsertItem i
+    _      -> yield $ t ++ " is not a valid table name."
 
-cmdCheckpoint acid args = dbCommand args $ \df -> do
+
+cmdSnap acid args = timed $ do
   liftBase $ createCheckpoint acid
   yield "Checkpoint created."
 
-cmdClean acid args = dbCommand args $ \df -> do
-  liftBase $ update acid DB.WipeDB
-  yield "Database wiped clean. Have a nice day."
+cmdClean acid args = timed $ do
+  yield "Are you sure? (y/n)"
+  r <- await
+  case r of
+    "y" -> do
+             liftBase $ update acid DB.WipeDB
+             yield "Database wiped clean. Have a nice day."
+    _   -> yield "Crisis averted."
 
 pipeLine acid =
   P.stdinLn
@@ -161,7 +189,7 @@ main :: IO ()
 main = runSafeT $ runEffect $ bracket
     (do t0 <- getCurrentTime
         putStrLn "  Opening DB..."
-        acid <- openLocalState (FeedsDB M.empty M.empty M.empty)
+        acid <- openLocalState DB.emptyDB
         t1 <- getCurrentTime
         let diff = (fromRational $ toRational $ diffUTCTime t1 t0) :: Float
         putStrLn $ "  DB opened in " ++ show (diff * 1000) ++ " ms."

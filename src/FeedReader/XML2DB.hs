@@ -39,8 +39,8 @@ person2DB p = DB.Person
 
 instance DB.Feed2DB A.Feed A.Entry where
   feed2DB f c u df = DB.Feed
-    { feedID           = 0
-    , feedCat          = c
+    { feedID           = DB.unsetFeedID
+    , feedCatID        = c
     , feedURL          = u
     , feedTitle        = content2DB $ A.feedTitle f
     , feedDescription  = tryContent2DB $ A.feedSubtitle f
@@ -54,8 +54,8 @@ instance DB.Feed2DB A.Feed A.Entry where
     }
 
   item2DB i f u df = DB.Item
-    { itemID           = 0
-    , itemFeed         = f
+    { itemID           = DB.unsetItemID
+    , itemFeedID       = f
     , itemURL          = u
     , itemTitle        = content2DB $ A.entryTitle i
     , itemSummary      = tryContent2DB $ A.entrySummary i
