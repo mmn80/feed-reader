@@ -24,7 +24,7 @@ helpMessage = do
   yield "  help    : prints this helpful message"
   yield "  stats   : prints record counts"
   yield "  get t k : prints the item with ID == k"
-  yield "          : t is the table, one of 'cat', 'feed' or 'item'"
+  yield "          : t is the table, one of 'cat', 'feed', 'person' or 'item'"
   yield "  gen t n : inserts n random records into the DB (t as above)"
   yield "  snap    : creates an acid-state checkpoint"
   yield "  clean   : wipes clean the database"
@@ -70,7 +70,7 @@ randomTime = do
   return $ posixSecondsToUTCTime $ fromInteger ti
 
 randomCat =
-  DB.UserCategory <$> pure DB.unsetCatID <*> randomString 10 30
+  DB.Cat <$> pure DB.unsetCatID <*> randomString 10 30
 
 randomFeed c =
   DB.Feed <$> pure DB.unsetFeedID
@@ -84,6 +84,12 @@ randomFeed c =
           <*> (DB.Text <$> randomString 10 50)
           <*> pure Nothing
           <*> randomTime
+
+randomPerson =
+  DB.Person <$> pure DB.unsetPersonID
+            <*> randomString 10 30
+            <*> randomString 100 300
+            <*> randomString 10 30
 
 randomItem f =
   DB.Item <$> pure DB.unsetItemID
@@ -126,6 +132,7 @@ cmdStats acid args = timed $ do
   s <- liftBase $ query acid DB.GetStats
   yield $ "Category count: " ++ show (DB.countCats s)
   yield $ "Feed count    : " ++ show (DB.countFeeds s)
+  yield $ "Person count  : " ++ show (DB.countPersons s)
   yield $ "Entry count   : " ++ show (DB.countItems s)
 
 cmdGet acid args = timed $ do
@@ -135,10 +142,11 @@ cmdGet acid args = timed $ do
               Just s -> each $ lines s
               _      -> yield $ "No record found with ID == " ++ show k
   case t of
-    "cat"  -> liftBase (query acid $ DB.LookupCat  k) >>= out . fmap show
-    "feed" -> liftBase (query acid $ DB.LookupFeed k) >>= out . fmap show
-    "item" -> liftBase (query acid $ DB.LookupItem k) >>= out . fmap show
-    _      -> yield $ t ++ " is not a valid table name."
+    "cat"    -> liftBase (query acid $ DB.LookupCat  k)   >>= out . fmap show
+    "feed"   -> liftBase (query acid $ DB.LookupFeed k)   >>= out . fmap show
+    "person" -> liftBase (query acid $ DB.LookupPerson k) >>= out . fmap show
+    "item"   -> liftBase (query acid $ DB.LookupItem k)   >>= out . fmap show
+    _        -> yield $ t ++ " is not a valid table name."
 
 cmdGen acid args = timed $ do
   let t = args !! 1
@@ -149,6 +157,10 @@ cmdGen acid args = timed $ do
        replicateM_ n $ do
          a <- liftBase randomCat
          liftBase $ update acid $ DB.InsertCat a
+    "person"  ->
+       replicateM_ n $ do
+         a <- liftBase randomPerson
+         liftBase $ update acid $ DB.InsertPerson a
     "feed" -> do
       cs <- liftBase $ query acid DB.Cats2Seq
       let rs = take n $ randomRs (0, S.length cs - 1) g
