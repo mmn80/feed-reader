@@ -1,9 +1,9 @@
+{-# LANGUAGE LambdaCase   #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE LambdaCase #-}
 
 module Main (main) where
 
-import           Control.Monad         (replicateM, replicateM_, forM_)
+import           Control.Monad         (forM_, forM, replicateM, replicateM_)
 import           Data.Acid
 import qualified Data.Sequence         as S
 import           Data.Time.Clock
@@ -12,7 +12,8 @@ import           FeedReader.DB         as DB
 import           Pipes
 import qualified Pipes.Prelude         as P
 import           Pipes.Safe
-import           System.Random         (randomRIO, getStdGen, randomRs)
+import           System.FilePath       ((</>))
+import           System.Random         (getStdGen, randomRIO, randomRs)
 
 introMessage = do
   yield "Welcome to the Jungle!"
@@ -127,8 +128,7 @@ timed f = do
   t0 <- liftBase getCurrentTime
   f
   t1 <- liftBase getCurrentTime
-  let diff = (fromRational $ toRational $ diffUTCTime t1 t0) :: Float
-  yield $ "Command: " ++ show (diff * 1000) ++ " ms"
+  yield $ "Command: " ++ show (DB.diffMs t0 t1) ++ " ms"
 
 cmdStats acid args = timed $ do
   s <- liftBase $ query acid DB.GetStats
@@ -136,6 +136,7 @@ cmdStats acid args = timed $ do
   yield $ "Feed count    : " ++ show (DB.countFeeds s)
   yield $ "Person count  : " ++ show (DB.countPersons s)
   yield $ "Entry count   : " ++ show (DB.countItems s)
+  yield $ "Shard count   : " ++ show (DB.countShards s)
 
 cmdGet acid args = timed $ do
   let t = args !! 1
@@ -147,7 +148,7 @@ cmdGet acid args = timed $ do
     "cat"    -> liftBase (query acid $ DB.LookupCat  k)   >>= out . fmap show
     "feed"   -> liftBase (query acid $ DB.LookupFeed k)   >>= out . fmap show
     "person" -> liftBase (query acid $ DB.LookupPerson k) >>= out . fmap show
-    "item"   -> liftBase (query acid $ DB.LookupItem k)   >>= out . fmap show
+    "item"   -> liftBase (DB.lookupItem acid k)           >>= out . fmap show
     _        -> yield $ t ++ " is not a valid table name."
 
 cmdGen acid args = timed $ do
@@ -171,10 +172,10 @@ cmdGen acid args = timed $ do
         liftBase $ update acid $ DB.InsertFeed f
     "item" -> do
       fs <- liftBase $ query acid DB.Feeds2Seq
-      let rs = take n $ randomRs (0, S.length fs - 1) g
-      forM_ rs $ \r -> do
-        i <- liftBase $ randomItem $ DB.feedID $ S.index fs r
-        liftBase $ update acid $ DB.InsertItem i
+      let rfids = (DB.feedID . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
+      is <- forM rfids $ liftBase . randomItem
+      liftBase $ DB.insertItems acid is
+      return ()
     _      -> yield $ t ++ " is not a valid table name."
 
 
@@ -191,7 +192,7 @@ cmdClean acid args = timed $ do
   r <- await
   case r of
     "y" -> do
-             liftBase $ update acid DB.WipeDB
+             liftBase $ DB.wipeDB acid
              yield "Database wiped clean. Have a nice day."
     _   -> yield "Crisis averted."
 
@@ -206,14 +207,13 @@ pipeLine acid =
 main :: IO ()
 main = runSafeT $ runEffect $ bracket
     (do t0 <- getCurrentTime
-        putStrLn "  Opening DB..."
-        acid <- openLocalState DB.emptyDB
+        putStrLn "  Opening master DB..."
+        acid <- openLocalStateFrom ("data" </> "master") DB.emptyDB
         t1 <- getCurrentTime
-        let diff = (fromRational $ toRational $ diffUTCTime t1 t0) :: Float
-        putStrLn $ "  DB opened in " ++ show (diff * 1000) ++ " ms."
+        putStrLn $ "  DB opened in " ++ show (DB.diffMs t0 t1) ++ " ms."
         return acid )
     (\acid -> do
-        putStrLn "  Closing DB..."
+        putStrLn "  Closing master DB..."
         closeAcidState acid
         putStrLn "  Goodbye." )
     pipeLine

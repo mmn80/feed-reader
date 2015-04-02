@@ -16,53 +16,82 @@
 
 module FeedReader.DB
   (
-    Cat    (..), CatID,    unsetCatID
-  , Feed   (..), FeedID,   unsetFeedID
-  , Person (..), PersonID, unsetPersonID
-  , Item   (..), ItemID,   unsetItemID
-  , URL, Language, Tag, Content (..)
-  , Image   (..), imageFromURL
-  , FeedsDB (..)
-  , ToFeed   (..)
-  , ToPerson (..)
-  , ToItem   (..)
+    CatID
+  , FeedID
+  , PersonID
+  , ItemID
+  , Cat (..)
+  , Feed (..)
+  , Person (..)
+  , Item (..)
+  , URL
+  , Language
+  , Tag
+  , Content (..)
+  , Image (..)
+  , Master (..)
+-- utils
+  , imageFromURL
+  , unsetItemID
+  , unsetPersonID
+  , unsetFeedID
+  , unsetCatID
   , emptyDB
+  , text2UTCTime
+  , diffMs
+-- conversion classes
+  , ToFeed (..)
+  , ToPerson (..)
+  , ToItem (..)
   , addItem2DB
   , addFeed2DB
-  , text2UTCTime
-  , getStats,     GetStats     (..), DBStats (..)
-  , lookupCat,    LookupCat    (..)
-  , lookupFeed,   LookupFeed   (..)
-  , lookupPerson, LookupPerson (..)
-  , lookupItem,   LookupItem   (..)
-  , cats2Seq,     Cats2Seq     (..)
-  , feeds2Seq,    Feeds2Seq    (..)
-  , insertCat,    InsertCat    (..)
-  , insertFeed,   InsertFeed   (..)
-  , insertPerson, InsertPerson (..)
-  , insertItem,   InsertItem   (..)
-  , wipeDB,       WipeDB       (..)
+-- master read queries
+  , DBStats (..)
+  , getStats
+  , GetStats (..)
+  , lookupCat
+  , LookupCat (..)
+  , lookupFeed
+  , LookupFeed (..)
+  , lookupPerson
+  , LookupPerson (..)
+  , cats2Seq
+  , Cats2Seq (..)
+  , feeds2Seq
+  , Feeds2Seq (..)
+-- master update queries
+  , insertCat
+  , InsertCat (..)
+  , insertFeed
+  , InsertFeed (..)
+  , insertPerson
+  , InsertPerson (..)
+-- complex queries
+  , lookupItem
+  , insertItems
+  , wipeDB
   ) where
 
+import           Control.Exception     (bracket)
+import           Control.Monad         (forM, forM_)
 import           Control.Monad.Reader  (ask)
 import           Control.Monad.State   (get, put)
 import           Data.Acid
 import           Data.Acid.Advanced
 import           Data.Hashable         (hash)
-import qualified Data.IntMap           as M
+import qualified Data.IntMap           as Map
 import qualified Data.IntSet           as Set
+import           Data.List             (groupBy, sortBy)
 import           Data.Maybe            (fromJust, fromMaybe)
 import           Data.Monoid           (First (..), getFirst, (<>))
 import           Data.SafeCopy
 import qualified Data.Sequence         as Seq
-import           Data.Time.Clock       (UTCTime, getCurrentTime)
+import           Data.Time.Clock       (UTCTime, diffUTCTime, getCurrentTime)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import           Data.Time.Format      (defaultTimeLocale, iso8601DateFormat,
                                         parseTimeM, rfc822DateFormat)
-
-------------------------------------------------------------------------------
--- Record Types
-------------------------------------------------------------------------------
+import           System.Directory      (doesDirectoryExist, removeDirectoryRecursive)
+import           System.FilePath       ((</>))
 
 type URL      = String
 type Language = String
@@ -70,14 +99,15 @@ type Tag      = String
 data Content  = Text String | HTML String | XHTML String
   deriving (Show)
 
-newtype CatID = CatID { unCatID :: Int } deriving (Show)
+newtype CatID    = CatID    { unCatID :: Int } deriving (Show, Eq, Ord)
+newtype PersonID = PersonID { unPersonID :: Int } deriving (Show, Eq, Ord)
+newtype FeedID   = FeedID   { unFeedID :: Int } deriving (Show, Eq, Ord)
+newtype ItemID   = ItemID   { unItemID :: Int } deriving (Show, Eq, Ord)
 
 data Cat = Cat
   { catID   :: CatID
   , catName :: String
   } deriving (Show)
-
-newtype PersonID = PersonID { unPersonID :: Int } deriving (Show)
 
 data Person = Person
   { personID    :: PersonID
@@ -95,8 +125,6 @@ data Image = Image
   , imageHeight      :: Int
   } deriving (Show)
 
-newtype FeedID = FeedID { unFeedID :: Int } deriving (Show)
-
 data Feed = Feed
   { feedID           :: FeedID
   , feedCatID        :: CatID
@@ -110,8 +138,6 @@ data Feed = Feed
   , feedImage        :: Maybe Image
   , feedUpdated      :: UTCTime
   } deriving (Show)
-
-newtype ItemID = ItemID { unItemID :: Int } deriving (Show)
 
 data Item = Item
   { itemID           :: ItemID
@@ -128,41 +154,49 @@ data Item = Item
   , itemUpdated      :: UTCTime
   } deriving (Show)
 
-------------------------------------------------------------------------------
--- DataBase Index Types
-------------------------------------------------------------------------------
+type NestedMap = Map.IntMap Set.IntSet
 
-type NestedMap = M.IntMap Set.IntSet
-
-insertNested :: Int -> Int -> NestedMap -> NestedMap
-insertNested k i m = M.insert k newInner m
-  where
-    newInner = Set.insert i $ fromMaybe Set.empty $ M.lookup k m
-
-data FeedsDB = FeedsDB
-  { tblCats    :: !(M.IntMap Cat)
-  , tblFeeds   :: !(M.IntMap Feed)
-  , tblPersons :: !(M.IntMap Person)
-  , tblItems   :: !(M.IntMap Item)
-  , idxCats    :: !NestedMap
-  , idxFeeds   :: !NestedMap
+data Master = Master
+  { shItem     :: !Set.IntSet
+  , idxItem    :: !Set.IntSet
+  , ixCatItem  :: !NestedMap
+  , ixFeedItem :: !NestedMap
+  , tblCat     :: !(Map.IntMap Cat)
+  , tblFeed    :: !(Map.IntMap Feed)
+  , tblPerson  :: !(Map.IntMap Person)
   }
 
-emptyDB = FeedsDB M.empty M.empty M.empty M.empty M.empty M.empty
-
-checkUniqueID idx x = if M.notMember x idx then x
-                      else checkUniqueID idx (x + 1)
+data ShardItem = ShardItem
+  { shItemSize :: !Int
+  , tblItem    :: !(Map.IntMap Item)
+  }
 
 data DBStats = DBStats
   { countCats    :: Int
   , countFeeds   :: Int
   , countPersons :: Int
   , countItems   :: Int
+  , countShards  :: Int
   }
 
 ------------------------------------------------------------------------------
 -- Utilities
 ------------------------------------------------------------------------------
+
+checkUniqueID :: Set.IntSet -> Int -> Int
+checkUniqueID idx x = if Set.notMember x idx then x
+                      else checkUniqueID idx (x + 1)
+
+emptyDB :: Master
+emptyDB = Master Set.empty Set.empty Map.empty Map.empty Map.empty Map.empty Map.empty
+
+emptyShardItem :: ShardItem
+emptyShardItem = ShardItem 0 Map.empty
+
+insertNested :: Int -> Int -> NestedMap -> NestedMap
+insertNested k i m = Map.insert k newInner m
+  where
+    newInner = Set.insert i $ fromMaybe Set.empty $ Map.lookup k m
 
 text2UTCTime :: String -> UTCTime -> UTCTime
 text2UTCTime t df = fromMaybe df $ getFirst $ iso <> iso' <> rfc
@@ -171,6 +205,9 @@ text2UTCTime t df = fromMaybe df $ getFirst $ iso <> iso' <> rfc
     iso' = tryParse $ iso8601DateFormat Nothing
     rfc  = tryParse rfc822DateFormat
     tryParse f = First $ parseTimeM True defaultTimeLocale f t
+
+diffMs :: UTCTime -> UTCTime -> Float
+diffMs t0 t1 = 1000 * fromRational (toRational $ diffUTCTime t1 t0)
 
 imageFromURL :: URL -> Image
 imageFromURL u = Image
@@ -221,99 +258,128 @@ $(deriveSafeCopy 0 'base ''Feed)
 $(deriveSafeCopy 0 'base ''ItemID)
 $(deriveSafeCopy 0 'base ''Item)
 $(deriveSafeCopy 0 'base ''DBStats)
-$(deriveSafeCopy 0 'base ''FeedsDB)
+$(deriveSafeCopy 0 'base ''Master)
+$(deriveSafeCopy 0 'base ''ShardItem)
 
 ------------------------------------------------------------------------------
 -- Read Queries
 ------------------------------------------------------------------------------
 
-getStats :: Query FeedsDB DBStats
+getStats :: Query Master DBStats
 getStats = do
   db <- ask
   return DBStats
-           { countCats    = M.size $ tblCats  db
-           , countFeeds   = M.size $ tblFeeds db
-           , countPersons = M.size $ tblPersons db
-           , countItems   = M.size $ tblItems db
+           { countCats    = Map.size $ tblCat    db
+           , countFeeds   = Map.size $ tblFeed   db
+           , countPersons = Map.size $ tblPerson db
+           , countItems   = Set.size $ idxItem   db
+           , countShards  = 1 + Set.size (shItem db)
            }
 
-cats2Seq :: Query FeedsDB (Seq.Seq Cat)
+cats2Seq :: Query Master (Seq.Seq Cat)
 cats2Seq = do
   db <- ask
-  return $ M.foldr (flip (Seq.|>)) Seq.empty $ tblCats db
+  return $ Map.foldr (flip (Seq.|>)) Seq.empty $ tblCat db
 
-feeds2Seq :: Query FeedsDB (Seq.Seq Feed)
+feeds2Seq :: Query Master (Seq.Seq Feed)
 feeds2Seq = do
   db <- ask
-  return $ M.foldr (flip (Seq.|>)) Seq.empty $ tblFeeds db
+  return $ Map.foldr (flip (Seq.|>)) Seq.empty $ tblFeed db
 
-lookupCat :: Int -> Query FeedsDB (Maybe Cat)
+getShItem :: Query Master Set.IntSet
+getShItem = do
+  db <- ask
+  return $ shItem db
+
+lookupCat :: Int -> Query Master (Maybe Cat)
 lookupCat k = do
   db <- ask
-  return $ M.lookup k (tblCats db)
+  return $ Map.lookup k (tblCat db)
 
-lookupFeed :: Int -> Query FeedsDB (Maybe Feed)
+lookupFeed :: Int -> Query Master (Maybe Feed)
 lookupFeed k = do
   db <- ask
-  return $ M.lookup k (tblFeeds db)
+  return $ Map.lookup k (tblFeed db)
 
-lookupPerson :: Int -> Query FeedsDB (Maybe Person)
+lookupPerson :: Int -> Query Master (Maybe Person)
 lookupPerson k = do
   db <- ask
-  return $ M.lookup k (tblPersons db)
+  return $ Map.lookup k (tblPerson db)
 
-lookupItem :: Int -> Query FeedsDB (Maybe Item)
-lookupItem k = do
+getItemShard :: ItemID -> Query Master ItemID
+getItemShard (ItemID k) = do
   db <- ask
-  return $ snd <$> M.lookupGT k (tblItems db)
+  return $ ItemID $ case Set.lookupLE k (shItem db) of
+                           Just s -> s
+                           _      -> 0
+
+mkUniqueItemID :: Item -> Query Master ItemID
+mkUniqueItemID i = do
+  db <- ask
+  return $ ItemID $ checkUniqueID (idxItem db) $ unItemID $ calcItemID i
+
+-- ShardItem
+
+lookupShardItem :: ItemID -> Query ShardItem (Maybe Item)
+lookupShardItem (ItemID k) = do
+  db <- ask
+  return $ Map.lookup k (tblItem db)
 
 ------------------------------------------------------------------------------
 -- Update Queries
 ------------------------------------------------------------------------------
 
-insertCat :: Cat -> Update FeedsDB Cat
+insertCat :: Cat -> Update Master Cat
 insertCat c = do
   db <- get
   let cid = calcCatID c
   let c' = c { catID = cid }
-  put $ db { tblCats = M.insert (unCatID cid) c' $ tblCats db }
+  put $ db { tblCat = Map.insert (unCatID cid) c' $ tblCat db }
   return c'
 
-insertFeed :: Feed -> Update FeedsDB Feed
+insertFeed :: Feed -> Update Master Feed
 insertFeed f = do
   db <- get
   let fid = calcFeedID f
   let f' = f { feedID = fid }
-  put $ db { tblFeeds = M.insert (unFeedID fid) f' $ tblFeeds db }
+  put $ db { tblFeed = Map.insert (unFeedID fid) f' $ tblFeed db }
   return f'
 
-insertPerson :: Person -> Update FeedsDB Person
+insertPerson :: Person -> Update Master Person
 insertPerson p = do
   db <- get
   let pid = calcPersonID p
   let p' = p { personID = pid }
-  put $ db { tblPersons = M.insert (unPersonID pid) p' $ tblPersons db }
+  put $ db { tblPerson = Map.insert (unPersonID pid) p' $ tblPerson db }
   return p'
 
-insertItem :: Item -> Update FeedsDB Item
-insertItem i = do
+insertMasterItem :: Item -> Update Master Item
+insertMasterItem i = do
   db <- get
-  let iid = checkUniqueID (tblItems db) $ unItemID $ calcItemID i
-  let i' = i { itemID = ItemID iid }
-  let fid = unFeedID $ itemFeedID i'
-  let mbf = M.lookup fid (tblFeeds db)
+  let iid = unItemID $ itemID i
+  let fid = unFeedID $ itemFeedID i
+  let mbf = Map.lookup fid (tblFeed db)
   let cid = unCatID $ feedCatID $ fromJust mbf
-  put db { tblItems = M.insert iid i' $ tblItems db
-         , idxFeeds = insertNested fid iid $ idxFeeds db
-         , idxCats  = case mbf of
-             Just f  -> insertNested cid iid $ idxCats db
-             Nothing -> idxCats db
+  put db { idxItem = Set.insert iid $ idxItem db
+         , ixFeedItem = insertNested fid iid $ ixFeedItem db
+         , ixCatItem  = case mbf of
+             Just f  -> insertNested cid iid $ ixCatItem db
+             Nothing -> ixCatItem db
          }
-  return i'
+  return i
 
-wipeDB :: Update FeedsDB ()
-wipeDB = put emptyDB
+wipeMaster :: Update Master ()
+wipeMaster = put emptyDB
 
+-- ShardItem
+
+insertShardItem :: Item -> Update ShardItem Item
+insertShardItem i = do
+  db <- get
+  put $ db { shItemSize = shItemSize db + 1
+           , tblItem = Map.insert (unItemID $ itemID i) i $ tblItem db
+           }
+  return i
 
 
 ------------------------------------------------------------------------------
@@ -328,7 +394,7 @@ $(deriveSafeCopy 0 'base ''GetStats)
 
 instance Method GetStats where
   type MethodResult GetStats = DBStats
-  type MethodState GetStats = FeedsDB
+  type MethodState GetStats = Master
 
 instance QueryEvent GetStats
 
@@ -340,7 +406,7 @@ $(deriveSafeCopy 0 'base ''Cats2Seq)
 
 instance Method Cats2Seq where
   type MethodResult Cats2Seq = Seq.Seq Cat
-  type MethodState Cats2Seq = FeedsDB
+  type MethodState Cats2Seq = Master
 
 instance QueryEvent Cats2Seq
 
@@ -352,9 +418,21 @@ $(deriveSafeCopy 0 'base ''Feeds2Seq)
 
 instance Method Feeds2Seq where
   type MethodResult Feeds2Seq = Seq.Seq Feed
-  type MethodState Feeds2Seq = FeedsDB
+  type MethodState Feeds2Seq = Master
 
 instance QueryEvent Feeds2Seq
+
+-- getShItem
+
+data GetShItem = GetShItem
+
+$(deriveSafeCopy 0 'base ''GetShItem)
+
+instance Method GetShItem where
+  type MethodResult GetShItem = Set.IntSet
+  type MethodState GetShItem = Master
+
+instance QueryEvent GetShItem
 
 -- lookupCat
 
@@ -364,7 +442,7 @@ $(deriveSafeCopy 0 'base ''LookupCat)
 
 instance Method LookupCat where
   type MethodResult LookupCat = Maybe Cat
-  type MethodState LookupCat = FeedsDB
+  type MethodState LookupCat = Master
 
 instance QueryEvent LookupCat
 
@@ -376,7 +454,7 @@ $(deriveSafeCopy 0 'base ''LookupFeed)
 
 instance Method LookupFeed where
   type MethodResult LookupFeed = Maybe Feed
-  type MethodState LookupFeed = FeedsDB
+  type MethodState LookupFeed = Master
 
 instance QueryEvent LookupFeed
 
@@ -388,21 +466,33 @@ $(deriveSafeCopy 0 'base ''LookupPerson)
 
 instance Method LookupPerson where
   type MethodResult LookupPerson = Maybe Person
-  type MethodState LookupPerson = FeedsDB
+  type MethodState LookupPerson = Master
 
 instance QueryEvent LookupPerson
 
--- lookupItem
+-- GetItemShard
 
-data LookupItem = LookupItem Int
+data GetItemShard = GetItemShard ItemID
 
-$(deriveSafeCopy 0 'base ''LookupItem)
+$(deriveSafeCopy 0 'base ''GetItemShard)
 
-instance Method LookupItem where
-  type MethodResult LookupItem = Maybe Item
-  type MethodState LookupItem = FeedsDB
+instance Method GetItemShard where
+  type MethodResult GetItemShard = ItemID
+  type MethodState GetItemShard = Master
 
-instance QueryEvent LookupItem
+instance QueryEvent GetItemShard
+
+-- MkUniqueItemID
+
+data MkUniqueItemID = MkUniqueItemID Item
+
+$(deriveSafeCopy 0 'base ''MkUniqueItemID)
+
+instance Method MkUniqueItemID where
+  type MethodResult MkUniqueItemID = ItemID
+  type MethodState MkUniqueItemID = Master
+
+instance QueryEvent MkUniqueItemID
 
 -- insertCat
 
@@ -412,7 +502,7 @@ $(deriveSafeCopy 0 'base ''InsertCat)
 
 instance Method InsertCat where
   type MethodResult InsertCat = Cat
-  type MethodState InsertCat = FeedsDB
+  type MethodState InsertCat = Master
 
 instance UpdateEvent InsertCat
 
@@ -424,7 +514,7 @@ $(deriveSafeCopy 0 'base ''InsertFeed)
 
 instance Method InsertFeed where
   type MethodResult InsertFeed = Feed
-  type MethodState InsertFeed = FeedsDB
+  type MethodState InsertFeed = Master
 
 instance UpdateEvent InsertFeed
 
@@ -436,49 +526,85 @@ $(deriveSafeCopy 0 'base ''InsertPerson)
 
 instance Method InsertPerson where
   type MethodResult InsertPerson = Person
-  type MethodState InsertPerson = FeedsDB
+  type MethodState InsertPerson = Master
 
 instance UpdateEvent InsertPerson
 
--- insertItem
+-- insertMasterItem
 
-data InsertItem = InsertItem Item
+data InsertMasterItem = InsertMasterItem Item
 
-$(deriveSafeCopy 0 'base ''InsertItem)
+$(deriveSafeCopy 0 'base ''InsertMasterItem)
 
-instance Method InsertItem where
-  type MethodResult InsertItem = Item
-  type MethodState InsertItem = FeedsDB
+instance Method InsertMasterItem where
+  type MethodResult InsertMasterItem = Item
+  type MethodState InsertMasterItem = Master
 
-instance UpdateEvent InsertItem
+instance UpdateEvent InsertMasterItem
 
--- wipeDB
+-- wipeMaster
 
-data WipeDB = WipeDB
+data WipeMaster = WipeMaster
 
-$(deriveSafeCopy 0 'base ''WipeDB)
+$(deriveSafeCopy 0 'base ''WipeMaster)
 
-instance Method WipeDB where
-  type MethodResult WipeDB = ()
-  type MethodState WipeDB = FeedsDB
+instance Method WipeMaster where
+  type MethodResult WipeMaster = ()
+  type MethodState WipeMaster = Master
 
-instance UpdateEvent WipeDB
+instance UpdateEvent WipeMaster
 
--- FeedsDB
+-- Master
 
-instance IsAcidic FeedsDB where
-  acidEvents = [ QueryEvent  (\ GetStats        -> getStats)
-               , QueryEvent  (\ Cats2Seq        -> cats2Seq)
-               , QueryEvent  (\ Feeds2Seq       -> feeds2Seq)
-               , QueryEvent  (\(LookupCat  k)   -> lookupCat k)
-               , QueryEvent  (\(LookupFeed k)   -> lookupFeed k)
-               , QueryEvent  (\(LookupPerson k) -> lookupPerson k)
-               , QueryEvent  (\(LookupItem k)   -> lookupItem k)
-               , UpdateEvent (\(InsertCat  c)   -> insertCat c)
-               , UpdateEvent (\(InsertFeed f)   -> insertFeed f)
-               , UpdateEvent (\(InsertPerson p) -> insertPerson p)
-               , UpdateEvent (\(InsertItem i)   -> insertItem i)
-               , UpdateEvent (\ WipeDB          -> wipeDB)
+instance IsAcidic Master where
+  acidEvents = [ QueryEvent  (\ GetStats            -> getStats)
+               , QueryEvent  (\ Cats2Seq            -> cats2Seq)
+               , QueryEvent  (\ Feeds2Seq           -> feeds2Seq)
+               , QueryEvent  (\ GetShItem           -> getShItem)
+               , QueryEvent  (\(LookupCat  k)       -> lookupCat k)
+               , QueryEvent  (\(LookupFeed k)       -> lookupFeed k)
+               , QueryEvent  (\(LookupPerson k)     -> lookupPerson k)
+               , QueryEvent  (\(GetItemShard k)     -> getItemShard k)
+               , QueryEvent  (\(MkUniqueItemID i)   -> mkUniqueItemID i)
+               , UpdateEvent (\(InsertCat  c)       -> insertCat c)
+               , UpdateEvent (\(InsertFeed f)       -> insertFeed f)
+               , UpdateEvent (\(InsertPerson p)     -> insertPerson p)
+               , UpdateEvent (\(InsertMasterItem i) -> insertMasterItem i)
+               , UpdateEvent (\ WipeMaster          -> wipeMaster)
+               ]
+
+
+
+-- lookupShardItem
+
+data LookupShardItem = LookupShardItem ItemID
+
+$(deriveSafeCopy 0 'base ''LookupShardItem)
+
+instance Method LookupShardItem where
+  type MethodResult LookupShardItem = Maybe Item
+  type MethodState LookupShardItem = ShardItem
+
+instance QueryEvent LookupShardItem
+
+-- insertShardItem
+
+data InsertShardItem = InsertShardItem Item
+
+$(deriveSafeCopy 0 'base ''InsertShardItem)
+
+instance Method InsertShardItem where
+  type MethodResult InsertShardItem = Item
+  type MethodState InsertShardItem = ShardItem
+
+instance UpdateEvent InsertShardItem
+
+
+-- ItemShard
+
+instance IsAcidic ShardItem where
+  acidEvents = [ QueryEvent  (\(LookupShardItem k) -> lookupShardItem k)
+               , UpdateEvent (\(InsertShardItem i) -> insertShardItem i)
                ]
 
 ------------------------------------------------------------------------------
@@ -494,7 +620,7 @@ class ToPerson p where
 class ToItem i where
   toItem :: i -> FeedID -> URL -> UTCTime -> (Item, [Person], [Person])
 
-addItem2DB :: ToItem i => AcidState FeedsDB -> i ->
+addItem2DB :: ToItem i => AcidState Master -> i ->
                        FeedID -> URL -> IO Item
 addItem2DB acid it fid u = do
   df <- getCurrentTime
@@ -504,9 +630,9 @@ addItem2DB acid it fid u = do
   let i' = i { itemAuthors      = as'
              , itemContributors = cs'
              }
-  update acid $ InsertItem i'
+  update acid $ InsertMasterItem i'
 
-addFeed2DB :: ToFeed f => AcidState FeedsDB -> f ->
+addFeed2DB :: ToFeed f => AcidState Master -> f ->
                        CatID -> URL -> IO Feed
 addFeed2DB acid it cid u = do
   df <- getCurrentTime
@@ -521,3 +647,54 @@ addFeed2DB acid it cid u = do
 addPerson acid p = do
   p' <- update acid $ InsertPerson p
   return $ personID p'
+
+
+------------------------------------------------------------------------------
+-- Complex queries
+------------------------------------------------------------------------------
+
+shardRoot = "data" </> "shard_"
+
+withShard s = bracket
+  (do t0 <- getCurrentTime
+      putStrLn $ "  Opening shard #" ++ sid ++ "..."
+      acid <- openLocalStateFrom (shardRoot ++ sid) emptyShardItem
+      t1 <- getCurrentTime
+      putStrLn $ "  Shard opened in " ++ show (diffMs t0 t1) ++ " ms."
+      return acid )
+  (\acid -> do
+      putStrLn $ "  Closing shard #" ++ sid ++ "..."
+      closeAcidState acid )
+  where sid = show (unItemID s)
+
+lookupItem :: AcidState Master -> Int -> IO (Maybe Item)
+lookupItem acid k = do
+  s <- query acid $ GetItemShard $ ItemID k
+  withShard s $ \acid' ->
+    query acid' $ LookupShardItem $ ItemID k
+
+insertItems :: AcidState Master -> [Item] -> IO [Item]
+insertItems acid is = do
+  iss <- forM is $ \i -> do
+    iid <- query acid $ MkUniqueItemID i
+    s   <- query acid $ GetItemShard iid
+    return (i { itemID = iid }, s)
+  let gss = groupBy (\(_,x) (_,y) -> x == y) $ sortBy (\(_,x) (_,y) -> compare x y) iss
+  gss' <- forM gss $ \gs ->
+    withShard (snd $ head gs) $ \acid' ->
+      forM gs $ \(i, _) -> do
+        update acid' $ InsertShardItem i
+        update acid $ InsertMasterItem i
+        return i
+  return $ concat gss'
+
+wipeDB :: AcidState Master -> IO ()
+wipeDB acid = do
+  ss <- query acid GetShItem
+  update acid WipeMaster
+  let ss' = 0 : Set.toList ss
+  forM_ ss' $ \s -> do
+    let sf = shardRoot ++ show s
+    ex <- doesDirectoryExist sf
+    if ex then removeDirectoryRecursive sf
+    else putStrLn $ "  Shard dir not found: " ++ sf
