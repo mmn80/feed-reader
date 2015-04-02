@@ -1,7 +1,5 @@
-{-# LANGUAGE FunctionalDependencies #-}
-{-# LANGUAGE MultiParamTypeClasses  #-}
-{-# LANGUAGE TemplateHaskell        #-}
-{-# LANGUAGE TypeFamilies           #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies    #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -18,28 +16,30 @@
 
 module FeedReader.DB
   (
-    Cat (..), CatID,    unsetCatID
-  , Feed         (..), FeedID,   unsetFeedID
-  , Person       (..), PersonID, unsetPersonID
-  , Item         (..), ItemID,   unsetItemID
+    Cat    (..), CatID,    unsetCatID
+  , Feed   (..), FeedID,   unsetFeedID
+  , Person (..), PersonID, unsetPersonID
+  , Item   (..), ItemID,   unsetItemID
   , URL, Language, Tag, Content (..)
   , Image   (..), imageFromURL
   , FeedsDB (..)
-  , Feed2DB (..)
+  , ToFeed   (..)
+  , ToPerson (..)
+  , ToItem   (..)
   , emptyDB
   , text2UTCTime
-  , getStats,       GetStats     (..), DBStats (..)
-  , lookupCat,      LookupCat    (..)
-  , lookupFeed,     LookupFeed   (..)
-  , lookupPerson,   LookupPerson (..)
-  , lookupItem,     LookupItem   (..)
-  , cats2Seq,       Cats2Seq     (..)
-  , feeds2Seq,      Feeds2Seq    (..)
-  , insertCat,      InsertCat    (..)
-  , insertFeed,     InsertFeed   (..)
-  , insertPerson,   InsertPerson   (..)
-  , insertItem,     InsertItem   (..)
-  , wipeDB,         WipeDB       (..)
+  , getStats,     GetStats     (..), DBStats (..)
+  , lookupCat,    LookupCat    (..)
+  , lookupFeed,   LookupFeed   (..)
+  , lookupPerson, LookupPerson (..)
+  , lookupItem,   LookupItem   (..)
+  , cats2Seq,     Cats2Seq     (..)
+  , feeds2Seq,    Feeds2Seq    (..)
+  , insertCat,    InsertCat    (..)
+  , insertFeed,   InsertFeed   (..)
+  , insertPerson, InsertPerson (..)
+  , insertItem,   InsertItem   (..)
+  , wipeDB,       WipeDB       (..)
   ) where
 
 import           Control.Monad.Reader  (ask)
@@ -127,15 +127,17 @@ data Item = Item
   } deriving (Show)
 
 ------------------------------------------------------------------------------
--- Conversion Class & Utilities
+-- Conversion Classes & Utilities
 ------------------------------------------------------------------------------
 
-class Feed2DB f p i | p -> f, f -> p, p -> i, i -> p where
-  person2DB :: p -> Person
-  feed2DB   :: Monad m => f -> CatID  -> URL -> UTCTime ->
-                          (Person -> m PersonID) -> m Feed
-  item2DB   :: Monad m => i -> FeedID -> URL -> UTCTime ->
-                          (Person -> m PersonID) -> m Item
+class ToFeed f where
+  toFeed :: f -> CatID -> URL -> UTCTime -> (Feed, [Person], [Person])
+
+class ToPerson p where
+  toPerson :: p -> Person
+
+class ToItem i where
+  toItem :: i -> FeedID -> URL -> UTCTime -> (Item, [Person], [Person])
 
 text2UTCTime :: String -> UTCTime -> UTCTime
 text2UTCTime t df = fromMaybe df $ getFirst $ iso <> iso' <> rfc
