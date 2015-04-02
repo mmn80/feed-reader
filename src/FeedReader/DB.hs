@@ -27,6 +27,8 @@ module FeedReader.DB
   , ToPerson (..)
   , ToItem   (..)
   , emptyDB
+  , addItem2DB
+  , addFeed2DB
   , text2UTCTime
   , getStats,     GetStats     (..), DBStats (..)
   , lookupCat,    LookupCat    (..)
@@ -53,7 +55,7 @@ import           Data.Maybe            (fromJust, fromMaybe)
 import           Data.Monoid           (First (..), getFirst, (<>))
 import           Data.SafeCopy
 import qualified Data.Sequence         as Seq
-import           Data.Time.Clock       (UTCTime)
+import           Data.Time.Clock       (UTCTime, getCurrentTime)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import           Data.Time.Format      (defaultTimeLocale, iso8601DateFormat,
                                         parseTimeM, rfc822DateFormat)
@@ -127,17 +129,40 @@ data Item = Item
   } deriving (Show)
 
 ------------------------------------------------------------------------------
--- Conversion Classes & Utilities
+-- DataBase Index Types
 ------------------------------------------------------------------------------
 
-class ToFeed f where
-  toFeed :: f -> CatID -> URL -> UTCTime -> (Feed, [Person], [Person])
+type NestedMap = M.IntMap Set.IntSet
 
-class ToPerson p where
-  toPerson :: p -> Person
+insertNested :: Int -> Int -> NestedMap -> NestedMap
+insertNested k i m = M.insert k newInner m
+  where
+    newInner = Set.insert i $ fromMaybe Set.empty $ M.lookup k m
 
-class ToItem i where
-  toItem :: i -> FeedID -> URL -> UTCTime -> (Item, [Person], [Person])
+data FeedsDB = FeedsDB {
+    tblCats    :: !(M.IntMap Cat)
+  , tblFeeds   :: !(M.IntMap Feed)
+  , tblPersons :: !(M.IntMap Person)
+  , tblItems   :: !(M.IntMap Item)
+  , idxCats    :: !NestedMap
+  , idxFeeds   :: !NestedMap
+  }
+
+emptyDB = FeedsDB M.empty M.empty M.empty M.empty M.empty M.empty
+
+checkUniqueID idx x = if M.notMember x idx then x
+                      else checkUniqueID idx (x + 1)
+
+data DBStats = DBStats
+  { countCats    :: Int
+  , countFeeds   :: Int
+  , countPersons :: Int
+  , countItems   :: Int
+  }
+
+------------------------------------------------------------------------------
+-- Utilities
+------------------------------------------------------------------------------
 
 text2UTCTime :: String -> UTCTime -> UTCTime
 text2UTCTime t df = fromMaybe df $ getFirst $ iso <> iso' <> rfc
@@ -180,38 +205,6 @@ calcPersonID p = PersonID $ hash $ personName p ++ personEmail p
 
 unsetPersonID :: PersonID
 unsetPersonID = PersonID 0
-
-------------------------------------------------------------------------------
--- DataBase Index Types
-------------------------------------------------------------------------------
-
-type NestedMap = M.IntMap Set.IntSet
-
-insertNested :: Int -> Int -> NestedMap -> NestedMap
-insertNested k i m = M.insert k newInner m
-  where
-    newInner = Set.insert i $ fromMaybe Set.empty $ M.lookup k m
-
-data FeedsDB = FeedsDB {
-    tblCats    :: !(M.IntMap Cat)
-  , tblFeeds   :: !(M.IntMap Feed)
-  , tblPersons :: !(M.IntMap Person)
-  , tblItems   :: !(M.IntMap Item)
-  , idxCats    :: !NestedMap
-  , idxFeeds   :: !NestedMap
-  }
-
-emptyDB = FeedsDB M.empty M.empty M.empty M.empty M.empty M.empty
-
-checkUniqueID idx x = if M.notMember x idx then x
-                      else checkUniqueID idx (x + 1)
-
-data DBStats = DBStats
-  { countCats    :: Int
-  , countFeeds   :: Int
-  , countPersons :: Int
-  , countItems   :: Int
-  }
 
 ------------------------------------------------------------------------------
 -- SafeCopy Instances
@@ -487,3 +480,44 @@ instance IsAcidic FeedsDB where
                , UpdateEvent (\(InsertItem i)   -> insertItem i)
                , UpdateEvent (\ WipeDB          -> wipeDB)
                ]
+
+------------------------------------------------------------------------------
+-- Conversion Classes and Functions
+------------------------------------------------------------------------------
+
+class ToFeed f where
+  toFeed :: f -> CatID -> URL -> UTCTime -> (Feed, [Person], [Person])
+
+class ToPerson p where
+  toPerson :: p -> Person
+
+class ToItem i where
+  toItem :: i -> FeedID -> URL -> UTCTime -> (Item, [Person], [Person])
+
+addItem2DB :: ToItem i => AcidState FeedsDB -> i ->
+                       FeedID -> URL -> IO Item
+addItem2DB acid it fid u = do
+  df <- getCurrentTime
+  let (i, as, cs) = toItem it fid u df
+  as' <- sequence $ addPerson acid <$> as
+  cs' <- sequence $ addPerson acid <$> cs
+  let i' = i { itemAuthors      = as'
+             , itemContributors = cs'
+             }
+  update acid $ InsertItem i'
+
+addFeed2DB :: ToFeed f => AcidState FeedsDB -> f ->
+                       CatID -> URL -> IO Feed
+addFeed2DB acid it cid u = do
+  df <- getCurrentTime
+  let (f, as, cs) = toFeed it cid u df
+  as' <- sequence $ addPerson acid <$> as
+  cs' <- sequence $ addPerson acid <$> cs
+  let f' = f { feedAuthors      = as'
+             , feedContributors = cs'
+             }
+  update acid $ InsertFeed f'
+
+addPerson acid p = do
+  p' <- update acid $ InsertPerson p
+  return $ personID p'

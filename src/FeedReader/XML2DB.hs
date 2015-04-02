@@ -1,50 +1,16 @@
 {-# LANGUAGE LambdaCase #-}
 
 module FeedReader.XML2DB
-  (
-    addItem
-  , addFeed
-  ) where
+  () where
 
 import           Control.Monad    (sequence)
-import           Data.Acid
 import           Data.Foldable    (fold)
 import           Data.Maybe       (fromMaybe)
 import           Data.Monoid      (First (..), getFirst, (<>))
-import           Data.Time.Clock  (getCurrentTime)
-import           Data.Time.Format (parseTimeM)
 import           FeedReader.DB    as DB
 import qualified Text.Atom.Feed   as A
 import qualified Text.RSS.Syntax  as R
 import qualified Text.RSS1.Syntax as R1
-
-addItem :: ToItem i => AcidState DB.FeedsDB -> i ->
-                       DB.FeedID -> DB.URL -> IO DB.Item
-addItem acid it fid u = do
-  df <- getCurrentTime
-  let (i, as, cs) = DB.toItem it fid u df
-  as' <- sequence $ addPerson acid <$> as
-  cs' <- sequence $ addPerson acid <$> cs
-  let i' = i { itemAuthors      = as'
-             , itemContributors = cs'
-             }
-  update acid $ DB.InsertItem i'
-
-addFeed :: ToFeed f => AcidState DB.FeedsDB -> f ->
-                       DB.CatID -> DB.URL -> IO DB.Feed
-addFeed acid it cid u = do
-  df <- getCurrentTime
-  let (f, as, cs) = DB.toFeed it cid u df
-  as' <- sequence $ addPerson acid <$> as
-  cs' <- sequence $ addPerson acid <$> cs
-  let f' = f { feedAuthors      = as'
-             , feedContributors = cs'
-             }
-  update acid $ DB.InsertFeed f'
-
-addPerson acid p = do
-  p' <- update acid $ DB.InsertPerson p
-  return $ DB.personID p'
 
 
 ------------------------------------------------------------------------------
