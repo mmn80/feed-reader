@@ -139,8 +139,8 @@ insertNested k i m = M.insert k newInner m
   where
     newInner = Set.insert i $ fromMaybe Set.empty $ M.lookup k m
 
-data FeedsDB = FeedsDB {
-    tblCats    :: !(M.IntMap Cat)
+data FeedsDB = FeedsDB
+  { tblCats    :: !(M.IntMap Cat)
   , tblFeeds   :: !(M.IntMap Feed)
   , tblPersons :: !(M.IntMap Person)
   , tblItems   :: !(M.IntMap Item)

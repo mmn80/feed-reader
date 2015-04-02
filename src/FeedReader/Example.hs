@@ -26,7 +26,8 @@ helpMessage = do
   yield "  get t k : prints the item with ID == k"
   yield "          : t is the table, one of 'cat', 'feed', 'person' or 'item'"
   yield "  gen t n : inserts n random records into the DB (t as above)"
-  yield "  snap    : creates an acid-state checkpoint"
+  yield "  snap    : creates a checkpoint"
+  yield "  archive : archives the unused log files"
   yield "  clean   : wipes clean the database"
   -- yield "  date d  : shows the result of parsing a RSS/Atom date field"
   -- yield "  rand l r: generates a random string of length in range l..r"
@@ -35,11 +36,12 @@ helpMessage = do
 processCommand acid = do
   args <- words <$> await
   case head args of
-    "help"  -> helpMessage
-    "stats" -> checkArgs 0 args acid cmdStats
-    "get"   -> checkArgs 2 args acid cmdGet
-    "gen"   -> checkArgs 2 args acid cmdGen
-    "snap"  -> checkArgs 0 args acid cmdSnap
+    "help"    -> helpMessage
+    "stats"   -> checkArgs 0 args acid cmdStats
+    "get"     -> checkArgs 2 args acid cmdGet
+    "gen"     -> checkArgs 2 args acid cmdGen
+    "snap"    -> checkArgs 0 args acid cmdSnap
+    "archive" -> checkArgs 0 args acid cmdArchive
     -- "date"  -> checkArgs 1 args acid cmdDate
     -- "rand"  -> checkArgs 2 args acid cmdRand
     "clean" -> checkArgs 0 args acid cmdClean
@@ -179,6 +181,10 @@ cmdGen acid args = timed $ do
 cmdSnap acid args = timed $ do
   liftBase $ createCheckpoint acid
   yield "Checkpoint created."
+
+cmdArchive acid args = timed $ do
+  liftBase $ createArchive acid
+  yield "Archive created."
 
 cmdClean acid args = timed $ do
   yield "Are you sure? (y/n)"
