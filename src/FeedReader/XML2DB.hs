@@ -3,15 +3,15 @@
 module FeedReader.XML2DB
   () where
 
-import           Control.Monad    (sequence)
-import           Data.Foldable    (fold)
-import           Data.Maybe       (fromMaybe)
-import           Data.Monoid      (First (..), getFirst, (<>))
-import           FeedReader.DB    as DB
-import qualified Text.Atom.Feed   as A
-import qualified Text.RSS.Syntax  as R
-import qualified Text.RSS1.Syntax as R1
-
+import           Control.Applicative ((<|>))
+import           Control.Monad       (sequence)
+import           Data.Foldable       (fold)
+import           Data.Maybe          (fromJust, fromMaybe)
+import           Data.Monoid         ((<>))
+import           FeedReader.DB       as DB
+import qualified Text.Atom.Feed      as A
+import qualified Text.RSS.Syntax     as R
+import qualified Text.RSS1.Syntax    as R1
 
 ------------------------------------------------------------------------------
 -- Feed2DB instance for Atom
@@ -29,8 +29,9 @@ eContent2DB = \case
   A.HTMLContent       s -> DB.HTML s
   A.XHTMLContent      e -> DB.XHTML $ show e
   A.MixedContent   j cs -> DB.Text $ fromMaybe "" j ++ foldMap show cs
-  A.ExternalContent j u -> DB.Text $ fold $ fromMaybe [""] $
-    sequence [Just "MediaType: ", j, Just "\n"] <> Just ["URL: ", u]
+  A.ExternalContent j u -> DB.Text $ (if null j then ""
+                                      else "MediaType: " ++ fromJust j ++ "\n")
+                                      ++ "URL: " ++ u
 
 tryEContent2DB c = eContent2DB $ fromMaybe (A.TextContent "") c
 
@@ -54,8 +55,7 @@ instance DB.ToFeed A.Feed where
       , feedAuthors      = []
       , feedContributors = []
       , feedRights       = tryContent2DB $ A.feedRights f
-      , feedImage        = DB.imageFromURL <$> getFirst
-                             (First (A.feedLogo f) <> First (A.feedIcon f))
+      , feedImage        = DB.imageFromURL <$> (A.feedLogo f <|> A.feedIcon f)
       , feedUpdated      = DB.text2UTCTime (A.feedUpdated f) df
       }
     , DB.toPerson <$> A.feedAuthors f

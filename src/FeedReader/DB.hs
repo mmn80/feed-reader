@@ -29,49 +29,44 @@ module FeedReader.DB
   , Tag
   , Content (..)
   , Image (..)
-  , Master (..)
+  , Stats (..)
+  , Handle
 -- utils
   , imageFromURL
   , unsetItemID
   , unsetPersonID
   , unsetFeedID
   , unsetCatID
-  , emptyDB
   , text2UTCTime
   , diffMs
 -- conversion classes
   , ToFeed (..)
   , ToPerson (..)
   , ToItem (..)
-  , addItem2DB
-  , addFeed2DB
--- master read queries
-  , DBStats (..)
-  , getStats
-  , GetStats (..)
-  , lookupCat
-  , LookupCat (..)
-  , lookupFeed
-  , LookupFeed (..)
-  , lookupPerson
-  , LookupPerson (..)
-  , cats2Seq
-  , Cats2Seq (..)
-  , feeds2Seq
-  , Feeds2Seq (..)
--- master update queries
-  , insertCat
-  , InsertCat (..)
-  , insertFeed
-  , InsertFeed (..)
-  , insertPerson
-  , InsertPerson (..)
--- complex queries
-  , lookupItem
-  , insertItems
+  , addItemConv
+  , addFeedConv
+-- main
+  , open
+  , close
+  , checkpoint
+  , archive
   , wipeDB
+-- read queries
+  , getStats
+  , getCat
+  , getFeed
+  , getPerson
+  , getItem
+  , getCats
+  , getFeeds
+-- update queries
+  , addCat
+  , addFeed
+  , addPerson
+  , addItems
   ) where
 
+import           Control.Applicative   ((<|>))
 import           Control.Exception     (bracket)
 import           Control.Monad         (forM, forM_)
 import           Control.Monad.Reader  (ask)
@@ -83,14 +78,15 @@ import qualified Data.IntMap           as Map
 import qualified Data.IntSet           as Set
 import           Data.List             (groupBy, sortBy)
 import           Data.Maybe            (fromJust, fromMaybe)
-import           Data.Monoid           (First (..), getFirst, (<>))
+import           Data.Monoid           ((<>))
 import           Data.SafeCopy
 import qualified Data.Sequence         as Seq
 import           Data.Time.Clock       (UTCTime, diffUTCTime, getCurrentTime)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import           Data.Time.Format      (defaultTimeLocale, iso8601DateFormat,
                                         parseTimeM, rfc822DateFormat)
-import           System.Directory      (doesDirectoryExist, removeDirectoryRecursive)
+import           System.Directory      (doesDirectoryExist,
+                                        removeDirectoryRecursive)
 import           System.FilePath       ((</>))
 
 type URL      = String
@@ -171,7 +167,21 @@ data ShardItem = ShardItem
   , tblItem    :: !(Map.IntMap Item)
   }
 
-data DBStats = DBStats
+data DBState = DBState
+  { rootDir :: FilePath
+  , master  :: AcidState Master
+  , shards  :: Map.IntMap (AcidState ShardItem)
+  }
+
+instance Eq DBState where
+  DBState r1 _ _ == DBState r2 _ _ = r1 == r2
+
+instance Show DBState where
+  show (DBState r1 _ _) = r1
+
+newtype Handle = Handle { unHandle :: DBState } deriving (Eq, Show)
+
+data Stats = Stats
   { countCats    :: Int
   , countFeeds   :: Int
   , countPersons :: Int
@@ -199,12 +209,12 @@ insertNested k i m = Map.insert k newInner m
     newInner = Set.insert i $ fromMaybe Set.empty $ Map.lookup k m
 
 text2UTCTime :: String -> UTCTime -> UTCTime
-text2UTCTime t df = fromMaybe df $ getFirst $ iso <> iso' <> rfc
+text2UTCTime t df = fromMaybe df $ iso <|> iso' <|> rfc
   where
     iso  = tryParse $ iso8601DateFormat $ Just "%H:%M:%S"
     iso' = tryParse $ iso8601DateFormat Nothing
     rfc  = tryParse rfc822DateFormat
-    tryParse f = First $ parseTimeM True defaultTimeLocale f t
+    tryParse f = parseTimeM True defaultTimeLocale f t
 
 diffMs :: UTCTime -> UTCTime -> Float
 diffMs t0 t1 = 1000 * fromRational (toRational $ diffUTCTime t1 t0)
@@ -243,6 +253,24 @@ calcPersonID p = PersonID $ hash $ personName p ++ personEmail p
 unsetPersonID :: PersonID
 unsetPersonID = PersonID 0
 
+mquery  h = query  (master $ unHandle h)
+
+mupdate h = update (master $ unHandle h)
+
+shardPath :: Handle -> ItemID -> FilePath
+shardPath h i = rootDir (unHandle h) </> "shard_" ++ show (unItemID i)
+
+withShard h s = bracket
+  (do t0 <- getCurrentTime
+      putStrLn $ "  Opening shard #" ++ show (unItemID s) ++ "..."
+      acid <- openLocalStateFrom (shardPath h s) emptyShardItem
+      t1 <- getCurrentTime
+      putStrLn $ "  Shard opened in " ++ show (diffMs t0 t1) ++ " ms."
+      return acid )
+  (\acid -> do
+      putStrLn $ "  Closing shard #" ++ show (unItemID s) ++ "..."
+      closeAcidState acid )
+
 ------------------------------------------------------------------------------
 -- SafeCopy Instances
 ------------------------------------------------------------------------------
@@ -257,7 +285,7 @@ $(deriveSafeCopy 0 'base ''FeedID)
 $(deriveSafeCopy 0 'base ''Feed)
 $(deriveSafeCopy 0 'base ''ItemID)
 $(deriveSafeCopy 0 'base ''Item)
-$(deriveSafeCopy 0 'base ''DBStats)
+$(deriveSafeCopy 0 'base ''Stats)
 $(deriveSafeCopy 0 'base ''Master)
 $(deriveSafeCopy 0 'base ''ShardItem)
 
@@ -265,10 +293,10 @@ $(deriveSafeCopy 0 'base ''ShardItem)
 -- Read Queries
 ------------------------------------------------------------------------------
 
-getStats :: Query Master DBStats
-getStats = do
+getStatsAcid :: Query Master Stats
+getStatsAcid = do
   db <- ask
-  return DBStats
+  return Stats
            { countCats    = Map.size $ tblCat    db
            , countFeeds   = Map.size $ tblFeed   db
            , countPersons = Map.size $ tblPerson db
@@ -276,52 +304,52 @@ getStats = do
            , countShards  = 1 + Set.size (shItem db)
            }
 
-cats2Seq :: Query Master (Seq.Seq Cat)
-cats2Seq = do
+getCatsAcid :: Query Master (Seq.Seq Cat)
+getCatsAcid = do
   db <- ask
   return $ Map.foldr (flip (Seq.|>)) Seq.empty $ tblCat db
 
-feeds2Seq :: Query Master (Seq.Seq Feed)
-feeds2Seq = do
+getFeedsAcid :: Query Master (Seq.Seq Feed)
+getFeedsAcid = do
   db <- ask
   return $ Map.foldr (flip (Seq.|>)) Seq.empty $ tblFeed db
 
-getShItem :: Query Master Set.IntSet
-getShItem = do
+getShItemAcid :: Query Master Set.IntSet
+getShItemAcid = do
   db <- ask
   return $ shItem db
 
-lookupCat :: Int -> Query Master (Maybe Cat)
-lookupCat k = do
+getCatAcid :: Int -> Query Master (Maybe Cat)
+getCatAcid k = do
   db <- ask
   return $ Map.lookup k (tblCat db)
 
-lookupFeed :: Int -> Query Master (Maybe Feed)
-lookupFeed k = do
+getFeedAcid :: Int -> Query Master (Maybe Feed)
+getFeedAcid k = do
   db <- ask
   return $ Map.lookup k (tblFeed db)
 
-lookupPerson :: Int -> Query Master (Maybe Person)
-lookupPerson k = do
+getPersonAcid :: Int -> Query Master (Maybe Person)
+getPersonAcid k = do
   db <- ask
   return $ Map.lookup k (tblPerson db)
 
-getItemShard :: ItemID -> Query Master ItemID
-getItemShard (ItemID k) = do
+getItemShardAcid :: ItemID -> Query Master ItemID
+getItemShardAcid (ItemID k) = do
   db <- ask
   return $ ItemID $ case Set.lookupLE k (shItem db) of
                            Just s -> s
                            _      -> 0
 
-mkUniqueItemID :: Item -> Query Master ItemID
-mkUniqueItemID i = do
+mkUniqueIDAcid :: Item -> Query Master ItemID
+mkUniqueIDAcid i = do
   db <- ask
   return $ ItemID $ checkUniqueID (idxItem db) $ unItemID $ calcItemID i
 
 -- ShardItem
 
-lookupShardItem :: ItemID -> Query ShardItem (Maybe Item)
-lookupShardItem (ItemID k) = do
+getShardItemAcid :: ItemID -> Query ShardItem (Maybe Item)
+getShardItemAcid (ItemID k) = do
   db <- ask
   return $ Map.lookup k (tblItem db)
 
@@ -329,32 +357,32 @@ lookupShardItem (ItemID k) = do
 -- Update Queries
 ------------------------------------------------------------------------------
 
-insertCat :: Cat -> Update Master Cat
-insertCat c = do
+addCatAcid :: Cat -> Update Master Cat
+addCatAcid c = do
   db <- get
   let cid = calcCatID c
   let c' = c { catID = cid }
   put $ db { tblCat = Map.insert (unCatID cid) c' $ tblCat db }
   return c'
 
-insertFeed :: Feed -> Update Master Feed
-insertFeed f = do
+addFeedAcid :: Feed -> Update Master Feed
+addFeedAcid f = do
   db <- get
   let fid = calcFeedID f
   let f' = f { feedID = fid }
   put $ db { tblFeed = Map.insert (unFeedID fid) f' $ tblFeed db }
   return f'
 
-insertPerson :: Person -> Update Master Person
-insertPerson p = do
+addPersonAcid :: Person -> Update Master Person
+addPersonAcid p = do
   db <- get
   let pid = calcPersonID p
   let p' = p { personID = pid }
   put $ db { tblPerson = Map.insert (unPersonID pid) p' $ tblPerson db }
   return p'
 
-insertMasterItem :: Item -> Update Master Item
-insertMasterItem i = do
+addMasterItemAcid :: Item -> Update Master Item
+addMasterItemAcid i = do
   db <- get
   let iid = unItemID $ itemID i
   let fid = unFeedID $ itemFeedID i
@@ -368,13 +396,13 @@ insertMasterItem i = do
          }
   return i
 
-wipeMaster :: Update Master ()
-wipeMaster = put emptyDB
+wipeMasterAcid :: Update Master ()
+wipeMasterAcid = put emptyDB
 
 -- ShardItem
 
-insertShardItem :: Item -> Update ShardItem Item
-insertShardItem i = do
+addShardItemAcid :: Item -> Update ShardItem Item
+addShardItemAcid i = do
   db <- get
   put $ db { shItemSize = shItemSize db + 1
            , tblItem = Map.insert (unItemID $ itemID i) i $ tblItem db
@@ -386,225 +414,225 @@ insertShardItem i = do
 -- makeAcidic
 ------------------------------------------------------------------------------
 
--- getStats
+-- getStatsAcid
 
-data GetStats = GetStats
+data GetStatsAcid = GetStatsAcid
 
-$(deriveSafeCopy 0 'base ''GetStats)
+$(deriveSafeCopy 0 'base ''GetStatsAcid)
 
-instance Method GetStats where
-  type MethodResult GetStats = DBStats
-  type MethodState GetStats = Master
+instance Method GetStatsAcid where
+  type MethodResult GetStatsAcid = Stats
+  type MethodState GetStatsAcid = Master
 
-instance QueryEvent GetStats
+instance QueryEvent GetStatsAcid
 
--- cats2Seq
+-- getCatsAcid
 
-data Cats2Seq = Cats2Seq
+data GetCatsAcid = GetCatsAcid
 
-$(deriveSafeCopy 0 'base ''Cats2Seq)
+$(deriveSafeCopy 0 'base ''GetCatsAcid)
 
-instance Method Cats2Seq where
-  type MethodResult Cats2Seq = Seq.Seq Cat
-  type MethodState Cats2Seq = Master
+instance Method GetCatsAcid where
+  type MethodResult GetCatsAcid = Seq.Seq Cat
+  type MethodState GetCatsAcid = Master
 
-instance QueryEvent Cats2Seq
+instance QueryEvent GetCatsAcid
 
--- feeds2Seq
+-- getFeedsAcid
 
-data Feeds2Seq = Feeds2Seq
+data GetFeedsAcid = GetFeedsAcid
 
-$(deriveSafeCopy 0 'base ''Feeds2Seq)
+$(deriveSafeCopy 0 'base ''GetFeedsAcid)
 
-instance Method Feeds2Seq where
-  type MethodResult Feeds2Seq = Seq.Seq Feed
-  type MethodState Feeds2Seq = Master
+instance Method GetFeedsAcid where
+  type MethodResult GetFeedsAcid = Seq.Seq Feed
+  type MethodState GetFeedsAcid = Master
 
-instance QueryEvent Feeds2Seq
+instance QueryEvent GetFeedsAcid
 
--- getShItem
+-- getShItemAcid
 
-data GetShItem = GetShItem
+data GetShItemAcid = GetShItemAcid
 
-$(deriveSafeCopy 0 'base ''GetShItem)
+$(deriveSafeCopy 0 'base ''GetShItemAcid)
 
-instance Method GetShItem where
-  type MethodResult GetShItem = Set.IntSet
-  type MethodState GetShItem = Master
+instance Method GetShItemAcid where
+  type MethodResult GetShItemAcid = Set.IntSet
+  type MethodState GetShItemAcid = Master
 
-instance QueryEvent GetShItem
+instance QueryEvent GetShItemAcid
 
--- lookupCat
+-- getCatAcid
 
-data LookupCat = LookupCat Int
+data GetCatAcid = GetCatAcid Int
 
-$(deriveSafeCopy 0 'base ''LookupCat)
+$(deriveSafeCopy 0 'base ''GetCatAcid)
 
-instance Method LookupCat where
-  type MethodResult LookupCat = Maybe Cat
-  type MethodState LookupCat = Master
+instance Method GetCatAcid where
+  type MethodResult GetCatAcid = Maybe Cat
+  type MethodState GetCatAcid = Master
 
-instance QueryEvent LookupCat
+instance QueryEvent GetCatAcid
 
--- lookupFeed
+-- getFeedAcid
 
-data LookupFeed = LookupFeed Int
+data GetFeedAcid = GetFeedAcid Int
 
-$(deriveSafeCopy 0 'base ''LookupFeed)
+$(deriveSafeCopy 0 'base ''GetFeedAcid)
 
-instance Method LookupFeed where
-  type MethodResult LookupFeed = Maybe Feed
-  type MethodState LookupFeed = Master
+instance Method GetFeedAcid where
+  type MethodResult GetFeedAcid = Maybe Feed
+  type MethodState GetFeedAcid = Master
 
-instance QueryEvent LookupFeed
+instance QueryEvent GetFeedAcid
 
--- lookupPerson
+-- getPersonAcid
 
-data LookupPerson = LookupPerson Int
+data GetPersonAcid = GetPersonAcid Int
 
-$(deriveSafeCopy 0 'base ''LookupPerson)
+$(deriveSafeCopy 0 'base ''GetPersonAcid)
 
-instance Method LookupPerson where
-  type MethodResult LookupPerson = Maybe Person
-  type MethodState LookupPerson = Master
+instance Method GetPersonAcid where
+  type MethodResult GetPersonAcid = Maybe Person
+  type MethodState GetPersonAcid = Master
 
-instance QueryEvent LookupPerson
+instance QueryEvent GetPersonAcid
 
--- GetItemShard
+-- GetItemShardAcid
 
-data GetItemShard = GetItemShard ItemID
+data GetItemShardAcid = GetItemShardAcid ItemID
 
-$(deriveSafeCopy 0 'base ''GetItemShard)
+$(deriveSafeCopy 0 'base ''GetItemShardAcid)
 
-instance Method GetItemShard where
-  type MethodResult GetItemShard = ItemID
-  type MethodState GetItemShard = Master
+instance Method GetItemShardAcid where
+  type MethodResult GetItemShardAcid = ItemID
+  type MethodState GetItemShardAcid = Master
 
-instance QueryEvent GetItemShard
+instance QueryEvent GetItemShardAcid
 
--- MkUniqueItemID
+-- MkUniqueIDAcid
 
-data MkUniqueItemID = MkUniqueItemID Item
+data MkUniqueIDAcid = MkUniqueIDAcid Item
 
-$(deriveSafeCopy 0 'base ''MkUniqueItemID)
+$(deriveSafeCopy 0 'base ''MkUniqueIDAcid)
 
-instance Method MkUniqueItemID where
-  type MethodResult MkUniqueItemID = ItemID
-  type MethodState MkUniqueItemID = Master
+instance Method MkUniqueIDAcid where
+  type MethodResult MkUniqueIDAcid = ItemID
+  type MethodState MkUniqueIDAcid = Master
 
-instance QueryEvent MkUniqueItemID
+instance QueryEvent MkUniqueIDAcid
 
--- insertCat
+-- addCatAcid
 
-data InsertCat = InsertCat Cat
+data AddCatAcid = AddCatAcid Cat
 
-$(deriveSafeCopy 0 'base ''InsertCat)
+$(deriveSafeCopy 0 'base ''AddCatAcid)
 
-instance Method InsertCat where
-  type MethodResult InsertCat = Cat
-  type MethodState InsertCat = Master
+instance Method AddCatAcid where
+  type MethodResult AddCatAcid = Cat
+  type MethodState AddCatAcid = Master
 
-instance UpdateEvent InsertCat
+instance UpdateEvent AddCatAcid
 
--- insertFeed
+-- addFeedAcid
 
-data InsertFeed = InsertFeed Feed
+data AddFeedAcid = AddFeedAcid Feed
 
-$(deriveSafeCopy 0 'base ''InsertFeed)
+$(deriveSafeCopy 0 'base ''AddFeedAcid)
 
-instance Method InsertFeed where
-  type MethodResult InsertFeed = Feed
-  type MethodState InsertFeed = Master
+instance Method AddFeedAcid where
+  type MethodResult AddFeedAcid = Feed
+  type MethodState AddFeedAcid = Master
 
-instance UpdateEvent InsertFeed
+instance UpdateEvent AddFeedAcid
 
--- insertPerson
+-- addPersonAcid
 
-data InsertPerson = InsertPerson Person
+data AddPersonAcid = AddPersonAcid Person
 
-$(deriveSafeCopy 0 'base ''InsertPerson)
+$(deriveSafeCopy 0 'base ''AddPersonAcid)
 
-instance Method InsertPerson where
-  type MethodResult InsertPerson = Person
-  type MethodState InsertPerson = Master
+instance Method AddPersonAcid where
+  type MethodResult AddPersonAcid = Person
+  type MethodState AddPersonAcid = Master
 
-instance UpdateEvent InsertPerson
+instance UpdateEvent AddPersonAcid
 
--- insertMasterItem
+-- addMasterItemAcid
 
-data InsertMasterItem = InsertMasterItem Item
+data AddMasterItemAcid = AddMasterItemAcid Item
 
-$(deriveSafeCopy 0 'base ''InsertMasterItem)
+$(deriveSafeCopy 0 'base ''AddMasterItemAcid)
 
-instance Method InsertMasterItem where
-  type MethodResult InsertMasterItem = Item
-  type MethodState InsertMasterItem = Master
+instance Method AddMasterItemAcid where
+  type MethodResult AddMasterItemAcid = Item
+  type MethodState AddMasterItemAcid = Master
 
-instance UpdateEvent InsertMasterItem
+instance UpdateEvent AddMasterItemAcid
 
--- wipeMaster
+-- wipeMasterAcid
 
-data WipeMaster = WipeMaster
+data WipeMasterAcid = WipeMasterAcid
 
-$(deriveSafeCopy 0 'base ''WipeMaster)
+$(deriveSafeCopy 0 'base ''WipeMasterAcid)
 
-instance Method WipeMaster where
-  type MethodResult WipeMaster = ()
-  type MethodState WipeMaster = Master
+instance Method WipeMasterAcid where
+  type MethodResult WipeMasterAcid = ()
+  type MethodState WipeMasterAcid = Master
 
-instance UpdateEvent WipeMaster
+instance UpdateEvent WipeMasterAcid
 
 -- Master
 
 instance IsAcidic Master where
-  acidEvents = [ QueryEvent  (\ GetStats            -> getStats)
-               , QueryEvent  (\ Cats2Seq            -> cats2Seq)
-               , QueryEvent  (\ Feeds2Seq           -> feeds2Seq)
-               , QueryEvent  (\ GetShItem           -> getShItem)
-               , QueryEvent  (\(LookupCat  k)       -> lookupCat k)
-               , QueryEvent  (\(LookupFeed k)       -> lookupFeed k)
-               , QueryEvent  (\(LookupPerson k)     -> lookupPerson k)
-               , QueryEvent  (\(GetItemShard k)     -> getItemShard k)
-               , QueryEvent  (\(MkUniqueItemID i)   -> mkUniqueItemID i)
-               , UpdateEvent (\(InsertCat  c)       -> insertCat c)
-               , UpdateEvent (\(InsertFeed f)       -> insertFeed f)
-               , UpdateEvent (\(InsertPerson p)     -> insertPerson p)
-               , UpdateEvent (\(InsertMasterItem i) -> insertMasterItem i)
-               , UpdateEvent (\ WipeMaster          -> wipeMaster)
+  acidEvents = [ QueryEvent  (\ GetStatsAcid         -> getStatsAcid)
+               , QueryEvent  (\ GetCatsAcid          -> getCatsAcid)
+               , QueryEvent  (\ GetFeedsAcid         -> getFeedsAcid)
+               , QueryEvent  (\ GetShItemAcid        -> getShItemAcid)
+               , QueryEvent  (\(GetCatAcid  k)       -> getCatAcid k)
+               , QueryEvent  (\(GetFeedAcid k)       -> getFeedAcid k)
+               , QueryEvent  (\(GetPersonAcid k)     -> getPersonAcid k)
+               , QueryEvent  (\(GetItemShardAcid k)  -> getItemShardAcid k)
+               , QueryEvent  (\(MkUniqueIDAcid i)    -> mkUniqueIDAcid i)
+               , UpdateEvent (\(AddCatAcid  c)       -> addCatAcid c)
+               , UpdateEvent (\(AddFeedAcid f)       -> addFeedAcid f)
+               , UpdateEvent (\(AddPersonAcid p)     -> addPersonAcid p)
+               , UpdateEvent (\(AddMasterItemAcid i) -> addMasterItemAcid i)
+               , UpdateEvent (\ WipeMasterAcid       -> wipeMasterAcid)
                ]
 
 
 
--- lookupShardItem
+-- getShardItemAcid
 
-data LookupShardItem = LookupShardItem ItemID
+data GetShardItemAcid = GetShardItemAcid ItemID
 
-$(deriveSafeCopy 0 'base ''LookupShardItem)
+$(deriveSafeCopy 0 'base ''GetShardItemAcid)
 
-instance Method LookupShardItem where
-  type MethodResult LookupShardItem = Maybe Item
-  type MethodState LookupShardItem = ShardItem
+instance Method GetShardItemAcid where
+  type MethodResult GetShardItemAcid = Maybe Item
+  type MethodState GetShardItemAcid = ShardItem
 
-instance QueryEvent LookupShardItem
+instance QueryEvent GetShardItemAcid
 
--- insertShardItem
+-- addShardItemAcid
 
-data InsertShardItem = InsertShardItem Item
+data AddShardItemAcid = AddShardItemAcid Item
 
-$(deriveSafeCopy 0 'base ''InsertShardItem)
+$(deriveSafeCopy 0 'base ''AddShardItemAcid)
 
-instance Method InsertShardItem where
-  type MethodResult InsertShardItem = Item
-  type MethodState InsertShardItem = ShardItem
+instance Method AddShardItemAcid where
+  type MethodResult AddShardItemAcid = Item
+  type MethodState AddShardItemAcid = ShardItem
 
-instance UpdateEvent InsertShardItem
+instance UpdateEvent AddShardItemAcid
 
 
 -- ItemShard
 
 instance IsAcidic ShardItem where
-  acidEvents = [ QueryEvent  (\(LookupShardItem k) -> lookupShardItem k)
-               , UpdateEvent (\(InsertShardItem i) -> insertShardItem i)
+  acidEvents = [ QueryEvent  (\(GetShardItemAcid k) -> getShardItemAcid k)
+               , UpdateEvent (\(AddShardItemAcid i) -> addShardItemAcid i)
                ]
 
 ------------------------------------------------------------------------------
@@ -620,81 +648,107 @@ class ToPerson p where
 class ToItem i where
   toItem :: i -> FeedID -> URL -> UTCTime -> (Item, [Person], [Person])
 
-addItem2DB :: ToItem i => AcidState Master -> i ->
-                       FeedID -> URL -> IO Item
-addItem2DB acid it fid u = do
+addItemConv :: ToItem i => Handle -> i -> FeedID -> URL -> IO Item
+addItemConv h it fid u = do
   df <- getCurrentTime
   let (i, as, cs) = toItem it fid u df
-  as' <- sequence $ addPerson acid <$> as
-  cs' <- sequence $ addPerson acid <$> cs
-  let i' = i { itemAuthors      = as'
-             , itemContributors = cs'
+  as' <- sequence $ addPerson h <$> as
+  cs' <- sequence $ addPerson h <$> cs
+  let i' = i { itemAuthors      = personID <$> as'
+             , itemContributors = personID <$> cs'
              }
-  update acid $ InsertMasterItem i'
+  mupdate h $ AddMasterItemAcid i'
 
-addFeed2DB :: ToFeed f => AcidState Master -> f ->
-                       CatID -> URL -> IO Feed
-addFeed2DB acid it cid u = do
+addFeedConv :: ToFeed f => Handle -> f -> CatID -> URL -> IO Feed
+addFeedConv h it cid u = do
   df <- getCurrentTime
   let (f, as, cs) = toFeed it cid u df
-  as' <- sequence $ addPerson acid <$> as
-  cs' <- sequence $ addPerson acid <$> cs
-  let f' = f { feedAuthors      = as'
-             , feedContributors = cs'
+  as' <- sequence $ addPerson h <$> as
+  cs' <- sequence $ addPerson h <$> cs
+  let f' = f { feedAuthors      = personID <$> as'
+             , feedContributors = personID <$> cs'
              }
-  update acid $ InsertFeed f'
-
-addPerson acid p = do
-  p' <- update acid $ InsertPerson p
-  return $ personID p'
-
+  mupdate h $ AddFeedAcid f'
 
 ------------------------------------------------------------------------------
--- Complex queries
+-- Main DB Functions
 ------------------------------------------------------------------------------
 
-shardRoot = "data" </> "shard_"
+open :: Maybe FilePath -> IO Handle
+open r = do
+  let root = fromMaybe "data" r
+  acid <- openLocalStateFrom (root </> "master") emptyDB
+  return $ Handle DBState { rootDir = root
+                          , master  = acid
+                          , shards  = Map.empty
+                          }
 
-withShard s = bracket
-  (do t0 <- getCurrentTime
-      putStrLn $ "  Opening shard #" ++ sid ++ "..."
-      acid <- openLocalStateFrom (shardRoot ++ sid) emptyShardItem
-      t1 <- getCurrentTime
-      putStrLn $ "  Shard opened in " ++ show (diffMs t0 t1) ++ " ms."
-      return acid )
-  (\acid -> do
-      putStrLn $ "  Closing shard #" ++ sid ++ "..."
-      closeAcidState acid )
-  where sid = show (unItemID s)
+close :: Handle -> IO ()
+close h = do
+  closeAcidState $ master $ unHandle h
+  mapM_ closeAcidState (shards $ unHandle h)
 
-lookupItem :: AcidState Master -> Int -> IO (Maybe Item)
-lookupItem acid k = do
-  s <- query acid $ GetItemShard $ ItemID k
-  withShard s $ \acid' ->
-    query acid' $ LookupShardItem $ ItemID k
+checkpoint :: Handle -> IO ()
+checkpoint = createCheckpoint . master . unHandle
 
-insertItems :: AcidState Master -> [Item] -> IO [Item]
-insertItems acid is = do
+archive :: Handle -> IO ()
+archive = createArchive . master . unHandle
+
+getStats :: Handle -> IO Stats
+getStats h = mquery h GetStatsAcid
+
+getCat :: Handle -> Int -> IO (Maybe Cat)
+getCat h c = mquery h $ GetCatAcid c
+
+getFeed :: Handle -> Int -> IO (Maybe Feed)
+getFeed h f = mquery h $ GetFeedAcid f
+
+getPerson :: Handle -> Int -> IO (Maybe Person)
+getPerson h p = mquery h $ GetPersonAcid p
+
+getItem :: Handle -> Int -> IO (Maybe Item)
+getItem h k = do
+  s <- mquery h $ GetItemShardAcid $ ItemID k
+  withShard h s $ \a ->
+    query a $ GetShardItemAcid $ ItemID k
+
+getCats :: Handle -> IO (Seq.Seq Cat)
+getCats h = mquery h GetCatsAcid
+
+getFeeds :: Handle -> IO (Seq.Seq Feed)
+getFeeds h = mquery h GetFeedsAcid
+
+addCat :: Handle -> Cat -> IO Cat
+addCat h c = mupdate h $ AddCatAcid c
+
+addFeed :: Handle -> Feed -> IO Feed
+addFeed h f = mupdate h $ AddFeedAcid f
+
+addPerson :: Handle -> Person -> IO Person
+addPerson h c = mupdate h $ AddPersonAcid c
+
+addItems :: Handle -> [Item] -> IO [Item]
+addItems h is = do
   iss <- forM is $ \i -> do
-    iid <- query acid $ MkUniqueItemID i
-    s   <- query acid $ GetItemShard iid
+    iid <- mquery h $ MkUniqueIDAcid i
+    s   <- mquery h $ GetItemShardAcid iid
     return (i { itemID = iid }, s)
   let gss = groupBy (\(_,x) (_,y) -> x == y) $ sortBy (\(_,x) (_,y) -> compare x y) iss
   gss' <- forM gss $ \gs ->
-    withShard (snd $ head gs) $ \acid' ->
+    withShard h (snd $ head gs) $ \a ->
       forM gs $ \(i, _) -> do
-        update acid' $ InsertShardItem i
-        update acid $ InsertMasterItem i
+        update a $ AddShardItemAcid i
+        mupdate h $ AddMasterItemAcid i
         return i
   return $ concat gss'
 
-wipeDB :: AcidState Master -> IO ()
-wipeDB acid = do
-  ss <- query acid GetShItem
-  update acid WipeMaster
+wipeDB :: Handle -> IO ()
+wipeDB h = do
+  ss <- mquery h GetShItemAcid
+  mupdate h WipeMasterAcid
   let ss' = 0 : Set.toList ss
   forM_ ss' $ \s -> do
-    let sf = shardRoot ++ show s
+    let sf = shardPath h $ ItemID s
     ex <- doesDirectoryExist sf
     if ex then removeDirectoryRecursive sf
     else putStrLn $ "  Shard dir not found: " ++ sf

@@ -3,7 +3,8 @@
 
 module Main (main) where
 
-import           Control.Monad         (forM_, forM, replicateM, replicateM_)
+import           Control.Monad         (forM, forM_, replicateM, replicateM_)
+import           Control.Monad.State   (get, put)
 import           Data.Acid
 import qualified Data.Sequence         as S
 import           Data.Time.Clock
@@ -34,28 +35,25 @@ helpMessage = do
   -- yield "  rand l r: generates a random string of length in range l..r"
   yield "  quit    : quits the program"
 
-processCommand acid = do
+processCommand h = do
   args <- words <$> await
   case head args of
     "help"    -> helpMessage
-    "stats"   -> checkArgs 0 args acid cmdStats
-    "get"     -> checkArgs 2 args acid cmdGet
-    "gen"     -> checkArgs 2 args acid cmdGen
-    "snap"    -> checkArgs 0 args acid cmdSnap
-    "archive" -> checkArgs 0 args acid cmdArchive
-    -- "date"  -> checkArgs 1 args acid cmdDate
-    -- "rand"  -> checkArgs 2 args acid cmdRand
-    "clean" -> checkArgs 0 args acid cmdClean
+    "stats"   -> checkArgs 0 args h cmdStats
+    "get"     -> checkArgs 2 args h cmdGet
+    "gen"     -> checkArgs 2 args h cmdGen
+    "snap"    -> checkArgs 0 args h cmdSnap
+    "archive" -> checkArgs 0 args h cmdArchive
+    -- "date"  -> checkArgs 1 args h cmdDate
+    -- "rand"  -> checkArgs 2 args h cmdRand
+    "clean" -> checkArgs 0 args h cmdClean
     _       -> yield $ "Command '" ++ head args ++ "' not understood."
-  processCommand acid
+  processCommand h
 
-checkArgs n args acid f =
-  if n == length args - 1 then f acid args
+checkArgs n args h f =
+  if n == length args - 1 then f h args
   else yield $ "Command '" ++ head args ++ "' requires " ++ show n ++ " arguments\
                \ but " ++ show (length args) ++ " were supplied."
-
--- under '_' = ' '
--- under c   = c
 
 ------------------------------------------------------------------------------
 -- Random Utilities
@@ -112,6 +110,9 @@ randomItem f =
 -- Command Functions
 ------------------------------------------------------------------------------
 
+-- under '_' = ' '
+-- under c   = c
+
 -- cmdDate acid args = do
 --   df <- liftBase getCurrentTime
 --   yield $ "Using " ++ show df ++ " as default date."
@@ -130,28 +131,28 @@ timed f = do
   t1 <- liftBase getCurrentTime
   yield $ "Command: " ++ show (DB.diffMs t0 t1) ++ " ms"
 
-cmdStats acid args = timed $ do
-  s <- liftBase $ query acid DB.GetStats
+cmdStats h args = timed $ do
+  s <- liftBase $ DB.getStats h
   yield $ "Category count: " ++ show (DB.countCats s)
   yield $ "Feed count    : " ++ show (DB.countFeeds s)
   yield $ "Person count  : " ++ show (DB.countPersons s)
   yield $ "Entry count   : " ++ show (DB.countItems s)
   yield $ "Shard count   : " ++ show (DB.countShards s)
 
-cmdGet acid args = timed $ do
+cmdGet h args = timed $ do
   let t = args !! 1
   let k = (read $ args !! 2) :: Int
   let out = \case
               Just s -> each $ lines s
               _      -> yield $ "No record found with ID == " ++ show k
   case t of
-    "cat"    -> liftBase (query acid $ DB.LookupCat  k)   >>= out . fmap show
-    "feed"   -> liftBase (query acid $ DB.LookupFeed k)   >>= out . fmap show
-    "person" -> liftBase (query acid $ DB.LookupPerson k) >>= out . fmap show
-    "item"   -> liftBase (DB.lookupItem acid k)           >>= out . fmap show
+    "cat"    -> liftBase (DB.getCat    h k) >>= out . fmap show
+    "feed"   -> liftBase (DB.getFeed   h k) >>= out . fmap show
+    "person" -> liftBase (DB.getPerson h k) >>= out . fmap show
+    "item"   -> liftBase (DB.getItem   h k) >>= out . fmap show
     _        -> yield $ t ++ " is not a valid table name."
 
-cmdGen acid args = timed $ do
+cmdGen h args = timed $ do
   let t = args !! 1
   let n = (read $ args !! 2) :: Int
   g <- liftBase getStdGen
@@ -159,47 +160,47 @@ cmdGen acid args = timed $ do
     "cat"  ->
        replicateM_ n $ do
          a <- liftBase randomCat
-         liftBase $ update acid $ DB.InsertCat a
+         liftBase $ DB.addCat h a
     "person"  ->
        replicateM_ n $ do
          a <- liftBase randomPerson
-         liftBase $ update acid $ DB.InsertPerson a
+         liftBase $ DB.addPerson h a
     "feed" -> do
-      cs <- liftBase $ query acid DB.Cats2Seq
+      cs <- liftBase $ DB.getCats h
       let rs = take n $ randomRs (0, S.length cs - 1) g
       forM_ rs $ \r -> do
         f <- liftBase $ randomFeed $ DB.catID $ S.index cs r
-        liftBase $ update acid $ DB.InsertFeed f
+        liftBase $ DB.addFeed h f
     "item" -> do
-      fs <- liftBase $ query acid DB.Feeds2Seq
+      fs <- liftBase $ DB.getFeeds h
       let rfids = (DB.feedID . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
       is <- forM rfids $ liftBase . randomItem
-      liftBase $ DB.insertItems acid is
+      liftBase $ DB.addItems h is
       return ()
     _      -> yield $ t ++ " is not a valid table name."
 
 
-cmdSnap acid args = timed $ do
-  liftBase $ createCheckpoint acid
+cmdSnap h args = timed $ do
+  liftBase $ DB.checkpoint h
   yield "Checkpoint created."
 
-cmdArchive acid args = timed $ do
-  liftBase $ createArchive acid
+cmdArchive h args = timed $ do
+  liftBase $ DB.archive h
   yield "Archive created."
 
-cmdClean acid args = timed $ do
+cmdClean h args = timed $ do
   yield "Are you sure? (y/n)"
   r <- await
   case r of
     "y" -> do
-             liftBase $ DB.wipeDB acid
+             liftBase $ DB.wipeDB h
              yield "Database wiped clean. Have a nice day."
     _   -> yield "Crisis averted."
 
-pipeLine acid =
-  P.stdinLn
+pipeLine h =
+      P.stdinLn
   >-> P.takeWhile (/= "quit")
-  >-> processCommand acid
+  >-> processCommand h
   >-> introMessage
   >-> P.map ("  " ++)
   >-> P.stdoutLn
@@ -208,12 +209,12 @@ main :: IO ()
 main = runSafeT $ runEffect $ bracket
     (do t0 <- getCurrentTime
         putStrLn "  Opening master DB..."
-        acid <- openLocalStateFrom ("data" </> "master") DB.emptyDB
+        h <- DB.open Nothing
         t1 <- getCurrentTime
         putStrLn $ "  DB opened in " ++ show (DB.diffMs t0 t1) ++ " ms."
-        return acid )
-    (\acid -> do
-        putStrLn "  Closing master DB..."
-        closeAcidState acid
+        return h )
+    (\h -> do
+        putStrLn "  Closing DB..."
+        DB.close h
         putStrLn "  Goodbye." )
     pipeLine
