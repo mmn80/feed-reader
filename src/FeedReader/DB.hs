@@ -67,18 +67,20 @@ module FeedReader.DB
   ) where
 
 import           Control.Applicative   ((<|>))
+import           Control.Concurrent    (MVar, modifyMVar_, newMVar, putMVar,
+                                        takeMVar)
 import           Control.Exception     (bracket)
 import           Control.Monad         (forM, forM_)
 import           Control.Monad.Reader  (ask)
 import           Control.Monad.State   (get, put)
-import           Control.Monad.Trans   (MonadIO(liftIO))
+import           Control.Monad.Trans   (MonadIO (liftIO))
 import           Data.Acid
 import           Data.Acid.Advanced
 import           Data.Hashable         (hash)
 import qualified Data.IntMap           as Map
 import qualified Data.IntSet           as Set
 import           Data.List             (groupBy, sortBy)
-import           Data.Maybe            (fromMaybe)
+import           Data.Maybe            (fromJust, fromMaybe)
 import           Data.SafeCopy
 import qualified Data.Sequence         as Seq
 import           Data.Time.Clock       (UTCTime, diffUTCTime, getCurrentTime)
@@ -95,10 +97,15 @@ type Tag      = String
 data Content  = Text String | HTML String | XHTML String
   deriving (Show)
 
-newtype CatID    = CatID    { unCatID :: Int } deriving (Show, Eq, Ord)
-newtype PersonID = PersonID { unPersonID :: Int } deriving (Show, Eq, Ord)
-newtype FeedID   = FeedID   { unFeedID :: Int } deriving (Show, Eq, Ord)
-newtype ItemID   = ItemID   { unItemID :: Int } deriving (Show, Eq, Ord)
+newtype CatID    = CatID    { unCatID :: Int    } deriving (Eq, Ord)
+newtype PersonID = PersonID { unPersonID :: Int } deriving (Eq, Ord)
+newtype FeedID   = FeedID   { unFeedID :: Int   } deriving (Eq, Ord)
+newtype ItemID   = ItemID   { unItemID :: Int   } deriving (Eq, Ord)
+
+instance Show CatID    where show (CatID k)    = show k
+instance Show PersonID where show (PersonID k) = show k
+instance Show FeedID   where show (FeedID k)   = show k
+instance Show ItemID   where show (ItemID k)   = show k
 
 data Cat = Cat
   { catID   :: CatID
@@ -167,10 +174,12 @@ data ShardItem = ShardItem
   , tblItem    :: !(Map.IntMap Item)
   }
 
+type OpenedShards = Map.IntMap (UTCTime, AcidState ShardItem)
+
 data DBState = DBState
   { rootDir :: FilePath
   , master  :: AcidState Master
-  , shards  :: Map.IntMap (AcidState ShardItem)
+  , shards  :: MVar OpenedShards
   }
 
 instance Eq DBState where
@@ -193,21 +202,6 @@ data Stats = Stats
 -- Utilities
 ------------------------------------------------------------------------------
 
-checkUniqueID :: Set.IntSet -> Int -> Int
-checkUniqueID idx x = if Set.notMember x idx then x
-                      else checkUniqueID idx (x + 1)
-
-emptyDB :: Master
-emptyDB = Master Set.empty Set.empty Map.empty Map.empty Map.empty Map.empty Map.empty
-
-emptyShardItem :: ShardItem
-emptyShardItem = ShardItem 0 Map.empty
-
-insertNested :: Int -> Int -> NestedMap -> NestedMap
-insertNested k i m = Map.insert k newInner m
-  where
-    newInner = Set.insert i $ fromMaybe Set.empty $ Map.lookup k m
-
 text2UTCTime :: String -> UTCTime -> UTCTime
 text2UTCTime t df = fromMaybe df $ iso <|> iso' <|> rfc
   where
@@ -229,29 +223,48 @@ imageFromURL u = Image
   , imageHeight      = 0
   }
 
-calcCatID :: Cat -> CatID
-calcCatID = CatID . hash . catName
-
 unsetCatID :: CatID
 unsetCatID = CatID 0
-
-calcFeedID :: Feed -> FeedID
-calcFeedID = FeedID . hash . feedURL
 
 unsetFeedID :: FeedID
 unsetFeedID = FeedID 0
 
-calcItemID :: Item -> ItemID
-calcItemID = ItemID . fromInteger . round . utcTimeToPOSIXSeconds . itemUpdated
-
 unsetItemID :: ItemID
 unsetItemID = ItemID 0
+
+unsetPersonID :: PersonID
+unsetPersonID = PersonID 0
+
+------------------------------------------------------------------------------
+-- Internal
+------------------------------------------------------------------------------
+
+insertNested :: Int -> Int -> NestedMap -> NestedMap
+insertNested k i m = Map.insert k newInner m
+  where
+    newInner = Set.insert i $ fromMaybe Set.empty $ Map.lookup k m
+
+emptyShardItem :: ShardItem
+emptyShardItem = ShardItem 0 Map.empty
+
+calcCatID :: Cat -> CatID
+calcCatID = CatID . hash . catName
+
+calcFeedID :: Feed -> FeedID
+calcFeedID = FeedID . hash . feedURL
+
+calcItemID :: Item -> ItemID
+calcItemID = ItemID . fromInteger . round . utcTimeToPOSIXSeconds . itemUpdated
 
 calcPersonID :: Person -> PersonID
 calcPersonID p = PersonID $ hash $ personName p ++ personEmail p
 
-unsetPersonID :: PersonID
-unsetPersonID = PersonID 0
+checkUniqueID :: Set.IntSet -> Int -> Int
+checkUniqueID idx x = if Set.notMember x idx then x
+                      else checkUniqueID idx (x + 1)
+
+emptyDB :: Master
+emptyDB = Master Set.empty Set.empty Map.empty Map.empty Map.empty Map.empty Map.empty
 
 mquery :: (MonadIO m, QueryEvent e, MethodState e ~ Master) =>
           Handle -> e -> m (EventResult e)
@@ -264,17 +277,45 @@ mupdate h = liftIO . update (master $ unHandle h)
 shardPath :: Handle -> ItemID -> FilePath
 shardPath h i = rootDir (unHandle h) </> "shard_" ++ show (unItemID i)
 
-withShard :: MonadIO m => Handle -> ItemID -> (AcidState ShardItem -> IO a) -> m a
+checkOpenedShards :: MonadIO m => OpenedShards -> m OpenedShards
+checkOpenedShards ss =
+  if Map.size ss > 5 then do
+    t0 <- liftIO getCurrentTime
+    let older sid (t, a) (t', sid') =
+          if t < t' then (t, sid) else (t', sid')
+    let (t, sid) = Map.foldWithKey older (t0, 0) ss
+    let Just (_, a) = Map.lookup sid ss
+    liftIO $ putStrLn $ "  Closing shard #" ++ show sid ++ "..."
+    liftIO $ closeAcidState a
+    return $ Map.delete sid ss
+  else
+    return ss
+
+withShard :: MonadIO m => Handle -> ItemID ->
+             ((AcidState ShardItem, OpenedShards) -> IO a) -> m a
 withShard h s = liftIO . bracket
-  (do t0 <- getCurrentTime
-      putStrLn $ "  Opening shard #" ++ show (unItemID s) ++ "..."
-      acid <- openLocalStateFrom (shardPath h s) emptyShardItem
-      t1 <- getCurrentTime
-      putStrLn $ "  Shard opened in " ++ show (diffMs t0 t1) ++ " ms."
-      return acid )
-  (\acid -> do
-      putStrLn $ "  Closing shard #" ++ show (unItemID s) ++ "..."
-      closeAcidState acid )
+  (do ss <- takeMVar $ shards $ unHandle h
+      let sid = unItemID s
+      let mb = Map.lookup sid ss
+      t0 <- getCurrentTime
+      let ins a = (a, Map.insert sid (t0, a) ss)
+      if null mb then do
+        putStrLn $ "  Opening shard #" ++ show sid ++ "..."
+        acid <- openLocalStateFrom (shardPath h s) emptyShardItem
+        t1 <- getCurrentTime
+        putStrLn $ "  Shard opened in " ++ show (diffMs t0 t1) ++ " ms."
+        return $ ins acid
+      else
+        return $ ins $ snd $ fromJust mb )
+  (\(_, ss) -> do
+    ss' <- checkOpenedShards ss
+    putMVar (shards $ unHandle h) ss')
+
+closeShards :: MonadIO m => Handle -> m ()
+closeShards h =
+  liftIO $ modifyMVar_ (shards $ unHandle h) $ \ss -> do
+    mapM_ (liftIO . closeAcidState . snd) ss
+    return Map.empty
 
 ------------------------------------------------------------------------------
 -- SafeCopy Instances
@@ -682,15 +723,16 @@ open :: MonadIO m => Maybe FilePath -> m Handle
 open r = do
   let root = fromMaybe "data" r
   acid <- liftIO $ openLocalStateFrom (root </> "master") emptyDB
+  s <- liftIO $ newMVar Map.empty
   return $ Handle DBState { rootDir = root
                           , master  = acid
-                          , shards  = Map.empty
+                          , shards  = s
                           }
 
 close :: MonadIO m => Handle -> m ()
 close h = do
   liftIO $ closeAcidState $ master $ unHandle h
-  mapM_ (liftIO . closeAcidState) (shards $ unHandle h)
+  closeShards h
 
 checkpoint :: MonadIO m => Handle -> m ()
 checkpoint = liftIO . createCheckpoint . master . unHandle
@@ -698,8 +740,13 @@ checkpoint = liftIO . createCheckpoint . master . unHandle
 archive :: MonadIO m => Handle -> m ()
 archive = liftIO . createArchive . master . unHandle
 
-getStats :: MonadIO m => Handle -> m Stats
-getStats h = mquery h GetStatsAcid
+getStats :: MonadIO m => Handle -> m (Stats, [(ItemID, UTCTime)])
+getStats h = do
+  s <- mquery h GetStatsAcid
+  liftIO $ bracket
+    (takeMVar $ shards $ unHandle h)
+    (putMVar $ shards $ unHandle h)
+    (\ss -> return (s, (\(k,(t,_)) -> (ItemID k, t)) <$> Map.toList ss ))
 
 getCat :: MonadIO m => Handle -> Int -> m (Maybe Cat)
 getCat h c = mquery h $ GetCatAcid c
@@ -713,7 +760,7 @@ getPerson h p = mquery h $ GetPersonAcid p
 getItem :: MonadIO m => Handle -> Int -> m (Maybe Item)
 getItem h k = do
   s <- mquery h $ GetItemShardAcid $ ItemID k
-  withShard h s $ \a ->
+  withShard h s $ \(a, _) ->
     liftIO $ query a $ GetShardItemAcid $ ItemID k
 
 getCats :: MonadIO m => Handle -> m (Seq.Seq Cat)
@@ -739,7 +786,7 @@ addItems h is = do
     return (i { itemID = iid }, s)
   let gss = groupBy (\(_,x) (_,y) -> x == y) $ sortBy (\(_,x) (_,y) -> compare x y) iss
   gss' <- forM gss $ \gs ->
-    withShard h (snd $ head gs) $ \a ->
+    withShard h (snd $ head gs) $ \(a, _) ->
       forM gs $ \(i, _) -> do
         _ <- liftIO $ update a $ AddShardItemAcid i
         _ <- mupdate h $ AddMasterItemAcid i
@@ -750,6 +797,7 @@ wipeDB :: MonadIO m => Handle -> m ()
 wipeDB h = do
   ss <- mquery h GetShItemAcid
   mupdate h WipeMasterAcid
+  closeShards h
   let ss' = 0 : Set.toList ss
   forM_ ss' $ \s -> do
     let sf = shardPath h $ ItemID s

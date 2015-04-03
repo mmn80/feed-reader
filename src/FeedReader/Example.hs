@@ -3,7 +3,7 @@
 
 module Main (main) where
 
-import           Control.Monad         (forM, forM_, replicateM, replicateM_)
+import           Control.Monad         (forM, forM_, replicateM, replicateM_, unless)
 import           Control.Monad.State   (get, put)
 import           Data.Acid
 import qualified Data.Sequence         as S
@@ -132,12 +132,17 @@ timed f = do
   yield $ "Command: " ++ show (DB.diffMs t0 t1) ++ " ms"
 
 cmdStats h args = timed $ do
-  s <- liftBase $ DB.getStats h
+  (s, ss) <- liftBase $ DB.getStats h
   yield $ "Category count: " ++ show (DB.countCats s)
   yield $ "Feed count    : " ++ show (DB.countFeeds s)
   yield $ "Person count  : " ++ show (DB.countPersons s)
   yield $ "Entry count   : " ++ show (DB.countItems s)
   yield $ "Shard count   : " ++ show (DB.countShards s)
+  yield $ "Opened shards :" ++ if null ss then " 0" else ""
+  unless (null ss) $ yield $ "  Shard ID" ++ replicate 12 ' ' ++ "Last accessed"
+  let format i = i ++ replicate (20 - length i) ' '
+  forM_ ss $ \(sid, t) ->
+    yield $ "  " ++ format (show sid) ++ show t
 
 cmdGet h args = timed $ do
   let t = args !! 1
