@@ -71,14 +71,14 @@ import           Control.Exception     (bracket)
 import           Control.Monad         (forM, forM_)
 import           Control.Monad.Reader  (ask)
 import           Control.Monad.State   (get, put)
+import           Control.Monad.Trans   (MonadIO(liftIO))
 import           Data.Acid
 import           Data.Acid.Advanced
 import           Data.Hashable         (hash)
 import qualified Data.IntMap           as Map
 import qualified Data.IntSet           as Set
 import           Data.List             (groupBy, sortBy)
-import           Data.Maybe            (fromJust, fromMaybe)
-import           Data.Monoid           ((<>))
+import           Data.Maybe            (fromMaybe)
 import           Data.SafeCopy
 import qualified Data.Sequence         as Seq
 import           Data.Time.Clock       (UTCTime, diffUTCTime, getCurrentTime)
@@ -253,14 +253,19 @@ calcPersonID p = PersonID $ hash $ personName p ++ personEmail p
 unsetPersonID :: PersonID
 unsetPersonID = PersonID 0
 
-mquery  h = query  (master $ unHandle h)
+mquery :: (MonadIO m, QueryEvent e, MethodState e ~ Master) =>
+          Handle -> e -> m (EventResult e)
+mquery  h = liftIO . query  (master $ unHandle h)
 
-mupdate h = update (master $ unHandle h)
+mupdate :: (MonadIO m, UpdateEvent e, MethodState e ~ Master) =>
+          Handle -> e -> m (EventResult e)
+mupdate h = liftIO . update (master $ unHandle h)
 
 shardPath :: Handle -> ItemID -> FilePath
 shardPath h i = rootDir (unHandle h) </> "shard_" ++ show (unItemID i)
 
-withShard h s = bracket
+withShard :: MonadIO m => Handle -> ItemID -> (AcidState ShardItem -> IO a) -> m a
+withShard h s = liftIO . bracket
   (do t0 <- getCurrentTime
       putStrLn $ "  Opening shard #" ++ show (unItemID s) ++ "..."
       acid <- openLocalStateFrom (shardPath h s) emptyShardItem
@@ -386,13 +391,12 @@ addMasterItemAcid i = do
   db <- get
   let iid = unItemID $ itemID i
   let fid = unFeedID $ itemFeedID i
-  let mbf = Map.lookup fid (tblFeed db)
-  let cid = unCatID $ feedCatID $ fromJust mbf
+  let mbc = (unCatID . feedCatID) <$> Map.lookup fid (tblFeed db)
   put db { idxItem = Set.insert iid $ idxItem db
          , ixFeedItem = insertNested fid iid $ ixFeedItem db
-         , ixCatItem  = case mbf of
-             Just f  -> insertNested cid iid $ ixCatItem db
-             Nothing -> ixCatItem db
+         , ixCatItem  = case mbc of
+             Just cid -> insertNested cid iid $ ixCatItem db
+             _        -> ixCatItem db
          }
   return i
 
@@ -648,9 +652,9 @@ class ToPerson p where
 class ToItem i where
   toItem :: i -> FeedID -> URL -> UTCTime -> (Item, [Person], [Person])
 
-addItemConv :: ToItem i => Handle -> i -> FeedID -> URL -> IO Item
+addItemConv :: (MonadIO m, ToItem i) => Handle -> i -> FeedID -> URL -> m Item
 addItemConv h it fid u = do
-  df <- getCurrentTime
+  df <- liftIO getCurrentTime
   let (i, as, cs) = toItem it fid u df
   as' <- sequence $ addPerson h <$> as
   cs' <- sequence $ addPerson h <$> cs
@@ -659,9 +663,9 @@ addItemConv h it fid u = do
              }
   mupdate h $ AddMasterItemAcid i'
 
-addFeedConv :: ToFeed f => Handle -> f -> CatID -> URL -> IO Feed
+addFeedConv :: (MonadIO m, ToFeed f) => Handle -> f -> CatID -> URL -> m Feed
 addFeedConv h it cid u = do
-  df <- getCurrentTime
+  df <- liftIO getCurrentTime
   let (f, as, cs) = toFeed it cid u df
   as' <- sequence $ addPerson h <$> as
   cs' <- sequence $ addPerson h <$> cs
@@ -674,60 +678,60 @@ addFeedConv h it cid u = do
 -- Main DB Functions
 ------------------------------------------------------------------------------
 
-open :: Maybe FilePath -> IO Handle
+open :: MonadIO m => Maybe FilePath -> m Handle
 open r = do
   let root = fromMaybe "data" r
-  acid <- openLocalStateFrom (root </> "master") emptyDB
+  acid <- liftIO $ openLocalStateFrom (root </> "master") emptyDB
   return $ Handle DBState { rootDir = root
                           , master  = acid
                           , shards  = Map.empty
                           }
 
-close :: Handle -> IO ()
+close :: MonadIO m => Handle -> m ()
 close h = do
-  closeAcidState $ master $ unHandle h
-  mapM_ closeAcidState (shards $ unHandle h)
+  liftIO $ closeAcidState $ master $ unHandle h
+  mapM_ (liftIO . closeAcidState) (shards $ unHandle h)
 
-checkpoint :: Handle -> IO ()
-checkpoint = createCheckpoint . master . unHandle
+checkpoint :: MonadIO m => Handle -> m ()
+checkpoint = liftIO . createCheckpoint . master . unHandle
 
-archive :: Handle -> IO ()
-archive = createArchive . master . unHandle
+archive :: MonadIO m => Handle -> m ()
+archive = liftIO . createArchive . master . unHandle
 
-getStats :: Handle -> IO Stats
+getStats :: MonadIO m => Handle -> m Stats
 getStats h = mquery h GetStatsAcid
 
-getCat :: Handle -> Int -> IO (Maybe Cat)
+getCat :: MonadIO m => Handle -> Int -> m (Maybe Cat)
 getCat h c = mquery h $ GetCatAcid c
 
-getFeed :: Handle -> Int -> IO (Maybe Feed)
+getFeed :: MonadIO m => Handle -> Int -> m (Maybe Feed)
 getFeed h f = mquery h $ GetFeedAcid f
 
-getPerson :: Handle -> Int -> IO (Maybe Person)
+getPerson :: MonadIO m => Handle -> Int -> m (Maybe Person)
 getPerson h p = mquery h $ GetPersonAcid p
 
-getItem :: Handle -> Int -> IO (Maybe Item)
+getItem :: MonadIO m => Handle -> Int -> m (Maybe Item)
 getItem h k = do
   s <- mquery h $ GetItemShardAcid $ ItemID k
   withShard h s $ \a ->
-    query a $ GetShardItemAcid $ ItemID k
+    liftIO $ query a $ GetShardItemAcid $ ItemID k
 
-getCats :: Handle -> IO (Seq.Seq Cat)
+getCats :: MonadIO m => Handle -> m (Seq.Seq Cat)
 getCats h = mquery h GetCatsAcid
 
-getFeeds :: Handle -> IO (Seq.Seq Feed)
+getFeeds :: MonadIO m => Handle -> m (Seq.Seq Feed)
 getFeeds h = mquery h GetFeedsAcid
 
-addCat :: Handle -> Cat -> IO Cat
+addCat :: MonadIO m => Handle -> Cat -> m Cat
 addCat h c = mupdate h $ AddCatAcid c
 
-addFeed :: Handle -> Feed -> IO Feed
+addFeed :: MonadIO m => Handle -> Feed -> m Feed
 addFeed h f = mupdate h $ AddFeedAcid f
 
-addPerson :: Handle -> Person -> IO Person
+addPerson :: MonadIO m => Handle -> Person -> m Person
 addPerson h c = mupdate h $ AddPersonAcid c
 
-addItems :: Handle -> [Item] -> IO [Item]
+addItems :: MonadIO m => Handle -> [Item] -> m [Item]
 addItems h is = do
   iss <- forM is $ \i -> do
     iid <- mquery h $ MkUniqueIDAcid i
@@ -737,18 +741,18 @@ addItems h is = do
   gss' <- forM gss $ \gs ->
     withShard h (snd $ head gs) $ \a ->
       forM gs $ \(i, _) -> do
-        update a $ AddShardItemAcid i
-        mupdate h $ AddMasterItemAcid i
+        _ <- liftIO $ update a $ AddShardItemAcid i
+        _ <- mupdate h $ AddMasterItemAcid i
         return i
   return $ concat gss'
 
-wipeDB :: Handle -> IO ()
+wipeDB :: MonadIO m => Handle -> m ()
 wipeDB h = do
   ss <- mquery h GetShItemAcid
   mupdate h WipeMasterAcid
   let ss' = 0 : Set.toList ss
   forM_ ss' $ \s -> do
     let sf = shardPath h $ ItemID s
-    ex <- doesDirectoryExist sf
-    if ex then removeDirectoryRecursive sf
-    else putStrLn $ "  Shard dir not found: " ++ sf
+    ex <- liftIO $ doesDirectoryExist sf
+    if ex then liftIO $ removeDirectoryRecursive sf
+    else liftIO $ putStrLn $ "  Shard dir not found: " ++ sf
