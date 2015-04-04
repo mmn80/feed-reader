@@ -3,7 +3,7 @@
 
 module Main (main) where
 
-import           Control.Monad         (forM, forM_, replicateM, replicateM_, unless)
+import           Control.Monad         (forM, forM_, replicateM, unless)
 import           Control.Monad.State   (get, put)
 import           Data.Acid
 import qualified Data.Sequence         as S
@@ -15,6 +15,7 @@ import qualified Pipes.Prelude         as P
 import           Pipes.Safe
 import           System.FilePath       ((</>))
 import           System.Random         (getStdGen, randomRIO, randomRs)
+import Data.List (intercalate)
 
 introMessage = do
   yield "Welcome to the Jungle!"
@@ -161,26 +162,37 @@ cmdGen h args = timed $ do
   let t = args !! 1
   let n = (read $ args !! 2) :: Int
   g <- liftBase getStdGen
+  let showIDs ids = do
+        let l = length ids
+        let (prefix, suffix) = if l > 10
+                               then ("First 10 IDs: ", "...")
+                               else ("IDs: ", ".")
+        yield $ show l ++ " records generated."
+        yield $ prefix ++ intercalate ", " (take 10 ids) ++ suffix
   case t of
-    "cat"  ->
-       replicateM_ n $ do
+    "cat"  -> do
+       cs <- replicateM n $ do
          a <- liftBase randomCat
          liftBase $ DB.addCat h a
-    "person"  ->
-       replicateM_ n $ do
+       showIDs $ (show . DB.catID) <$> cs
+    "person"  -> do
+       ps <- replicateM n $ do
          a <- liftBase randomPerson
          liftBase $ DB.addPerson h a
+       showIDs $ (show . DB.personID) <$> ps
     "feed" -> do
       cs <- liftBase $ DB.getCats h
       let rs = take n $ randomRs (0, S.length cs - 1) g
-      forM_ rs $ \r -> do
+      fs <- forM rs $ \r -> do
         f <- liftBase $ randomFeed $ DB.catID $ S.index cs r
         liftBase $ DB.addFeed h f
+      showIDs $ (show . DB.feedID) <$> fs
     "item" -> do
       fs <- liftBase $ DB.getFeeds h
       let rfids = (DB.feedID . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
       is <- forM rfids $ liftBase . randomItem
-      liftBase $ DB.addItems h is
+      is' <- liftBase $ DB.addItems h is
+      showIDs $ (show . DB.itemID) <$> is'
       return ()
     _      -> yield $ t ++ " is not a valid table name."
 

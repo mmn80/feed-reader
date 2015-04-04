@@ -185,10 +185,10 @@ data DBState = DBState
 instance Eq DBState where
   DBState r1 _ _ == DBState r2 _ _ = r1 == r2
 
-instance Show DBState where
-  show (DBState r1 _ _) = r1
+newtype Handle = Handle { unHandle :: DBState } deriving (Eq)
 
-newtype Handle = Handle { unHandle :: DBState } deriving (Eq, Show)
+instance Show Handle where
+  show (Handle (DBState r1 _ _)) = r1
 
 data Stats = Stats
   { countCats    :: Int
