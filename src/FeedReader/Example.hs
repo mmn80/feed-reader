@@ -5,17 +5,17 @@ module Main (main) where
 
 import           Control.Monad         (forM, forM_, replicateM, unless)
 import           Control.Monad.State   (get, put)
-import           Data.Acid
+import           Data.List             (intercalate)
 import qualified Data.Sequence         as S
-import           Data.Time.Clock
-import           Data.Time.Clock.POSIX
+import           Data.Time.Clock       (getCurrentTime)
+import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
+                                        utcTimeToPOSIXSeconds)
 import           FeedReader.DB         as DB
 import           Pipes
 import qualified Pipes.Prelude         as P
 import           Pipes.Safe
 import           System.FilePath       ((</>))
 import           System.Random         (getStdGen, randomRIO, randomRs)
-import Data.List (intercalate)
 
 introMessage = do
   yield "Welcome to the Jungle!"
@@ -28,6 +28,7 @@ helpMessage = do
   yield "  stats   : prints record counts"
   yield "  get t k : prints the item with ID == k"
   yield "          : t is the table, one of 'cat', 'feed', 'person' or 'item'"
+  yield "  page p k: prints the next p entries with ID > k"
   yield "  gen t n : inserts n random records into the DB (t as above)"
   yield "  snap    : creates a checkpoint"
   yield "  archive : archives the unused log files"
@@ -42,6 +43,7 @@ processCommand h = do
     "help"    -> helpMessage
     "stats"   -> checkArgs 0 args h cmdStats
     "get"     -> checkArgs 2 args h cmdGet
+    "page"    -> checkArgs 2 args h cmdPage
     "gen"     -> checkArgs 2 args h cmdGen
     "snap"    -> checkArgs 0 args h cmdSnap
     "archive" -> checkArgs 0 args h cmdArchive
@@ -132,18 +134,21 @@ timed f = do
   t1 <- liftBase getCurrentTime
   yield $ "Command: " ++ show (DB.diffMs t0 t1) ++ " ms"
 
+format sz i = i ++ replicate (sz - length i) ' '
+
 cmdStats h args = timed $ do
   (s, ss) <- liftBase $ DB.getStats h
   yield $ "Category count: " ++ show (DB.countCats s)
   yield $ "Feed count    : " ++ show (DB.countFeeds s)
   yield $ "Person count  : " ++ show (DB.countPersons s)
-  yield $ "Entry count   : " ++ show (DB.countItems s)
+  yield $ "Entry count   : " ++ show (DB.countItemsAll s)
   yield $ "Shard count   : " ++ show (DB.countShards s)
   yield $ "Opened shards :" ++ if null ss then " 0" else ""
-  unless (null ss) $ yield $ "  Shard ID" ++ replicate 12 ' ' ++ "Last accessed"
-  let format i = i ++ replicate (20 - length i) ' '
-  forM_ ss $ \(sid, t) ->
-    yield $ "  " ++ format (show sid) ++ show t
+  unless (null ss) $ yield $ "  Shard ID"  ++ replicate (20 - 8) ' ' ++
+                             "Entries" ++ replicate (10 - 7) ' ' ++
+                             "Last accessed"
+  forM_ ss $ \(sid, t, ssd) ->
+    yield $ "  " ++ format 20 (show sid) ++ format 10 (show $ countItems ssd) ++ show t
 
 cmdGet h args = timed $ do
   let t = args !! 1
@@ -157,6 +162,21 @@ cmdGet h args = timed $ do
     "person" -> liftBase (DB.getPerson h k) >>= out . fmap show
     "item"   -> liftBase (DB.getItem   h k) >>= out . fmap show
     _        -> yield $ t ++ " is not a valid table name."
+
+showShortHeader = "ID" ++ replicate (24 - 2) ' ' ++
+                  "FeedID" ++ replicate (24 - 6) ' ' ++
+                  "Published"
+
+showShort i = format 24 (show $ itemID i) ++
+              format 24 (show $ itemFeedID i) ++
+              show (itemPublished i)
+
+cmdPage h args = timed $ do
+  let p = (read $ args !! 1) :: Int
+  let k = (read $ args !! 2) :: Int
+  is <- liftBase (DB.getItemPage h k p)
+  yield showShortHeader
+  each $ showShort <$> is
 
 cmdGen h args = timed $ do
   let t = args !! 1

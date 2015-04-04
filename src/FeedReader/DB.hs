@@ -29,7 +29,8 @@ module FeedReader.DB
   , Tag
   , Content (..)
   , Image (..)
-  , Stats (..)
+  , StatsMaster (..)
+  , StatsShard (..)
   , Handle
 -- utils
   , imageFromURL
@@ -57,6 +58,7 @@ module FeedReader.DB
   , getFeed
   , getPerson
   , getItem
+  , getItemPage
   , getCats
   , getFeeds
 -- update queries
@@ -160,7 +162,7 @@ data Item = Item
 type NestedMap = Map.IntMap Set.IntSet
 
 data Master = Master
-  { shItem     :: !Set.IntSet
+  { idxShard   :: !Set.IntSet
   , idxItem    :: !Set.IntSet
   , ixCatItem  :: !NestedMap
   , ixFeedItem :: !NestedMap
@@ -169,12 +171,12 @@ data Master = Master
   , tblPerson  :: !(Map.IntMap Person)
   }
 
-data ShardItem = ShardItem
-  { shItemSize :: !Int
-  , tblItem    :: !(Map.IntMap Item)
+data Shard = Shard
+  { shSize  :: !Int
+  , tblItem :: !(Map.IntMap Item)
   }
 
-type OpenedShards = Map.IntMap (UTCTime, AcidState ShardItem)
+type OpenedShards = Map.IntMap (UTCTime, AcidState Shard)
 
 data DBState = DBState
   { rootDir :: FilePath
@@ -190,13 +192,23 @@ newtype Handle = Handle { unHandle :: DBState } deriving (Eq)
 instance Show Handle where
   show (Handle (DBState r1 _ _)) = r1
 
-data Stats = Stats
-  { countCats    :: Int
-  , countFeeds   :: Int
-  , countPersons :: Int
-  , countItems   :: Int
-  , countShards  :: Int
+data StatsMaster = StatsMaster
+  { countCats     :: Int
+  , countFeeds    :: Int
+  , countPersons  :: Int
+  , countItemsAll :: Int
+  , countShards   :: Int
   }
+
+data StatsShard = StatsShard
+  { countItems :: Int
+  }
+
+maxOpenedShards :: Int
+maxOpenedShards = 5
+
+maxShardItems :: Int
+maxShardItems = 100
 
 ------------------------------------------------------------------------------
 -- Utilities
@@ -244,8 +256,8 @@ insertNested k i m = Map.insert k newInner m
   where
     newInner = Set.insert i $ fromMaybe Set.empty $ Map.lookup k m
 
-emptyShardItem :: ShardItem
-emptyShardItem = ShardItem 0 Map.empty
+emptyShard :: Shard
+emptyShard = Shard 0 Map.empty
 
 calcCatID :: Cat -> CatID
 calcCatID = CatID . hash . catName
@@ -277,13 +289,21 @@ mupdate h = liftIO . update (master $ unHandle h)
 shardPath :: Handle -> ItemID -> FilePath
 shardPath h i = rootDir (unHandle h) </> "shard_" ++ show (unItemID i)
 
+findShard :: Int -> Master -> ItemID
+findShard k m = ItemID $ case Set.lookupLE k (idxShard m) of
+                           Just s -> s
+                           _      -> 0
+
+groupByShard :: [(t, ItemID)] -> [[(t, ItemID)]]
+groupByShard = groupBy (\(_,x) (_,y) -> x == y) . sortBy (\(_,x) (_,y) -> compare x y)
+
 checkOpenedShards :: MonadIO m => OpenedShards -> m OpenedShards
 checkOpenedShards ss =
-  if Map.size ss > 5 then do
+  if Map.size ss > maxOpenedShards then do
     t0 <- liftIO getCurrentTime
-    let older sid (t, a) (t', sid') =
+    let older sid (t, _) (t', sid') =
           if t < t' then (t, sid) else (t', sid')
-    let (t, sid) = Map.foldWithKey older (t0, 0) ss
+    let (_, sid) = Map.foldWithKey older (t0, 0) ss
     let Just (_, a) = Map.lookup sid ss
     liftIO $ putStrLn $ "  Closing shard #" ++ show sid ++ "..."
     liftIO $ closeAcidState a
@@ -292,7 +312,7 @@ checkOpenedShards ss =
     return ss
 
 withShard :: MonadIO m => Handle -> ItemID ->
-             ((AcidState ShardItem, OpenedShards) -> IO a) -> m a
+             ((AcidState Shard, OpenedShards) -> IO a) -> m a
 withShard h s = liftIO . bracket
   (do ss <- takeMVar $ shards $ unHandle h
       let sid = unItemID s
@@ -301,7 +321,7 @@ withShard h s = liftIO . bracket
       let ins a = (a, Map.insert sid (t0, a) ss)
       if null mb then do
         putStrLn $ "  Opening shard #" ++ show sid ++ "..."
-        acid <- openLocalStateFrom (shardPath h s) emptyShardItem
+        acid <- openLocalStateFrom (shardPath h s) emptyShard
         t1 <- getCurrentTime
         putStrLn $ "  Shard opened in " ++ show (diffMs t0 t1) ++ " ms."
         return $ ins acid
@@ -331,23 +351,24 @@ $(deriveSafeCopy 0 'base ''FeedID)
 $(deriveSafeCopy 0 'base ''Feed)
 $(deriveSafeCopy 0 'base ''ItemID)
 $(deriveSafeCopy 0 'base ''Item)
-$(deriveSafeCopy 0 'base ''Stats)
+$(deriveSafeCopy 0 'base ''StatsMaster)
+$(deriveSafeCopy 0 'base ''StatsShard)
 $(deriveSafeCopy 0 'base ''Master)
-$(deriveSafeCopy 0 'base ''ShardItem)
+$(deriveSafeCopy 0 'base ''Shard)
 
 ------------------------------------------------------------------------------
 -- Read Queries
 ------------------------------------------------------------------------------
 
-getStatsAcid :: Query Master Stats
+getStatsAcid :: Query Master StatsMaster
 getStatsAcid = do
   db <- ask
-  return Stats
+  return StatsMaster
            { countCats    = Map.size $ tblCat    db
            , countFeeds   = Map.size $ tblFeed   db
            , countPersons = Map.size $ tblPerson db
-           , countItems   = Set.size $ idxItem   db
-           , countShards  = 1 + Set.size (shItem db)
+           , countItemsAll   = Set.size $ idxItem   db
+           , countShards  = 1 + Set.size (idxShard db)
            }
 
 getCatsAcid :: Query Master (Seq.Seq Cat)
@@ -363,7 +384,7 @@ getFeedsAcid = do
 getShItemAcid :: Query Master Set.IntSet
 getShItemAcid = do
   db <- ask
-  return $ shItem db
+  return $ idxShard db
 
 getCatAcid :: Int -> Query Master (Maybe Cat)
 getCatAcid k = do
@@ -383,21 +404,41 @@ getPersonAcid k = do
 getItemShardAcid :: ItemID -> Query Master ItemID
 getItemShardAcid (ItemID k) = do
   db <- ask
-  return $ ItemID $ case Set.lookupLE k (shItem db) of
-                           Just s -> s
-                           _      -> 0
+  return $ findShard k db
 
 mkUniqueIDAcid :: Item -> Query Master ItemID
 mkUniqueIDAcid i = do
   db <- ask
   return $ ItemID $ checkUniqueID (idxItem db) $ unItemID $ calcItemID i
 
--- ShardItem
+getItemPageAcid :: Int -> Int -> Query Master [(ItemID, ItemID)]
+getItemPageAcid i l = do
+  db <- ask
+  let go n x r = if n == 0 then r
+                 else case Set.lookupGT x (idxItem db) of
+                        Nothing -> r
+                        Just x' -> go (n - 1) x' $ (ItemID x', findShard x' db) : r
+  return $ go l i []
 
-getShardItemAcid :: ItemID -> Query ShardItem (Maybe Item)
+
+-- Shard
+
+getStatsShardAcid :: Query Shard StatsShard
+getStatsShardAcid = do
+  db <- ask
+  return StatsShard
+           { countItems = shSize db
+           }
+
+getShardItemAcid :: ItemID -> Query Shard (Maybe Item)
 getShardItemAcid (ItemID k) = do
   db <- ask
   return $ Map.lookup k (tblItem db)
+
+getShardItemsAcid :: [ItemID] -> Query Shard [Maybe Item]
+getShardItemsAcid is = do
+  db <- ask
+  return $ (\(ItemID k) -> Map.lookup k (tblItem db)) <$> is
 
 ------------------------------------------------------------------------------
 -- Update Queries
@@ -444,12 +485,12 @@ addMasterItemAcid i = do
 wipeMasterAcid :: Update Master ()
 wipeMasterAcid = put emptyDB
 
--- ShardItem
+-- Shard
 
-addShardItemAcid :: Item -> Update ShardItem Item
+addShardItemAcid :: Item -> Update Shard Item
 addShardItemAcid i = do
   db <- get
-  put $ db { shItemSize = shItemSize db + 1
+  put $ db { shSize = shSize db + 1
            , tblItem = Map.insert (unItemID $ itemID i) i $ tblItem db
            }
   return i
@@ -466,7 +507,7 @@ data GetStatsAcid = GetStatsAcid
 $(deriveSafeCopy 0 'base ''GetStatsAcid)
 
 instance Method GetStatsAcid where
-  type MethodResult GetStatsAcid = Stats
+  type MethodResult GetStatsAcid = StatsMaster
   type MethodState GetStatsAcid = Master
 
 instance QueryEvent GetStatsAcid
@@ -543,7 +584,7 @@ instance Method GetPersonAcid where
 
 instance QueryEvent GetPersonAcid
 
--- GetItemShardAcid
+-- getItemShardAcid
 
 data GetItemShardAcid = GetItemShardAcid ItemID
 
@@ -554,6 +595,19 @@ instance Method GetItemShardAcid where
   type MethodState GetItemShardAcid = Master
 
 instance QueryEvent GetItemShardAcid
+
+-- getItemPageAcid
+
+data GetItemPageAcid = GetItemPageAcid Int Int
+
+$(deriveSafeCopy 0 'base ''GetItemPageAcid)
+
+instance Method GetItemPageAcid where
+  type MethodResult GetItemPageAcid = [(ItemID, ItemID)]
+  type MethodState GetItemPageAcid = Master
+
+instance QueryEvent GetItemPageAcid
+
 
 -- MkUniqueIDAcid
 
@@ -638,6 +692,7 @@ instance IsAcidic Master where
                , QueryEvent  (\(GetFeedAcid k)       -> getFeedAcid k)
                , QueryEvent  (\(GetPersonAcid k)     -> getPersonAcid k)
                , QueryEvent  (\(GetItemShardAcid k)  -> getItemShardAcid k)
+               , QueryEvent  (\(GetItemPageAcid k l) -> getItemPageAcid k l)
                , QueryEvent  (\(MkUniqueIDAcid i)    -> mkUniqueIDAcid i)
                , UpdateEvent (\(AddCatAcid  c)       -> addCatAcid c)
                , UpdateEvent (\(AddFeedAcid f)       -> addFeedAcid f)
@@ -648,6 +703,18 @@ instance IsAcidic Master where
 
 
 
+-- getStatsShardAcid
+
+data GetStatsShardAcid = GetStatsShardAcid
+
+$(deriveSafeCopy 0 'base ''GetStatsShardAcid)
+
+instance Method GetStatsShardAcid where
+  type MethodResult GetStatsShardAcid = StatsShard
+  type MethodState GetStatsShardAcid = Shard
+
+instance QueryEvent GetStatsShardAcid
+
 -- getShardItemAcid
 
 data GetShardItemAcid = GetShardItemAcid ItemID
@@ -656,9 +723,21 @@ $(deriveSafeCopy 0 'base ''GetShardItemAcid)
 
 instance Method GetShardItemAcid where
   type MethodResult GetShardItemAcid = Maybe Item
-  type MethodState GetShardItemAcid = ShardItem
+  type MethodState GetShardItemAcid = Shard
 
 instance QueryEvent GetShardItemAcid
+
+-- getShardItemsAcid
+
+data GetShardItemsAcid = GetShardItemsAcid [ItemID]
+
+$(deriveSafeCopy 0 'base ''GetShardItemsAcid)
+
+instance Method GetShardItemsAcid where
+  type MethodResult GetShardItemsAcid = [Maybe Item]
+  type MethodState GetShardItemsAcid = Shard
+
+instance QueryEvent GetShardItemsAcid
 
 -- addShardItemAcid
 
@@ -668,16 +747,18 @@ $(deriveSafeCopy 0 'base ''AddShardItemAcid)
 
 instance Method AddShardItemAcid where
   type MethodResult AddShardItemAcid = Item
-  type MethodState AddShardItemAcid = ShardItem
+  type MethodState AddShardItemAcid = Shard
 
 instance UpdateEvent AddShardItemAcid
 
 
 -- ItemShard
 
-instance IsAcidic ShardItem where
-  acidEvents = [ QueryEvent  (\(GetShardItemAcid k) -> getShardItemAcid k)
-               , UpdateEvent (\(AddShardItemAcid i) -> addShardItemAcid i)
+instance IsAcidic Shard where
+  acidEvents = [ QueryEvent  (\(GetShardItemAcid k)   -> getShardItemAcid k)
+               , QueryEvent  (\(GetShardItemsAcid is) -> getShardItemsAcid is)
+               , QueryEvent  (\GetStatsShardAcid      -> getStatsShardAcid)
+               , UpdateEvent (\(AddShardItemAcid i)   -> addShardItemAcid i)
                ]
 
 ------------------------------------------------------------------------------
@@ -740,13 +821,17 @@ checkpoint = liftIO . createCheckpoint . master . unHandle
 archive :: MonadIO m => Handle -> m ()
 archive = liftIO . createArchive . master . unHandle
 
-getStats :: MonadIO m => Handle -> m (Stats, [(ItemID, UTCTime)])
+getStats :: MonadIO m => Handle -> m (StatsMaster, [(ItemID, UTCTime, StatsShard)])
 getStats h = do
   s <- mquery h GetStatsAcid
   liftIO $ bracket
     (takeMVar $ shards $ unHandle h)
     (putMVar $ shards $ unHandle h)
-    (\ss -> return (s, (\(k,(t,_)) -> (ItemID k, t)) <$> Map.toList ss ))
+    (\ss -> do
+      sds <- forM (Map.toList ss) $ \(k,(t,a)) -> do
+        stats <- liftIO $ query a GetStatsShardAcid
+        return (ItemID k, t, stats)
+      return (s, sds))
 
 getCat :: MonadIO m => Handle -> Int -> m (Maybe Cat)
 getCat h c = mquery h $ GetCatAcid c
@@ -762,6 +847,14 @@ getItem h k = do
   s <- mquery h $ GetItemShardAcid $ ItemID k
   withShard h s $ \(a, _) ->
     liftIO $ query a $ GetShardItemAcid $ ItemID k
+
+getItemPage :: MonadIO m => Handle -> Int -> Int -> m [Item]
+getItemPage h k l = do
+  iss <- mquery h $ GetItemPageAcid k l
+  mbs <- forM (groupByShard iss) $ \gs ->
+    withShard h (snd $ head gs) $ \(a, _) ->
+      liftIO $ query a $ GetShardItemsAcid $ fst <$> gs
+  return $ fromJust <$> filter (not . null) (concat $ reverse <$> mbs)
 
 getCats :: MonadIO m => Handle -> m (Seq.Seq Cat)
 getCats h = mquery h GetCatsAcid
@@ -784,14 +877,13 @@ addItems h is = do
     iid <- mquery h $ MkUniqueIDAcid i
     s   <- mquery h $ GetItemShardAcid iid
     return (i { itemID = iid }, s)
-  let gss = groupBy (\(_,x) (_,y) -> x == y) $ sortBy (\(_,x) (_,y) -> compare x y) iss
-  gss' <- forM gss $ \gs ->
+  gss <- forM (groupByShard iss) $ \gs ->
     withShard h (snd $ head gs) $ \(a, _) ->
       forM gs $ \(i, _) -> do
         _ <- liftIO $ update a $ AddShardItemAcid i
         _ <- mupdate h $ AddMasterItemAcid i
         return i
-  return $ concat gss'
+  return $ concat gss
 
 wipeDB :: MonadIO m => Handle -> m ()
 wipeDB h = do
