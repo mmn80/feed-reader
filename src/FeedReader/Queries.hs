@@ -57,7 +57,7 @@ calcPersonID :: Person -> PersonID
 calcPersonID p = PersonID $ hash $ personName p ++ personEmail p
 
 ------------------------------------------------------------------------------
--- Read Queries
+-- Queries
 ------------------------------------------------------------------------------
 
 getStatsAcid :: Query Master StatsMaster
@@ -120,9 +120,6 @@ getItemPageAcid i l = do
                         Just x' -> go (n - 1) x' $ (ItemID x', findShard x' db) : r
   return $ go l i []
 
-
--- Shard
-
 getStatsShardAcid :: Query Shard StatsShard
 getStatsShardAcid = do
   db <- ask
@@ -139,10 +136,6 @@ getShardItemsAcid :: [ItemID] -> Query Shard [Maybe Item]
 getShardItemsAcid is = do
   db <- ask
   return $ (\(ItemID k) -> Map.lookup k (tblItem db)) <$> is
-
-------------------------------------------------------------------------------
--- Update Queries
-------------------------------------------------------------------------------
 
 addCatAcid :: Cat -> Update Master Cat
 addCatAcid c = do
@@ -199,6 +192,8 @@ addShardItemAcid i = do
 -- SafeCopy Instances
 ------------------------------------------------------------------------------
 
+-- TODO: No TemplateHaskell
+
 $(deriveSafeCopy 0 'base ''Content)
 $(deriveSafeCopy 0 'base ''CatID)
 $(deriveSafeCopy 0 'base ''Cat)
@@ -218,8 +213,6 @@ $(deriveSafeCopy 0 'base ''Shard)
 -- makeAcidic
 ------------------------------------------------------------------------------
 
--- getStatsAcid
-
 data GetStatsAcid = GetStatsAcid
 
 $(deriveSafeCopy 0 'base ''GetStatsAcid)
@@ -230,7 +223,6 @@ instance Method GetStatsAcid where
 
 instance QueryEvent GetStatsAcid
 
--- getCatsAcid
 
 data GetCatsAcid = GetCatsAcid
 
@@ -242,7 +234,6 @@ instance Method GetCatsAcid where
 
 instance QueryEvent GetCatsAcid
 
--- getFeedsAcid
 
 data GetFeedsAcid = GetFeedsAcid
 
@@ -254,7 +245,6 @@ instance Method GetFeedsAcid where
 
 instance QueryEvent GetFeedsAcid
 
--- getShItemAcid
 
 data GetShItemAcid = GetShItemAcid
 
@@ -266,7 +256,6 @@ instance Method GetShItemAcid where
 
 instance QueryEvent GetShItemAcid
 
--- getCatAcid
 
 data GetCatAcid = GetCatAcid Int
 
@@ -278,7 +267,6 @@ instance Method GetCatAcid where
 
 instance QueryEvent GetCatAcid
 
--- getFeedAcid
 
 data GetFeedAcid = GetFeedAcid Int
 
@@ -290,7 +278,6 @@ instance Method GetFeedAcid where
 
 instance QueryEvent GetFeedAcid
 
--- getPersonAcid
 
 data GetPersonAcid = GetPersonAcid Int
 
@@ -302,7 +289,6 @@ instance Method GetPersonAcid where
 
 instance QueryEvent GetPersonAcid
 
--- getItemShardAcid
 
 data GetItemShardAcid = GetItemShardAcid ItemID
 
@@ -314,7 +300,6 @@ instance Method GetItemShardAcid where
 
 instance QueryEvent GetItemShardAcid
 
--- getItemPageAcid
 
 data GetItemPageAcid = GetItemPageAcid Int Int
 
@@ -327,8 +312,6 @@ instance Method GetItemPageAcid where
 instance QueryEvent GetItemPageAcid
 
 
--- MkUniqueIDAcid
-
 data MkUniqueIDAcid = MkUniqueIDAcid Item
 
 $(deriveSafeCopy 0 'base ''MkUniqueIDAcid)
@@ -339,7 +322,6 @@ instance Method MkUniqueIDAcid where
 
 instance QueryEvent MkUniqueIDAcid
 
--- addCatAcid
 
 data AddCatAcid = AddCatAcid Cat
 
@@ -351,7 +333,6 @@ instance Method AddCatAcid where
 
 instance UpdateEvent AddCatAcid
 
--- addFeedAcid
 
 data AddFeedAcid = AddFeedAcid Feed
 
@@ -363,7 +344,6 @@ instance Method AddFeedAcid where
 
 instance UpdateEvent AddFeedAcid
 
--- addPersonAcid
 
 data AddPersonAcid = AddPersonAcid Person
 
@@ -375,7 +355,6 @@ instance Method AddPersonAcid where
 
 instance UpdateEvent AddPersonAcid
 
--- addMasterItemAcid
 
 data AddMasterItemAcid = AddMasterItemAcid Item
 
@@ -387,7 +366,6 @@ instance Method AddMasterItemAcid where
 
 instance UpdateEvent AddMasterItemAcid
 
--- wipeMasterAcid
 
 data WipeMasterAcid = WipeMasterAcid
 
@@ -398,8 +376,6 @@ instance Method WipeMasterAcid where
   type MethodState WipeMasterAcid = Master
 
 instance UpdateEvent WipeMasterAcid
-
--- Master
 
 instance IsAcidic Master where
   acidEvents = [ QueryEvent  (\ GetStatsAcid         -> getStatsAcid)
@@ -420,9 +396,6 @@ instance IsAcidic Master where
                ]
 
 
-
--- getStatsShardAcid
-
 data GetStatsShardAcid = GetStatsShardAcid
 
 $(deriveSafeCopy 0 'base ''GetStatsShardAcid)
@@ -433,7 +406,6 @@ instance Method GetStatsShardAcid where
 
 instance QueryEvent GetStatsShardAcid
 
--- getShardItemAcid
 
 data GetShardItemAcid = GetShardItemAcid ItemID
 
@@ -445,7 +417,6 @@ instance Method GetShardItemAcid where
 
 instance QueryEvent GetShardItemAcid
 
--- getShardItemsAcid
 
 data GetShardItemsAcid = GetShardItemsAcid [ItemID]
 
@@ -457,7 +428,6 @@ instance Method GetShardItemsAcid where
 
 instance QueryEvent GetShardItemsAcid
 
--- addShardItemAcid
 
 data AddShardItemAcid = AddShardItemAcid Item
 
@@ -468,9 +438,6 @@ instance Method AddShardItemAcid where
   type MethodState AddShardItemAcid = Shard
 
 instance UpdateEvent AddShardItemAcid
-
-
--- ItemShard
 
 instance IsAcidic Shard where
   acidEvents = [ QueryEvent  (\(GetShardItemAcid k)   -> getShardItemAcid k)

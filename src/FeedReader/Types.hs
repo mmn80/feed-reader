@@ -33,8 +33,8 @@ module FeedReader.Types
   ) where
 
 import           Control.Applicative ((<|>))
-import qualified Data.IntMap           as Map
-import qualified Data.IntSet           as Set
+import qualified Data.IntMap         as Map
+import qualified Data.IntSet         as Set
 import           Data.Maybe          (fromMaybe)
 import           Data.Time.Clock     (UTCTime, diffUTCTime)
 import           Data.Time.Format    (defaultTimeLocale, iso8601DateFormat,

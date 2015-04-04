@@ -1,4 +1,4 @@
-{-# LANGUAGE TypeFamilies    #-}
+{-# LANGUAGE TypeFamilies #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -37,24 +37,27 @@ module FeedReader.DB
   , wipeDB
   ) where
 
-import           Control.Concurrent    (MVar, modifyMVar_, newMVar, putMVar,
-                                        takeMVar)
-import           Control.Exception     (bracket)
-import           Control.Monad         (forM, forM_)
-import           Control.Monad.Trans   (MonadIO (liftIO))
-import           Data.Acid
-import           Data.Acid.Advanced
-import qualified Data.IntMap           as Map
-import qualified Data.IntSet           as Set
-import           Data.List             (groupBy, sortBy)
-import           Data.Maybe            (fromJust, fromMaybe)
-import qualified Data.Sequence         as Seq
-import           Data.Time.Clock       (UTCTime, getCurrentTime)
-import           FeedReader.Types
+import           Control.Concurrent  (MVar, modifyMVar_, newMVar, putMVar,
+                                      takeMVar)
+import           Control.Exception   (bracket)
+import           Control.Monad       (forM, forM_)
+import           Control.Monad.Trans (MonadIO (liftIO))
+import           Data.Acid           (AcidState, EventResult, QueryEvent,
+                                      UpdateEvent, closeAcidState,
+                                      createArchive, createCheckpoint,
+                                      openLocalStateFrom, query, update)
+import           Data.Acid.Advanced  (MethodState)
+import qualified Data.IntMap         as Map
+import qualified Data.IntSet         as Set
+import           Data.List           (groupBy, sortBy)
+import           Data.Maybe          (fromJust, fromMaybe)
+import qualified Data.Sequence       as Seq
+import           Data.Time.Clock     (UTCTime, getCurrentTime)
 import           FeedReader.Queries
-import           System.Directory      (doesDirectoryExist,
-                                        removeDirectoryRecursive)
-import           System.FilePath       ((</>))
+import           FeedReader.Types
+import           System.Directory    (doesDirectoryExist,
+                                      removeDirectoryRecursive)
+import           System.FilePath     ((</>))
 
 
 type OpenedShards = Map.IntMap (UTCTime, AcidState Shard)
@@ -73,15 +76,15 @@ newtype Handle = Handle { unHandle :: DBState } deriving (Eq)
 instance Show Handle where
   show (Handle (DBState r1 _ _)) = r1
 
+------------------------------------------------------------------------------
+-- Internal
+------------------------------------------------------------------------------
+
 maxOpenedShards :: Int
 maxOpenedShards = 5
 
 maxShardItems :: Int
 maxShardItems = 100
-
-------------------------------------------------------------------------------
--- Internal
-------------------------------------------------------------------------------
 
 mquery :: (MonadIO m, QueryEvent e, MethodState e ~ Master) =>
           Handle -> e -> m (EventResult e)
@@ -136,32 +139,6 @@ closeShards h =
   liftIO $ modifyMVar_ (shards $ unHandle h) $ \ss -> do
     mapM_ (liftIO . closeAcidState . snd) ss
     return Map.empty
-
-------------------------------------------------------------------------------
--- Conversion
-------------------------------------------------------------------------------
-
-addItemConv :: (MonadIO m, ToItem i) => Handle -> i -> FeedID -> URL -> m Item
-addItemConv h it fid u = do
-  df <- liftIO getCurrentTime
-  let (i, as, cs) = toItem it fid u df
-  as' <- sequence $ addPerson h <$> as
-  cs' <- sequence $ addPerson h <$> cs
-  let i' = i { itemAuthors      = personID <$> as'
-             , itemContributors = personID <$> cs'
-             }
-  mupdate h $ AddMasterItemAcid i'
-
-addFeedConv :: (MonadIO m, ToFeed f) => Handle -> f -> CatID -> URL -> m Feed
-addFeedConv h it cid u = do
-  df <- liftIO getCurrentTime
-  let (f, as, cs) = toFeed it cid u df
-  as' <- sequence $ addPerson h <$> as
-  cs' <- sequence $ addPerson h <$> cs
-  let f' = f { feedAuthors      = personID <$> as'
-             , feedContributors = personID <$> cs'
-             }
-  mupdate h $ AddFeedAcid f'
 
 ------------------------------------------------------------------------------
 -- Main DB Functions
@@ -263,3 +240,29 @@ wipeDB h = do
     ex <- liftIO $ doesDirectoryExist sf
     if ex then liftIO $ removeDirectoryRecursive sf
     else liftIO $ putStrLn $ "  Shard dir not found: " ++ sf
+
+------------------------------------------------------------------------------
+-- Conversion
+------------------------------------------------------------------------------
+
+addItemConv :: (MonadIO m, ToItem i) => Handle -> i -> FeedID -> URL -> m Item
+addItemConv h it fid u = do
+  df <- liftIO getCurrentTime
+  let (i, as, cs) = toItem it fid u df
+  as' <- sequence $ addPerson h <$> as
+  cs' <- sequence $ addPerson h <$> cs
+  let i' = i { itemAuthors      = personID <$> as'
+             , itemContributors = personID <$> cs'
+             }
+  mupdate h $ AddMasterItemAcid i'
+
+addFeedConv :: (MonadIO m, ToFeed f) => Handle -> f -> CatID -> URL -> m Feed
+addFeedConv h it cid u = do
+  df <- liftIO getCurrentTime
+  let (f, as, cs) = toFeed it cid u df
+  as' <- sequence $ addPerson h <$> as
+  cs' <- sequence $ addPerson h <$> cs
+  let f' = f { feedAuthors      = personID <$> as'
+             , feedContributors = personID <$> cs'
+             }
+  mupdate h $ AddFeedAcid f'

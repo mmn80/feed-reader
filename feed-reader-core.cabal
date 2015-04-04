@@ -33,15 +33,15 @@ library
     FeedReader.Types,
     FeedReader.Queries,
     FeedReader.DB,
-    FeedReader.XML2DB
+    FeedReader.Convert
 
   -- other-modules:
   -- other-extensions:
   hs-source-dirs:      src
   default-language:    Haskell2010
 
-executable example
-  main-is: FeedReader/Example.hs
+executable feeds-console
+  main-is: FeedReader/Console.hs
   hs-source-dirs:      src
   default-language:    Haskell2010
   build-depends:
