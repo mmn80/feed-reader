@@ -40,7 +40,7 @@ module FeedReader.DB
 import           Control.Concurrent  (MVar, modifyMVar_, newMVar, putMVar,
                                       takeMVar)
 import           Control.Exception   (bracket)
-import           Control.Monad       (forM, forM_)
+import           Control.Monad       (forM, forM_, when)
 import           Control.Monad.Trans (MonadIO (liftIO))
 import           Data.Acid           (AcidState, EventResult, QueryEvent,
                                       UpdateEvent, closeAcidState,
@@ -63,18 +63,19 @@ import           System.FilePath     ((</>))
 type OpenedShards = Map.IntMap (UTCTime, AcidState Shard)
 
 data DBState = DBState
-  { rootDir :: FilePath
-  , master  :: AcidState Master
-  , shards  :: MVar OpenedShards
+  { rootDir    :: FilePath
+  , master     :: AcidState Master
+  , masterLock :: MVar Bool
+  , shards     :: MVar OpenedShards
   }
 
 instance Eq DBState where
-  DBState r1 _ _ == DBState r2 _ _ = r1 == r2
+  DBState r1 _ _ _ == DBState r2 _ _ _ = r1 == r2
 
 newtype Handle = Handle { unHandle :: DBState } deriving (Eq)
 
 instance Show Handle where
-  show (Handle (DBState r1 _ _)) = r1
+  show (Handle (DBState r1 _ _ _)) = r1
 
 ------------------------------------------------------------------------------
 -- Internal
@@ -90,9 +91,19 @@ mquery :: (MonadIO m, QueryEvent e, MethodState e ~ Master) =>
           Handle -> e -> m (EventResult e)
 mquery  h = liftIO . query  (master $ unHandle h)
 
+withMasterLock :: MonadIO m => Handle -> IO a -> m a
+withMasterLock h a = liftIO $ bracket
+  (takeMVar $ masterLock $ unHandle h)
+  (\_ -> putMVar (masterLock $ unHandle h) False)
+  (const a)
+
+mupdate_ :: (MonadIO m, UpdateEvent e, MethodState e ~ Master) =>
+            Handle -> e -> m (EventResult e)
+mupdate_ h e = liftIO $ update (master $ unHandle h) e
+
 mupdate :: (MonadIO m, UpdateEvent e, MethodState e ~ Master) =>
           Handle -> e -> m (EventResult e)
-mupdate h = liftIO . update (master $ unHandle h)
+mupdate h e = withMasterLock h $ mupdate_ h e
 
 shardPath :: Handle -> ItemID -> FilePath
 shardPath h i = rootDir (unHandle h) </> "shard_" ++ show (unItemID i)
@@ -140,6 +151,38 @@ closeShards h =
     mapM_ (liftIO . closeAcidState . snd) ss
     return Map.empty
 
+resyncShard :: MonadIO m => Handle -> AcidState Shard -> m ()
+resyncShard h a = do
+  StatsShard c sid <- liftIO $ query a GetStatsShardAcid
+  --ss <- mquery h GetShItemAcid
+  --let c' = Map.lookup sid ss
+  --when (c' == c - 1)     --TODO: update master
+  --when (c' == c `div` 2) --TODO: update master
+  when (c > maxShardItems) $ do
+    (l, r, lsz, rsz) <- liftIO $ query a GetShardSplit
+    let lid = ItemID $ fst $ Map.findMin l
+    let rid = ItemID $ fst $ Map.findMin r
+    createShard h r rid rsz
+    mupdate_ h $ SplitShardMasterAcid lid lsz rid rsz
+    liftIO $ update a $ SplitShardAcid rid lsz
+    return ()
+
+deleteShardDir :: MonadIO m => Handle -> ItemID -> m Bool
+deleteShardDir h s = do
+  let sf = shardPath h s
+  ex <- liftIO $ doesDirectoryExist sf
+  when ex $ liftIO $ removeDirectoryRecursive sf
+  return $ not ex
+
+createShard :: MonadIO m => Handle -> Map.IntMap Item -> ItemID -> Int -> m ()
+createShard h t s sz = liftIO $ bracket
+  (do
+     _ <- deleteShardDir h s
+     openLocalStateFrom (shardPath h s) Shard { shSize  = sz
+                                              , tblItem = t })
+  closeAcidState
+  (\a -> return ())
+
 ------------------------------------------------------------------------------
 -- Main DB Functions
 ------------------------------------------------------------------------------
@@ -149,9 +192,11 @@ open r = do
   let root = fromMaybe "data" r
   acid <- liftIO $ openLocalStateFrom (root </> "master") emptyMaster
   s <- liftIO $ newMVar Map.empty
-  return $ Handle DBState { rootDir = root
-                          , master  = acid
-                          , shards  = s
+  l <- liftIO $ newMVar False
+  return $ Handle DBState { rootDir    = root
+                          , master     = acid
+                          , masterLock = l
+                          , shards     = s
                           }
 
 close :: MonadIO m => Handle -> m ()
@@ -216,17 +261,19 @@ addPerson :: MonadIO m => Handle -> Person -> m Person
 addPerson h c = mupdate h $ AddPersonAcid c
 
 addItems :: MonadIO m => Handle -> [Item] -> m [Item]
-addItems h is = do
+addItems h is = withMasterLock h $ do
   iss <- forM is $ \i -> do
-    iid <- mquery h $ MkUniqueIDAcid i
+    iid <- mquery h $ MkUniqueIDAcid i     {- TODO: check for self collisions -}
     s   <- mquery h $ GetItemShardAcid iid
     return (i { itemID = iid }, s)
   gss <- forM (groupByShard iss) $ \gs ->
-    withShard h (snd $ head gs) $ \(a, _) ->
-      forM gs $ \(i, _) -> do
-        _ <- liftIO $ update a $ AddShardItemAcid i
-        _ <- mupdate h $ AddMasterItemAcid i
-        return i
+    withShard h (snd $ head gs) $ \(a, _) -> do
+      gs' <- forM gs $ \(i, _) -> do
+               _ <- liftIO $ update a $ AddShardItemAcid i
+               _ <- mupdate_ h $ AddMasterItemAcid i
+               return i
+      resyncShard h a
+      return gs'
   return $ concat gss
 
 wipeDB :: MonadIO m => Handle -> m ()
@@ -234,12 +281,9 @@ wipeDB h = do
   ss <- mquery h GetShItemAcid
   mupdate h WipeMasterAcid
   closeShards h
-  let ss' = 0 : Set.toList ss
-  forM_ ss' $ \s -> do
-    let sf = shardPath h $ ItemID s
-    ex <- liftIO $ doesDirectoryExist sf
-    if ex then liftIO $ removeDirectoryRecursive sf
-    else liftIO $ putStrLn $ "  Shard dir not found: " ++ sf
+  forM_ ((0, 0) : Map.toList ss) $ \(s, _) -> do
+    nf <- deleteShardDir h $ ItemID s
+    when nf $ liftIO $ putStrLn $ "Directory for shard #" ++ show s ++ " not found"
 
 ------------------------------------------------------------------------------
 -- Conversion
@@ -254,7 +298,7 @@ addItemConv h it fid u = do
   let i' = i { itemAuthors      = personID <$> as'
              , itemContributors = personID <$> cs'
              }
-  mupdate h $ AddMasterItemAcid i'
+  mupdate h $ AddMasterItemAcid i' --TODO: add into shard
 
 addFeedConv :: (MonadIO m, ToFeed f) => Handle -> f -> CatID -> URL -> m Feed
 addFeedConv h it cid u = do

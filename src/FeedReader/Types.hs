@@ -117,6 +117,7 @@ data StatsMaster = StatsMaster
 
 data StatsShard = StatsShard
   { countItems :: Int
+  , shardID    :: ItemID
   }
 
 type NestedMap = Map.IntMap Set.IntSet
@@ -127,7 +128,7 @@ insertNested k i m = Map.insert k newInner m
     newInner = Set.insert i $ fromMaybe Set.empty $ Map.lookup k m
 
 data Master = Master
-  { idxShard   :: !Set.IntSet
+  { idxShard   :: !(Map.IntMap Int)
   , idxItem    :: !Set.IntSet
   , ixCatItem  :: !NestedMap
   , ixFeedItem :: !NestedMap
@@ -137,7 +138,7 @@ data Master = Master
   }
 
 emptyMaster :: Master
-emptyMaster = Master Set.empty Set.empty Map.empty Map.empty Map.empty Map.empty Map.empty
+emptyMaster = Master Map.empty Set.empty Map.empty Map.empty Map.empty Map.empty Map.empty
 
 data Shard = Shard
   { shSize  :: !Int
