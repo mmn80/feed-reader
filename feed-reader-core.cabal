@@ -30,6 +30,8 @@ library
     feed
 
   exposed-modules:
+    FeedReader.Types,
+    FeedReader.Queries,
     FeedReader.DB,
     FeedReader.XML2DB
 
