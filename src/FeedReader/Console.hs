@@ -25,7 +25,8 @@ introMessage = do
 helpMessage = do
   yield "Commands (use _ instead of space inside arguments):"
   yield "  help    : prints this helpful message"
-  yield "  stats   : prints record counts"
+  yield "  stats   : prints general stats"
+  yield "  shards  : lists all shard IDs with their record counts"
   yield "  get t k : prints the item with ID == k"
   yield "          : t is the table, one of 'cat', 'feed', 'person' or 'item'"
   yield "  page p k: prints the next p entries with ID > k"
@@ -42,6 +43,7 @@ processCommand h = do
   case head args of
     "help"    -> helpMessage
     "stats"   -> checkArgs 0 args h cmdStats
+    "shards"  -> checkArgs 0 args h cmdShards
     "get"     -> checkArgs 2 args h cmdGet
     "page"    -> checkArgs 2 args h cmdPage
     "gen"     -> checkArgs 2 args h cmdGen
@@ -138,6 +140,7 @@ format sz i = i ++ replicate (sz - length i) ' '
 
 cmdStats h args = timed $ do
   (s, ss) <- liftBase $ DB.getStats h
+  yield $ "Pending       : " ++ show (DB.statsPending s)
   yield $ "Category count: " ++ show (DB.countCats s)
   yield $ "Feed count    : " ++ show (DB.countFeeds s)
   yield $ "Person count  : " ++ show (DB.countPersons s)
@@ -149,6 +152,12 @@ cmdStats h args = timed $ do
                              "Last accessed"
   forM_ ss $ \(sid, t, ssd) ->
     yield $ "  " ++ format 20 (show sid) ++ format 10 (show $ countItems ssd) ++ show t
+
+cmdShards h args = timed $ do
+  ss <- liftBase $ DB.getShardStats h
+  yield $ "  Shard ID"  ++ replicate (20 - 8) ' ' ++ "Entries"
+  forM_ ss $ \(sid, sz) ->
+    yield $ "  " ++ format 20 (show sid) ++ format 10 (show sz)
 
 cmdGet h args = timed $ do
   let t = args !! 1

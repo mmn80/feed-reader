@@ -19,11 +19,18 @@ module FeedReader.Types
   , imageFromURL
   , StatsMaster (..)
   , StatsShard (..)
-  , NestedMap
-  , insertNested
+  , ShardSize
+  , ShardIdx (..)
+  , PrimaryIdx
+  , NestedIdx
+  , Table
+  , PendingOp (..)
   , Master (..)
-  , emptyMaster
   , Shard (..)
+  , insertPrimaryIdx
+  , pageFoldPrimaryIdx
+  , insertNestedIdx
+  , emptyMaster
   , emptyShard
   , ToFeed (..)
   , ToPerson (..)
@@ -35,7 +42,7 @@ module FeedReader.Types
 import           Control.Applicative ((<|>))
 import qualified Data.IntMap         as Map
 import qualified Data.IntSet         as Set
-import           Data.Maybe          (fromMaybe)
+import           Data.Maybe          (fromMaybe, fromJust)
 import           Data.Time.Clock     (UTCTime, diffUTCTime)
 import           Data.Time.Format    (defaultTimeLocale, iso8601DateFormat,
                                       parseTimeM, rfc822DateFormat)
@@ -107,8 +114,50 @@ data Item = Item
   , itemUpdated      :: UTCTime
   } deriving (Show)
 
+type ShardSize  = Int
+
+data ShardIdx = ShardIdx
+  { shardSize :: ShardSize
+  , shardKeys :: Set.IntSet
+  }
+
+type PrimaryIdx = Map.IntMap ShardIdx
+type NestedIdx  = Map.IntMap Set.IntSet
+type Table a    = Map.IntMap a
+
+data PendingOp = NoPendingOp
+               | PendingAddItem ItemID Item
+               | PendingSplitPhase0 ItemID ItemID
+               | PendingSplitPhase1 ItemID ItemID
+               deriving (Show)
+
+data Master = Master
+  { pendingOp  :: !PendingOp
+  , idxItem    :: !PrimaryIdx
+  , ixCatItem  :: !NestedIdx
+  , ixFeedItem :: !NestedIdx
+  , tblCat     :: !(Table Cat)
+  , tblFeed    :: !(Table Feed)
+  , tblPerson  :: !(Table Person)
+  }
+
+data Shard = Shard
+  { shSize  :: !ShardSize
+  , tblItem :: !(Table Item)
+  }
+
+class ToFeed f where
+  toFeed :: f -> CatID -> URL -> UTCTime -> (Feed, [Person], [Person])
+
+class ToPerson p where
+  toPerson :: p -> Person
+
+class ToItem i where
+  toItem :: i -> FeedID -> URL -> UTCTime -> (Item, [Person], [Person])
+
 data StatsMaster = StatsMaster
-  { countCats     :: Int
+  { statsPending  :: PendingOp
+  , countCats     :: Int
   , countFeeds    :: Int
   , countPersons  :: Int
   , countItemsAll :: Int
@@ -120,42 +169,27 @@ data StatsShard = StatsShard
   , shardID    :: ItemID
   }
 
-type NestedMap = Map.IntMap Set.IntSet
-
-insertNested :: Int -> Int -> NestedMap -> NestedMap
-insertNested k i m = Map.insert k newInner m
+insertNestedIdx :: Int -> Int -> NestedIdx -> NestedIdx
+insertNestedIdx k i m = Map.insert k new m
   where
-    newInner = Set.insert i $ fromMaybe Set.empty $ Map.lookup k m
+    new = Set.insert i $ fromMaybe Set.empty $ Map.lookup k m
 
-data Master = Master
-  { idxShard   :: !(Map.IntMap Int)
-  , idxItem    :: !Set.IntSet
-  , ixCatItem  :: !NestedMap
-  , ixFeedItem :: !NestedMap
-  , tblCat     :: !(Map.IntMap Cat)
-  , tblFeed    :: !(Map.IntMap Feed)
-  , tblPerson  :: !(Map.IntMap Person)
-  }
+insertPrimaryIdx :: Int -> Int -> PrimaryIdx -> PrimaryIdx
+insertPrimaryIdx s i m = Map.insert s (ShardIdx (sz + 1) $ Set.insert i ix) m
+  where
+    ShardIdx sz ix = fromMaybe (ShardIdx 0 Set.empty) $ Map.lookup s m
 
-emptyMaster :: Master
-emptyMaster = Master Map.empty Set.empty Map.empty Map.empty Map.empty Map.empty Map.empty
-
-data Shard = Shard
-  { shSize  :: !Int
-  , tblItem :: !(Map.IntMap Item)
-  }
-
-emptyShard :: Shard
-emptyShard = Shard 0 Map.empty
-
-class ToFeed f where
-  toFeed :: f -> CatID -> URL -> UTCTime -> (Feed, [Person], [Person])
-
-class ToPerson p where
-  toPerson :: p -> Person
-
-class ToItem i where
-  toItem :: i -> FeedID -> URL -> UTCTime -> (Item, [Person], [Person])
+pageFoldPrimaryIdx :: ItemID -> (ItemID -> ShardIdx -> a -> a) ->
+                      (ItemID -> a -> Bool) -> a -> PrimaryIdx -> a
+pageFoldPrimaryIdx sid f stop x m =
+  let mbs = Map.lookup (unItemID sid) m in
+  if null mbs then x
+  else let x' = f sid (fromJust mbs) x in
+       let mbs' = Map.lookupGT (unItemID sid) m in
+       if null mbs' then x'
+       else let (sid', _) = fromJust mbs' in
+            if stop (ItemID sid') x' then x'
+            else pageFoldPrimaryIdx (ItemID sid') f stop x' m
 
 text2UTCTime :: String -> UTCTime -> UTCTime
 text2UTCTime t df = fromMaybe df $ iso <|> iso' <|> rfc
@@ -177,6 +211,12 @@ imageFromURL u = Image
   , imageWidth       = 0
   , imageHeight      = 0
   }
+
+emptyMaster :: Master
+emptyMaster = Master NoPendingOp Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty
+
+emptyShard :: Shard
+emptyShard = Shard 0 Map.empty
 
 unsetCatID :: CatID
 unsetCatID = CatID 0
