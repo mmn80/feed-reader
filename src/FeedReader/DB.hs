@@ -238,10 +238,20 @@ close h = do
   closeShards h
 
 checkpoint :: MonadIO m => Handle -> m ()
-checkpoint = liftIO . createCheckpoint . master . unHandle
+checkpoint h = do
+  liftIO $ createCheckpoint $ master $ unHandle h
+  ss <- liftIO $ mquery h GetShardsAcid
+  forM_ ss $ \(sid, _) ->
+    withShard h sid $ \(a, _) ->
+      liftIO $ createCheckpoint a
 
 archive :: MonadIO m => Handle -> m ()
-archive = liftIO . createArchive . master . unHandle
+archive h = do
+  liftIO $ createArchive $ master $ unHandle h
+  ss <- liftIO $ mquery h GetShardsAcid
+  forM_ ss $ \(sid, _) ->
+    withShard h sid $ \(a, _) ->
+      liftIO $ createArchive a
 
 getStats :: MonadIO m => Handle -> m (StatsMaster, [(ShardID, UTCTime, ShardSize)])
 getStats h = do
