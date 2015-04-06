@@ -8,10 +8,10 @@ module FeedReader.Queries
   , GetFeedsAcid (..)
   , GetShardsAcid (..)
   , GetShardIdxAcid (..)
-  , GetCatAcid (..)
-  , GetFeedAcid (..)
-  , GetPersonAcid (..)
-  , GetItemShardAcid (..)
+  , FindCatAcid (..)
+  , FindFeedAcid (..)
+  , FindPersonAcid (..)
+  , FindItemShardAcid (..)
   , GetItemPageAcid (..)
   , MkUniqueIDAcid (..)
   , AddCatAcid (..)
@@ -21,9 +21,9 @@ module FeedReader.Queries
   , SplitShardMasterAcid(..)
   , UpdatePendingOpAcid(..)
   , WipeMasterAcid (..)
-  , GetShardItemAcid (..)
+  , FindShardItemAcid (..)
   , GetShardItemsAcid (..)
-  , GetStatsShardAcid (..)
+  , GetShardSizeAcid (..)
   , SplitShardAcid (..)
   , AddShardItemAcid (..)
   ) where
@@ -32,31 +32,9 @@ import           Control.Monad.Reader  (ask)
 import           Control.Monad.State   (get, put)
 import           Data.Acid
 import           Data.Acid.Advanced
-import           Data.Hashable         (hash)
-import qualified Data.IntMap           as Map
-import qualified Data.IntSet           as Set
-import           Data.Maybe            (fromJust)
 import           Data.SafeCopy
 import qualified Data.Sequence         as Seq
-import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import           FeedReader.Types
-
-findShard :: Int -> Master -> (ShardID, ShardSize)
-findShard k m = case Map.lookupLE k (idxItem m) of
-                  Just (s, ShardIdx sz _) -> (ShardID s, sz)
-                  Nothing                 -> (unsetShardID, 0)
-
-calcCatID :: Cat -> CatID
-calcCatID = CatID . hash . catName
-
-calcFeedID :: Feed -> FeedID
-calcFeedID = FeedID . hash . feedURL
-
-calcItemID :: Item -> ItemID
-calcItemID = ItemID . fromInteger . round . utcTimeToPOSIXSeconds . itemUpdated
-
-calcPersonID :: Person -> PersonID
-calcPersonID p = PersonID $ hash $ personName p ++ personEmail p
 
 ------------------------------------------------------------------------------
 -- Master Queries
@@ -65,13 +43,13 @@ calcPersonID p = PersonID $ hash $ personName p ++ personEmail p
 getStatsAcid :: Query Master StatsMaster
 getStatsAcid = do
   db <- ask
-  let sz = Map.size (idxItem db)
-  let sza = sum $ shardSize <$> idxItem db
+  let sz = sizeShards $ idxItem db
+  let sza = sizePrimary $ idxItem db
   return StatsMaster
            { statsPending  = pendingOp db
-           , countCats     = Map.size $ tblCat    db
-           , countFeeds    = Map.size $ tblFeed   db
-           , countPersons  = Map.size $ tblPerson db
+           , countCats     = tableSize $ tblCat    db
+           , countFeeds    = tableSize $ tblFeed   db
+           , countPersons  = tableSize $ tblPerson db
            , countItemsAll = sza
            , countShards   = if sz == 0 then 1 else sz
            }
@@ -84,121 +62,101 @@ getPendingOpAcid = do
 getCatsAcid :: Query Master (Seq.Seq Cat)
 getCatsAcid = do
   db <- ask
-  return $ Map.foldr (flip (Seq.|>)) Seq.empty $ tblCat db
+  return $ foldr (flip (Seq.|>)) Seq.empty $ tblCat db
 
 getFeedsAcid :: Query Master (Seq.Seq Feed)
 getFeedsAcid = do
   db <- ask
-  return $ Map.foldr (flip (Seq.|>)) Seq.empty $ tblFeed db
+  return $ foldr (flip (Seq.|>)) Seq.empty $ tblFeed db
 
-getShardIdxAcid :: Int -> Query Master (Maybe ShardIdx)
+getShardIdxAcid :: ShardID -> Query Master (Maybe (ShardIdx ItemID))
 getShardIdxAcid k = do
   db <- ask
-  return $ Map.lookup k $ idxItem db
+  return $ findShard k $ idxItem db
 
 getShardsAcid :: Query Master (Seq.Seq (ShardID, ShardSize))
 getShardsAcid = do
   db <- ask
-  let f k (ShardIdx l _) s = s Seq.|> (ShardID k, l)
-  if null (idxItem db) then return $ Seq.singleton (unsetShardID, 0)
-  else return $ Map.foldrWithKey f Seq.empty $ idxItem db
+  return $ getShardsInfo $ idxItem db
 
-getCatAcid :: Int -> Query Master (Maybe Cat)
-getCatAcid k = do
+findCatAcid :: Int -> Query Master (Maybe Cat)
+findCatAcid k = do
   db <- ask
-  return $ Map.lookup k (tblCat db)
+  return $ tableLookup k (tblCat db)
 
-getFeedAcid :: Int -> Query Master (Maybe Feed)
-getFeedAcid k = do
+findFeedAcid :: Int -> Query Master (Maybe Feed)
+findFeedAcid k = do
   db <- ask
-  return $ Map.lookup k (tblFeed db)
+  return $ tableLookup k (tblFeed db)
 
-getPersonAcid :: Int -> Query Master (Maybe Person)
-getPersonAcid k = do
+findPersonAcid :: Int -> Query Master (Maybe Person)
+findPersonAcid k = do
   db <- ask
-  return $ Map.lookup k (tblPerson db)
+  return $ tableLookup k (tblPerson db)
 
-getItemShardAcid :: ItemID -> Query Master ShardID
-getItemShardAcid i = do
+findItemShardAcid :: Int -> Query Master ShardID
+findItemShardAcid i = do
   db <- ask
-  return $ fst $ findShard (unItemID i) db
+  return $ fst $ findParentShard i $ idxItem db
 
 mkUniqueIDAcid :: Item -> Query Master ItemID
 mkUniqueIDAcid i = do
   db <- ask
-  let checkSet sid idx x = if Set.notMember x (shardKeys idx) then x
-                           else checkSet sid idx (x + 1)
-  let x0 = unItemID $ calcItemID i
-  let stop sid x = x < unShardID sid
-  return $ ItemID $ pageFoldPrimaryIdx (fst $ findShard x0 db)
-                                       checkSet stop x0 $ idxItem db
+  return $ findUnusedID (fromRecord i) $ idxItem db
 
 getItemPageAcid :: Int -> Int -> Query Master [(ItemID, ShardID)]
 getItemPageAcid i l = do
   db <- ask
-  let go sid x (n, rs) m =
-        if n == 0 then (0, rs)
-        else case Set.lookupGT x m of
-               Nothing -> (n, rs)
-               Just x' -> go sid x' (n - 1, (ItemID x', sid) : rs) m
-  let f sid (ShardIdx sz s) (n, rs) = go sid i (n, rs) s
-  let stop k (n, _) = n == 0
-  return $ snd $ pageFoldPrimaryIdx (fst $ findShard i db) f stop (l, []) $ idxItem db
+  return $ nextPage i l $ idxItem db
 
 addCatAcid :: Cat -> Update Master Cat
 addCatAcid c = do
   db <- get
-  let cid = calcCatID c
+  let cid = fromRecord c
   let c' = c { catID = cid }
-  put $ db { tblCat = Map.insert (unCatID cid) c' $ tblCat db }
+  put $ db { tblCat = tableInsert (toInt cid) c' $ tblCat db }
   return c'
 
 addFeedAcid :: Feed -> Update Master Feed
 addFeedAcid f = do
   db <- get
-  let fid = calcFeedID f
+  let fid = fromRecord f
   let f' = f { feedID = fid }
-  put $ db { tblFeed = Map.insert (unFeedID fid) f' $ tblFeed db }
+  put $ db { tblFeed = tableInsert (toInt fid) f' $ tblFeed db }
   return f'
 
 addPersonAcid :: Person -> Update Master Person
 addPersonAcid p = do
   db <- get
-  let pid = calcPersonID p
+  let pid = fromRecord p
   let p' = p { personID = pid }
-  put $ db { tblPerson = Map.insert (unPersonID pid) p' $ tblPerson db }
+  put $ db { tblPerson = tableInsert (toInt pid) p' $ tblPerson db }
   return p'
 
 addMasterItemAcid :: Item -> Update Master Item
 addMasterItemAcid i = do
   db <- get
-  let iid = unItemID $ itemID i
-  let fid = unFeedID $ itemFeedID i
-  let mbc = (unCatID . feedCatID) <$> Map.lookup fid (tblFeed db)
-  let (ShardID sid, _) = findShard iid db
+  let iid = itemID i
+  let fid = itemFeedID i
+  let mbc = feedCatID <$> tableLookup (toInt fid) (tblFeed db)
+  let (sid, _) = findParentShard (toInt iid) $ idxItem db
   put db { pendingOp  = PendingAddItem (itemID i) i
-         , idxItem    = insertPrimaryIdx sid iid $ idxItem db
-         , ixFeedItem = insertNestedIdx fid iid $ ixFeedItem db
+         , idxItem    = insertPrimary sid iid $ idxItem db
+         , ixFeedItem = insertNested fid iid $ ixFeedItem db
          , ixCatItem  = case mbc of
-             Just cid -> insertNestedIdx cid iid $ ixCatItem db
+             Just cid -> insertNested cid iid $ ixCatItem db
              _        -> ixCatItem db
          }
   return i
 
 splitShardMasterAcid :: ShardID -> Update Master ([ItemID], [ItemID],
                         ShardSize, ShardSize, ShardID)
-splitShardMasterAcid (ShardID sid) = do
+splitShardMasterAcid sid = do
   db <- get
-  let is = Set.toList $ shardKeys $ fromJust $ Map.lookup sid $ idxItem db
-  let (lsz, r) = length is `divMod` 2
-  let rsz = lsz + r
-  let (ls, rs) = (take lsz is, drop lsz is)
-  let rid = head rs
-  let (lis, ris) = (Set.fromList ls, Set.fromList rs)
-  put db { pendingOp = PendingSplitPhase0 (ShardID sid) (ShardID rid)
-         , idxItem   = Map.insert rid (ShardIdx rsz ris) $
-                       Map.insert sid (ShardIdx lsz lis) $ idxItem db }
-  return (ItemID <$> ls, ItemID <$> rs, lsz, rsz, ShardID rid)
+  let (idx, (ls, rs, lsz, rsz, rid)) = splitShard sid $ idxItem db
+  put db { pendingOp = PendingSplitPhase0 sid rid
+         , idxItem   = idx }
+  return (ls, rs, lsz, rsz, rid)
 
 updatePendingOpAcid :: PendingOp -> Update Master ()
 updatePendingOpAcid op = do
@@ -212,37 +170,34 @@ wipeMasterAcid = put emptyMaster
 -- Shard Queries
 ------------------------------------------------------------------------------
 
-getStatsShardAcid :: Query Shard StatsShard
-getStatsShardAcid = do
+getShardSizeAcid :: Query Shard ShardSize
+getShardSizeAcid = do
   db <- ask
-  return StatsShard
-           { countItems = shSize db
-           , shardID = ShardID $ fst $ Map.findMin $ tblItem db
-           }
+  return $ shSize db
 
-getShardItemAcid :: ItemID -> Query Shard (Maybe Item)
-getShardItemAcid (ItemID k) = do
+findShardItemAcid :: Int -> Query Shard (Maybe Item)
+findShardItemAcid k = do
   db <- ask
-  return $ Map.lookup k (tblItem db)
+  return $ tableLookup k (tblItem db)
 
 getShardItemsAcid :: [ItemID] -> Query Shard [Maybe Item]
 getShardItemsAcid is = do
   db <- ask
-  return $ (\(ItemID k) -> Map.lookup k (tblItem db)) <$> is
+  return $ (\k -> tableLookup (toInt k) (tblItem db)) <$> is
 
 addShardItemAcid :: Item -> Update Shard Item
 addShardItemAcid i = do
   db <- get
   put $ db { shSize = shSize db + 1
-           , tblItem = Map.insert (unItemID $ itemID i) i $ tblItem db
+           , tblItem = tableInsert (toInt $ itemID i) i $ tblItem db
            }
   return i
 
 splitShardAcid :: ItemID -> ShardSize -> Update Shard ()
-splitShardAcid (ItemID rid) sz = do
+splitShardAcid rid sz = do
   db <- get
   put $ db { shSize = sz
-           , tblItem = fst $ Map.split rid $ tblItem db
+           , tblItem = fst $ tableSplit (toInt rid) $ tblItem db
            }
 
 
@@ -264,8 +219,11 @@ $(deriveSafeCopy 0 'base ''ItemID)
 $(deriveSafeCopy 0 'base ''Item)
 $(deriveSafeCopy 0 'base ''ShardID)
 $(deriveSafeCopy 0 'base ''StatsMaster)
-$(deriveSafeCopy 0 'base ''StatsShard)
+$(deriveSafeCopy 0 'base ''ShardSet)
 $(deriveSafeCopy 0 'base ''ShardIdx)
+$(deriveSafeCopy 0 'base ''PrimaryIdx)
+$(deriveSafeCopy 0 'base ''NestedIdx)
+$(deriveSafeCopy 0 'base ''Table)
 $(deriveSafeCopy 0 'base ''PendingOp)
 $(deriveSafeCopy 0 'base ''Master)
 $(deriveSafeCopy 0 'base ''Shard)
@@ -329,59 +287,59 @@ instance Method GetShardsAcid where
 instance QueryEvent GetShardsAcid
 
 
-data GetShardIdxAcid = GetShardIdxAcid Int
+data GetShardIdxAcid = GetShardIdxAcid ShardID
 
 $(deriveSafeCopy 0 'base ''GetShardIdxAcid)
 
 instance Method GetShardIdxAcid where
-  type MethodResult GetShardIdxAcid = Maybe ShardIdx
+  type MethodResult GetShardIdxAcid = Maybe (ShardIdx ItemID)
   type MethodState GetShardIdxAcid = Master
 
 instance QueryEvent GetShardIdxAcid
 
 
-data GetCatAcid = GetCatAcid Int
+data FindCatAcid = FindCatAcid Int
 
-$(deriveSafeCopy 0 'base ''GetCatAcid)
+$(deriveSafeCopy 0 'base ''FindCatAcid)
 
-instance Method GetCatAcid where
-  type MethodResult GetCatAcid = Maybe Cat
-  type MethodState GetCatAcid = Master
+instance Method FindCatAcid where
+  type MethodResult FindCatAcid = Maybe Cat
+  type MethodState FindCatAcid = Master
 
-instance QueryEvent GetCatAcid
-
-
-data GetFeedAcid = GetFeedAcid Int
-
-$(deriveSafeCopy 0 'base ''GetFeedAcid)
-
-instance Method GetFeedAcid where
-  type MethodResult GetFeedAcid = Maybe Feed
-  type MethodState GetFeedAcid = Master
-
-instance QueryEvent GetFeedAcid
+instance QueryEvent FindCatAcid
 
 
-data GetPersonAcid = GetPersonAcid Int
+data FindFeedAcid = FindFeedAcid Int
 
-$(deriveSafeCopy 0 'base ''GetPersonAcid)
+$(deriveSafeCopy 0 'base ''FindFeedAcid)
 
-instance Method GetPersonAcid where
-  type MethodResult GetPersonAcid = Maybe Person
-  type MethodState GetPersonAcid = Master
+instance Method FindFeedAcid where
+  type MethodResult FindFeedAcid = Maybe Feed
+  type MethodState FindFeedAcid = Master
 
-instance QueryEvent GetPersonAcid
+instance QueryEvent FindFeedAcid
 
 
-data GetItemShardAcid = GetItemShardAcid ItemID
+data FindPersonAcid = FindPersonAcid Int
 
-$(deriveSafeCopy 0 'base ''GetItemShardAcid)
+$(deriveSafeCopy 0 'base ''FindPersonAcid)
 
-instance Method GetItemShardAcid where
-  type MethodResult GetItemShardAcid = ShardID
-  type MethodState GetItemShardAcid = Master
+instance Method FindPersonAcid where
+  type MethodResult FindPersonAcid = Maybe Person
+  type MethodState FindPersonAcid = Master
 
-instance QueryEvent GetItemShardAcid
+instance QueryEvent FindPersonAcid
+
+
+data FindItemShardAcid = FindItemShardAcid Int
+
+$(deriveSafeCopy 0 'base ''FindItemShardAcid)
+
+instance Method FindItemShardAcid where
+  type MethodResult FindItemShardAcid = ShardID
+  type MethodState FindItemShardAcid = Master
+
+instance QueryEvent FindItemShardAcid
 
 
 data GetItemPageAcid = GetItemPageAcid Int Int
@@ -491,13 +449,13 @@ instance IsAcidic Master where
     , QueryEvent  (\ GetFeedsAcid            -> getFeedsAcid)
     , QueryEvent  (\ GetShardsAcid           -> getShardsAcid)
     , QueryEvent  (\(GetShardIdxAcid k)      -> getShardIdxAcid k)
-    , QueryEvent  (\(GetCatAcid  k)          -> getCatAcid k)
-    , QueryEvent  (\(GetFeedAcid k)          -> getFeedAcid k)
-    , QueryEvent  (\(GetPersonAcid k)        -> getPersonAcid k)
-    , QueryEvent  (\(GetItemShardAcid k)     -> getItemShardAcid k)
+    , QueryEvent  (\(FindCatAcid k)          -> findCatAcid k)
+    , QueryEvent  (\(FindFeedAcid k)         -> findFeedAcid k)
+    , QueryEvent  (\(FindPersonAcid k)       -> findPersonAcid k)
+    , QueryEvent  (\(FindItemShardAcid k)    -> findItemShardAcid k)
     , QueryEvent  (\(GetItemPageAcid k l)    -> getItemPageAcid k l)
     , QueryEvent  (\(MkUniqueIDAcid i)       -> mkUniqueIDAcid i)
-    , UpdateEvent (\(AddCatAcid  c)          -> addCatAcid c)
+    , UpdateEvent (\(AddCatAcid c)           -> addCatAcid c)
     , UpdateEvent (\(AddFeedAcid f)          -> addFeedAcid f)
     , UpdateEvent (\(AddPersonAcid p)        -> addPersonAcid p)
     , UpdateEvent (\(AddMasterItemAcid i)    -> addMasterItemAcid i)
@@ -507,26 +465,26 @@ instance IsAcidic Master where
     ]
 
 
-data GetStatsShardAcid = GetStatsShardAcid
+data GetShardSizeAcid = GetShardSizeAcid
 
-$(deriveSafeCopy 0 'base ''GetStatsShardAcid)
+$(deriveSafeCopy 0 'base ''GetShardSizeAcid)
 
-instance Method GetStatsShardAcid where
-  type MethodResult GetStatsShardAcid = StatsShard
-  type MethodState GetStatsShardAcid = Shard
+instance Method GetShardSizeAcid where
+  type MethodResult GetShardSizeAcid = ShardSize
+  type MethodState GetShardSizeAcid = Shard
 
-instance QueryEvent GetStatsShardAcid
+instance QueryEvent GetShardSizeAcid
 
 
-data GetShardItemAcid = GetShardItemAcid ItemID
+data FindShardItemAcid = FindShardItemAcid Int
 
-$(deriveSafeCopy 0 'base ''GetShardItemAcid)
+$(deriveSafeCopy 0 'base ''FindShardItemAcid)
 
-instance Method GetShardItemAcid where
-  type MethodResult GetShardItemAcid = Maybe Item
-  type MethodState GetShardItemAcid = Shard
+instance Method FindShardItemAcid where
+  type MethodResult FindShardItemAcid = Maybe Item
+  type MethodState FindShardItemAcid = Shard
 
-instance QueryEvent GetShardItemAcid
+instance QueryEvent FindShardItemAcid
 
 
 data GetShardItemsAcid = GetShardItemsAcid [ItemID]
@@ -563,9 +521,9 @@ instance UpdateEvent SplitShardAcid
 
 
 instance IsAcidic Shard where
-  acidEvents = [ QueryEvent  (\(GetShardItemAcid k)   -> getShardItemAcid k)
+  acidEvents = [ QueryEvent  (\(FindShardItemAcid k)  -> findShardItemAcid k)
                , QueryEvent  (\(GetShardItemsAcid is) -> getShardItemsAcid is)
-               , QueryEvent  (\GetStatsShardAcid      -> getStatsShardAcid)
+               , QueryEvent  (\ GetShardSizeAcid      -> getShardSizeAcid)
                , UpdateEvent (\(AddShardItemAcid i)   -> addShardItemAcid i)
                , UpdateEvent (\(SplitShardAcid k sz)  -> splitShardAcid k sz)
                ]

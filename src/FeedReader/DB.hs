@@ -21,10 +21,10 @@ module FeedReader.DB
   , close
   , getStats
   , getShardStats
-  , getCat
-  , getFeed
-  , getPerson
-  , getItem
+  , findCat
+  , findFeed
+  , findPerson
+  , findItem
   , getItemPage
   , getCats
   , getFeeds
@@ -50,9 +50,8 @@ import           Data.Acid           (AcidState, EventResult, QueryEvent,
                                       openLocalStateFrom, query, update)
 import           Data.Acid.Advanced  (MethodState)
 import           Data.Acid.Local     (createCheckpointAndClose)
-import qualified Data.IntMap         as Map
-import qualified Data.IntSet         as Set
 import           Data.List           (groupBy, sortBy)
+import qualified Data.Map            as Map
 import           Data.Maybe          (fromJust, fromMaybe)
 import qualified Data.Sequence       as Seq
 import           Data.Time.Clock     (UTCTime, getCurrentTime)
@@ -63,7 +62,7 @@ import           System.Directory    (doesDirectoryExist,
 import           System.FilePath     ((</>))
 
 
-type OpenedShards = Map.IntMap (UTCTime, AcidState Shard)
+type OpenedShards = Map.Map ShardID (UTCTime, AcidState Shard)
 
 data DBState = DBState
   { rootDir    :: FilePath
@@ -109,7 +108,7 @@ mupdate :: (MonadIO m, UpdateEvent e, MethodState e ~ Master) =>
 mupdate h e = withMasterLock h $ mupdate_ h e
 
 shardPath :: Handle -> ShardID -> FilePath
-shardPath h i = rootDir (unHandle h) </> "shard_" ++ show (unShardID i)
+shardPath h i = rootDir (unHandle h) </> "shard_" ++ show i
 
 groupByShard :: [(t, ShardID)] -> [[(t, ShardID)]]
 groupByShard = groupBy (\(_,x) (_,y) -> x == y) . sortBy (\(_,x) (_,y) -> compare x y)
@@ -120,7 +119,7 @@ checkOpenedShards ss =
     t0 <- liftIO getCurrentTime
     let older sid (t, _) (t', sid') =
           if t < t' then (t, sid) else (t', sid')
-    let (_, sid) = Map.foldWithKey older (t0, 0) ss
+    let (_, sid) = Map.foldWithKey older (t0, unsetID) ss
     let Just (_, a) = Map.lookup sid ss
     liftIO $ putStrLn $ "  Closing shard #" ++ show sid ++ "..."
     liftIO $ closeAcidState a
@@ -130,15 +129,14 @@ checkOpenedShards ss =
 
 withShard :: MonadIO m => Handle -> ShardID ->
              ((AcidState Shard, OpenedShards) -> IO a) -> m a
-withShard h s = liftIO . bracket
+withShard h sid = liftIO . bracket
   (do ss <- takeMVar $ shards $ unHandle h
-      let sid = unShardID s
       let mb = Map.lookup sid ss
       t0 <- getCurrentTime
       let ins a = (a, Map.insert sid (t0, a) ss)
       if null mb then do
         putStrLn $ "  Opening shard #" ++ show sid ++ "..."
-        acid <- openLocalStateFrom (shardPath h s) emptyShard
+        acid <- openLocalStateFrom (shardPath h sid) emptyShard
         t1 <- getCurrentTime
         putStrLn $ "  Shard opened in " ++ show (diffMs t0 t1) ++ " ms."
         return $ ins acid
@@ -159,21 +157,21 @@ checkPending h = do
   p <- mquery h GetPendingOpAcid
   case p of
     PendingAddItem k i -> do
-      sid <- mquery h $ GetItemShardAcid k
+      sid <- mquery h $ FindItemShardAcid (toInt k)
       withShard h sid $ \(a, _) -> do
         _ <- liftIO $ update a $ AddShardItemAcid i
         mupdate_ h $ UpdatePendingOpAcid NoPendingOp
     PendingSplitPhase0 lid rid -> do
-      Just lix <- mquery h $ GetShardIdxAcid $ unShardID lid
-      Just rix <- mquery h $ GetShardIdxAcid $ unShardID rid
-      let r = ItemID <$> Set.toList (shardKeys rix)
+      Just lix <- mquery h $ GetShardIdxAcid lid
+      Just rix <- mquery h $ GetShardIdxAcid rid
+      let r = foldrShard (:) [] rix
       let lsz = shardSize lix
       let rsz = shardSize rix
       withShard h lid $ \(a, _) -> do
         splitPhase0 h a r lid rid rsz
         splitPhase1 h a rid lsz
     PendingSplitPhase1 lid rid -> do
-      Just lix <- mquery h $ GetShardIdxAcid $ unShardID lid
+      Just lix <- mquery h $ GetShardIdxAcid lid
       let lsz = shardSize lix
       withShard h lid $ \(a, _) -> splitPhase1 h a rid lsz
     NoPendingOp -> return ()
@@ -182,21 +180,21 @@ splitPhase0 :: MonadIO m => Handle -> AcidState Shard -> [ItemID] ->
                             ShardID -> ShardID -> ShardSize -> m ()
 splitPhase0 h a r sid rid rsz = do
   rs <- liftIO $ query a $ GetShardItemsAcid r
-  let f = \case Just i -> [(unItemID $ itemID i, i)]
+  let f = \case Just i -> [(toInt $ itemID i, i)]
                 _      -> []
-  createShard h (Map.fromList $ concatMap f rs) rid rsz
+  createShard h (tableFromList $ concatMap f rs) rid rsz
   mupdate_ h $ UpdatePendingOpAcid $ PendingSplitPhase1 sid rid
 
 splitPhase1 :: MonadIO m => Handle -> AcidState Shard -> ShardID -> ShardSize -> m ()
 splitPhase1 h a rid lsz = do
-  liftIO $ update a $ SplitShardAcid (ItemID $ unShardID rid) lsz
+  liftIO $ update a $ SplitShardAcid (shardID2ItemID rid) lsz
   mupdate_ h $ UpdatePendingOpAcid NoPendingOp
 
 resyncShard :: MonadIO m => Handle -> AcidState Shard -> ShardID -> m ()
 resyncShard h a sid = do
-  StatsShard c _ <- liftIO $ query a GetStatsShardAcid
+  c <- liftIO $ query a GetShardSizeAcid
   when (c > maxShardItems) $ do
-    (l, r, lsz, rsz, rid) <- mupdate_ h $ SplitShardMasterAcid sid
+    (_, r, lsz, rsz, rid) <- mupdate_ h $ SplitShardMasterAcid sid
     splitPhase0 h a r sid rid rsz
     splitPhase1 h a rid lsz
 
@@ -207,14 +205,14 @@ deleteShardDir h s = do
   when ex $ liftIO $ removeDirectoryRecursive sf
   return $ not ex
 
-createShard :: MonadIO m => Handle -> Map.IntMap Item -> ShardID -> Int -> m ()
-createShard h t s sz = liftIO $ bracket
+createShard :: MonadIO m => Handle -> Table Item -> ShardID -> Int -> m ()
+createShard h t sid sz = liftIO $ bracket
   (do
-     _ <- deleteShardDir h s
-     openLocalStateFrom (shardPath h s) Shard { shSize  = sz
-                                              , tblItem = t })
+     _ <- deleteShardDir h sid
+     openLocalStateFrom (shardPath h sid) Shard { shSize  = sz
+                                                , tblItem = t })
   createCheckpointAndClose
-  (\a -> return ())
+  (\_ -> return ())
 
 ------------------------------------------------------------------------------
 -- Main DB Functions
@@ -245,7 +243,7 @@ checkpoint = liftIO . createCheckpoint . master . unHandle
 archive :: MonadIO m => Handle -> m ()
 archive = liftIO . createArchive . master . unHandle
 
-getStats :: MonadIO m => Handle -> m (StatsMaster, [(ShardID, UTCTime, StatsShard)])
+getStats :: MonadIO m => Handle -> m (StatsMaster, [(ShardID, UTCTime, ShardSize)])
 getStats h = do
   s <- mquery h GetStatsAcid
   liftIO $ bracket
@@ -253,27 +251,27 @@ getStats h = do
     (putMVar $ shards $ unHandle h)
     (\ss -> do
       sds <- forM (Map.toList ss) $ \(k,(t,a)) -> do
-        stats <- liftIO $ query a GetStatsShardAcid
-        return (ShardID k, t, stats)
+        sz <- liftIO $ query a GetShardSizeAcid
+        return (k, t, sz)
       return (s, sds))
 
 getShardStats :: MonadIO m => Handle -> m (Seq.Seq (ShardID, ShardSize))
 getShardStats h = mquery h GetShardsAcid
 
-getCat :: MonadIO m => Handle -> Int -> m (Maybe Cat)
-getCat h c = mquery h $ GetCatAcid c
+findCat :: MonadIO m => Handle -> Int -> m (Maybe Cat)
+findCat h c = mquery h $ FindCatAcid c
 
-getFeed :: MonadIO m => Handle -> Int -> m (Maybe Feed)
-getFeed h f = mquery h $ GetFeedAcid f
+findFeed :: MonadIO m => Handle -> Int -> m (Maybe Feed)
+findFeed h f = mquery h $ FindFeedAcid f
 
-getPerson :: MonadIO m => Handle -> Int -> m (Maybe Person)
-getPerson h p = mquery h $ GetPersonAcid p
+findPerson :: MonadIO m => Handle -> Int -> m (Maybe Person)
+findPerson h p = mquery h $ FindPersonAcid p
 
-getItem :: MonadIO m => Handle -> Int -> m (Maybe Item)
-getItem h k = do
-  s <- mquery h $ GetItemShardAcid $ ItemID k
+findItem :: MonadIO m => Handle -> Int -> m (Maybe Item)
+findItem h k = do
+  s <- mquery h $ FindItemShardAcid k
   withShard h s $ \(a, _) ->
-    liftIO $ query a $ GetShardItemAcid $ ItemID k
+    liftIO $ query a $ FindShardItemAcid k
 
 getItemPage :: MonadIO m => Handle -> Int -> Int -> m [Item]
 getItemPage h k l = do
@@ -302,7 +300,7 @@ addItems :: MonadIO m => Handle -> [Item] -> m [Item]
 addItems h is = withMasterLock h $ do
   iss <- forM is $ \i -> do
     iid <- mquery h $ MkUniqueIDAcid i     {- TODO: check for self collisions -}
-    s   <- mquery h $ GetItemShardAcid iid
+    s   <- mquery h $ FindItemShardAcid $ toInt iid
     return (i { itemID = iid }, s)
   gss <- forM (groupByShard iss) $ \gs ->
     withShard h (snd $ head gs) $ \(a, _) -> do

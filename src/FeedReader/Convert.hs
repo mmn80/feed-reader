@@ -4,10 +4,7 @@ module FeedReader.Convert
   () where
 
 import           Control.Applicative ((<|>))
-import           Control.Monad       (sequence)
-import           Data.Foldable       (fold)
 import           Data.Maybe          (fromJust, fromMaybe)
-import           Data.Monoid         ((<>))
 import           FeedReader.Types
 import qualified Text.Atom.Feed      as A
 import qualified Text.RSS.Syntax     as R
@@ -17,13 +14,16 @@ import qualified Text.RSS1.Syntax    as R1
 -- Feed2DB instance for Atom
 ------------------------------------------------------------------------------
 
+content2DB :: A.TextContent -> Content
 content2DB = \case
   A.TextString  s -> Text s
   A.HTMLString  s -> HTML s
   A.XHTMLString e -> XHTML $ show e
 
+tryContent2DB :: Maybe A.TextContent -> Content
 tryContent2DB c = content2DB $ fromMaybe (A.TextString "") c
 
+eContent2DB :: A.EntryContent -> Content
 eContent2DB = \case
   A.TextContent       s -> Text s
   A.HTMLContent       s -> HTML s
@@ -33,11 +33,12 @@ eContent2DB = \case
                                       else "MediaType: " ++ fromJust j ++ "\n")
                                       ++ "URL: " ++ u
 
+tryEContent2DB :: Maybe A.EntryContent -> Content
 tryEContent2DB c = eContent2DB $ fromMaybe (A.TextContent "") c
 
 instance ToPerson A.Person where
   toPerson p = Person
-    { personID    = unsetPersonID
+    { personID    = unsetID
     , personName  = A.personName p
     , personURL   = fromMaybe "" $ A.personURI p
     , personEmail = fromMaybe "" $ A.personEmail p
@@ -46,7 +47,7 @@ instance ToPerson A.Person where
 instance ToFeed A.Feed where
   toFeed f c u df =
     ( Feed
-      { feedID           = unsetFeedID
+      { feedID           = unsetID
       , feedCatID        = c
       , feedURL          = u
       , feedTitle        = content2DB $ A.feedTitle f
@@ -66,7 +67,7 @@ instance ToFeed A.Feed where
 instance ToItem A.Entry where
   toItem i f u df =
     ( Item
-      { itemID           = unsetItemID
+      { itemID           = unsetID
       , itemFeedID       = f
       , itemURL          = u
       , itemTitle        = content2DB $ A.entryTitle i
