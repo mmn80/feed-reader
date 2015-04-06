@@ -42,7 +42,7 @@ module FeedReader.DB
 import           Control.Concurrent  (MVar, modifyMVar_, newMVar, putMVar,
                                       takeMVar)
 import           Control.Exception   (bracket)
-import           Control.Monad       (forM, forM_, when)
+import           Control.Monad       (forM, forM_, when, unless)
 import           Control.Monad.Trans (MonadIO (liftIO))
 import           Data.Acid           (AcidState, EventResult, QueryEvent,
                                       UpdateEvent, closeAcidState,
@@ -190,13 +190,23 @@ splitPhase1 h a rid lsz = do
   liftIO $ update a $ SplitShardAcid (shardID2ItemID rid) lsz
   mupdate_ h $ UpdatePendingOpAcid NoPendingOp
 
-resyncShard :: MonadIO m => Handle -> AcidState Shard -> ShardID -> m ()
+resyncShard :: MonadIO m => Handle -> AcidState Shard -> ShardID -> m [ShardID]
 resyncShard h a sid = do
   c <- liftIO $ query a GetShardSizeAcid
-  when (c > maxShardItems) $ do
+  if c > maxShardItems then do
     (_, r, lsz, rsz, rid) <- mupdate_ h $ SplitShardMasterAcid sid
     splitPhase0 h a r sid rid rsz
     splitPhase1 h a rid lsz
+    return [sid, rid]
+  else return []
+
+resyncShards :: MonadIO m => Handle -> [ShardID] -> m ()
+resyncShards h ss = do
+  rss <- forM ss $ \sid ->
+    withShard h sid $ \(a, _) ->
+      resyncShard h a sid
+  let rsys = concat rss
+  unless (null rsys) $ resyncShards h rsys
 
 deleteShardDir :: MonadIO m => Handle -> ShardID -> m Bool
 deleteShardDir h s = do
@@ -312,21 +322,24 @@ addItems h is = withMasterLock h $ do
     iid <- mquery h $ MkUniqueIDAcid i     {- TODO: check for self collisions -}
     s   <- mquery h $ FindItemShardAcid $ toInt iid
     return (i { itemID = iid }, s)
-  gss <- forM (groupByShard iss) $ \gs ->
+  ps <- forM (groupByShard iss) $ \gs ->
     withShard h (snd $ head gs) $ \(a, _) -> do
       gs' <- forM gs $ \(i, _) -> do
                _ <- mupdate_ h $ AddMasterItemAcid i
                _ <- liftIO $ update a $ AddShardItemAcid i
                mupdate_ h $ UpdatePendingOpAcid NoPendingOp
                return i
-      resyncShard h a $ snd $ head gs
-      return gs'
-  return $ concat gss
+      rsy <- resyncShard h a $ snd $ head gs
+      return (gs', rsy)
+  resyncShards h $ concat $ snd <$> ps
+  return $ concat $ fst <$> ps
 
 wipeDB :: MonadIO m => Handle -> m ()
 wipeDB h = do
   ss <- mquery h GetShardsAcid
   mupdate h WipeMasterAcid
+  liftIO $ createCheckpoint $ master $ unHandle h
+  liftIO $ createArchive $ master $ unHandle h
   closeShards h
   forM_ ss $ \(s, _) -> do
     nf <- deleteShardDir h s
