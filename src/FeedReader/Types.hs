@@ -7,6 +7,8 @@ module FeedReader.Types
   , unsetPersonID
   , ItemID (..)
   , unsetItemID
+  , ShardID (..)
+  , unsetShardID
   , Cat (..)
   , Feed (..)
   , Person (..)
@@ -42,7 +44,7 @@ module FeedReader.Types
 import           Control.Applicative ((<|>))
 import qualified Data.IntMap         as Map
 import qualified Data.IntSet         as Set
-import           Data.Maybe          (fromMaybe, fromJust)
+import           Data.Maybe          (fromJust, fromMaybe)
 import           Data.Time.Clock     (UTCTime, diffUTCTime)
 import           Data.Time.Format    (defaultTimeLocale, iso8601DateFormat,
                                       parseTimeM, rfc822DateFormat)
@@ -58,11 +60,13 @@ newtype CatID    = CatID    { unCatID :: Int    } deriving (Eq, Ord)
 newtype PersonID = PersonID { unPersonID :: Int } deriving (Eq, Ord)
 newtype FeedID   = FeedID   { unFeedID :: Int   } deriving (Eq, Ord)
 newtype ItemID   = ItemID   { unItemID :: Int   } deriving (Eq, Ord)
+newtype ShardID  = ShardID  { unShardID :: Int  } deriving (Eq, Ord)
 
 instance Show CatID    where show (CatID k)    = show k
 instance Show PersonID where show (PersonID k) = show k
 instance Show FeedID   where show (FeedID k)   = show k
 instance Show ItemID   where show (ItemID k)   = show k
+instance Show ShardID  where show (ShardID k)  = show k
 
 data Cat = Cat
   { catID   :: CatID
@@ -127,8 +131,8 @@ type Table a    = Map.IntMap a
 
 data PendingOp = NoPendingOp
                | PendingAddItem ItemID Item
-               | PendingSplitPhase0 ItemID ItemID
-               | PendingSplitPhase1 ItemID ItemID
+               | PendingSplitPhase0 ShardID ShardID
+               | PendingSplitPhase1 ShardID ShardID
                deriving (Show)
 
 data Master = Master
@@ -166,7 +170,7 @@ data StatsMaster = StatsMaster
 
 data StatsShard = StatsShard
   { countItems :: Int
-  , shardID    :: ItemID
+  , shardID    :: ShardID
   }
 
 insertNestedIdx :: Int -> Int -> NestedIdx -> NestedIdx
@@ -179,17 +183,17 @@ insertPrimaryIdx s i m = Map.insert s (ShardIdx (sz + 1) $ Set.insert i ix) m
   where
     ShardIdx sz ix = fromMaybe (ShardIdx 0 Set.empty) $ Map.lookup s m
 
-pageFoldPrimaryIdx :: ItemID -> (ItemID -> ShardIdx -> a -> a) ->
-                      (ItemID -> a -> Bool) -> a -> PrimaryIdx -> a
+pageFoldPrimaryIdx :: ShardID -> (ShardID -> ShardIdx -> a -> a) ->
+                      (ShardID -> a -> Bool) -> a -> PrimaryIdx -> a
 pageFoldPrimaryIdx sid f stop x m =
-  let mbs = Map.lookup (unItemID sid) m in
+  let mbs = Map.lookup (unShardID sid) m in
   if null mbs then x
   else let x' = f sid (fromJust mbs) x in
-       let mbs' = Map.lookupGT (unItemID sid) m in
+       let mbs' = Map.lookupGT (unShardID sid) m in
        if null mbs' then x'
        else let (sid', _) = fromJust mbs' in
-            if stop (ItemID sid') x' then x'
-            else pageFoldPrimaryIdx (ItemID sid') f stop x' m
+            if stop (ShardID sid') x' then x'
+            else pageFoldPrimaryIdx (ShardID sid') f stop x' m
 
 text2UTCTime :: String -> UTCTime -> UTCTime
 text2UTCTime t df = fromMaybe df $ iso <|> iso' <|> rfc
@@ -229,3 +233,6 @@ unsetItemID = ItemID 0
 
 unsetPersonID :: PersonID
 unsetPersonID = PersonID 0
+
+unsetShardID :: ShardID
+unsetShardID = ShardID 0

@@ -108,10 +108,10 @@ mupdate :: (MonadIO m, UpdateEvent e, MethodState e ~ Master) =>
           Handle -> e -> m (EventResult e)
 mupdate h e = withMasterLock h $ mupdate_ h e
 
-shardPath :: Handle -> ItemID -> FilePath
-shardPath h i = rootDir (unHandle h) </> "shard_" ++ show (unItemID i)
+shardPath :: Handle -> ShardID -> FilePath
+shardPath h i = rootDir (unHandle h) </> "shard_" ++ show (unShardID i)
 
-groupByShard :: [(t, ItemID)] -> [[(t, ItemID)]]
+groupByShard :: [(t, ShardID)] -> [[(t, ShardID)]]
 groupByShard = groupBy (\(_,x) (_,y) -> x == y) . sortBy (\(_,x) (_,y) -> compare x y)
 
 checkOpenedShards :: MonadIO m => OpenedShards -> m OpenedShards
@@ -128,11 +128,11 @@ checkOpenedShards ss =
   else
     return ss
 
-withShard :: MonadIO m => Handle -> ItemID ->
+withShard :: MonadIO m => Handle -> ShardID ->
              ((AcidState Shard, OpenedShards) -> IO a) -> m a
 withShard h s = liftIO . bracket
   (do ss <- takeMVar $ shards $ unHandle h
-      let sid = unItemID s
+      let sid = unShardID s
       let mb = Map.lookup sid ss
       t0 <- getCurrentTime
       let ins a = (a, Map.insert sid (t0, a) ss)
@@ -164,8 +164,8 @@ checkPending h = do
         _ <- liftIO $ update a $ AddShardItemAcid i
         mupdate_ h $ UpdatePendingOpAcid NoPendingOp
     PendingSplitPhase0 lid rid -> do
-      Just lix <- mquery h $ GetShardIdxAcid $ unItemID lid
-      Just rix <- mquery h $ GetShardIdxAcid $ unItemID rid
+      Just lix <- mquery h $ GetShardIdxAcid $ unShardID lid
+      Just rix <- mquery h $ GetShardIdxAcid $ unShardID rid
       let r = ItemID <$> Set.toList (shardKeys rix)
       let lsz = shardSize lix
       let rsz = shardSize rix
@@ -173,13 +173,13 @@ checkPending h = do
         splitPhase0 h a r lid rid rsz
         splitPhase1 h a rid lsz
     PendingSplitPhase1 lid rid -> do
-      Just lix <- mquery h $ GetShardIdxAcid $ unItemID lid
+      Just lix <- mquery h $ GetShardIdxAcid $ unShardID lid
       let lsz = shardSize lix
       withShard h lid $ \(a, _) -> splitPhase1 h a rid lsz
     NoPendingOp -> return ()
 
 splitPhase0 :: MonadIO m => Handle -> AcidState Shard -> [ItemID] ->
-                            ItemID -> ItemID -> ShardSize -> m ()
+                            ShardID -> ShardID -> ShardSize -> m ()
 splitPhase0 h a r sid rid rsz = do
   rs <- liftIO $ query a $ GetShardItemsAcid r
   let f = \case Just i -> [(unItemID $ itemID i, i)]
@@ -187,12 +187,12 @@ splitPhase0 h a r sid rid rsz = do
   createShard h (Map.fromList $ concatMap f rs) rid rsz
   mupdate_ h $ UpdatePendingOpAcid $ PendingSplitPhase1 sid rid
 
-splitPhase1 :: MonadIO m => Handle -> AcidState Shard -> ItemID -> ShardSize -> m ()
+splitPhase1 :: MonadIO m => Handle -> AcidState Shard -> ShardID -> ShardSize -> m ()
 splitPhase1 h a rid lsz = do
-  liftIO $ update a $ SplitShardAcid rid lsz
+  liftIO $ update a $ SplitShardAcid (ItemID $ unShardID rid) lsz
   mupdate_ h $ UpdatePendingOpAcid NoPendingOp
 
-resyncShard :: MonadIO m => Handle -> AcidState Shard -> ItemID -> m ()
+resyncShard :: MonadIO m => Handle -> AcidState Shard -> ShardID -> m ()
 resyncShard h a sid = do
   StatsShard c _ <- liftIO $ query a GetStatsShardAcid
   when (c > maxShardItems) $ do
@@ -200,14 +200,14 @@ resyncShard h a sid = do
     splitPhase0 h a r sid rid rsz
     splitPhase1 h a rid lsz
 
-deleteShardDir :: MonadIO m => Handle -> ItemID -> m Bool
+deleteShardDir :: MonadIO m => Handle -> ShardID -> m Bool
 deleteShardDir h s = do
   let sf = shardPath h s
   ex <- liftIO $ doesDirectoryExist sf
   when ex $ liftIO $ removeDirectoryRecursive sf
   return $ not ex
 
-createShard :: MonadIO m => Handle -> Map.IntMap Item -> ItemID -> Int -> m ()
+createShard :: MonadIO m => Handle -> Map.IntMap Item -> ShardID -> Int -> m ()
 createShard h t s sz = liftIO $ bracket
   (do
      _ <- deleteShardDir h s
@@ -245,7 +245,7 @@ checkpoint = liftIO . createCheckpoint . master . unHandle
 archive :: MonadIO m => Handle -> m ()
 archive = liftIO . createArchive . master . unHandle
 
-getStats :: MonadIO m => Handle -> m (StatsMaster, [(ItemID, UTCTime, StatsShard)])
+getStats :: MonadIO m => Handle -> m (StatsMaster, [(ShardID, UTCTime, StatsShard)])
 getStats h = do
   s <- mquery h GetStatsAcid
   liftIO $ bracket
@@ -254,10 +254,10 @@ getStats h = do
     (\ss -> do
       sds <- forM (Map.toList ss) $ \(k,(t,a)) -> do
         stats <- liftIO $ query a GetStatsShardAcid
-        return (ItemID k, t, stats)
+        return (ShardID k, t, stats)
       return (s, sds))
 
-getShardStats :: MonadIO m => Handle -> m (Seq.Seq (ItemID, ShardSize))
+getShardStats :: MonadIO m => Handle -> m (Seq.Seq (ShardID, ShardSize))
 getShardStats h = mquery h GetShardsAcid
 
 getCat :: MonadIO m => Handle -> Int -> m (Maybe Cat)
