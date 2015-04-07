@@ -47,12 +47,12 @@ import qualified Data.Map            as Map
 import           Data.Maybe          (fromJust, fromMaybe)
 import qualified Data.Sequence       as Seq
 import           Data.Time.Clock     (UTCTime, getCurrentTime)
+import qualified FeedReader.BlockDB  as BK
 import           FeedReader.Queries
 import           FeedReader.Types
 import           System.Directory    (doesDirectoryExist,
                                       removeDirectoryRecursive)
 import           System.FilePath     ((</>))
-
 
 type OpenedShards = Map.Map ShardID (UTCTime, AcidState Shard)
 
@@ -61,15 +61,16 @@ data DBState = DBState
   , master     :: AcidState Master
   , masterLock :: MVar Bool
   , shards     :: MVar OpenedShards
+  , blockHnd   :: BK.Handle
   }
 
 instance Eq DBState where
-  DBState r1 _ _ _ == DBState r2 _ _ _ = r1 == r2
+  DBState r1 _ _ _ _ == DBState r2 _ _ _ _ = r1 == r2
 
 newtype Handle = Handle { unHandle :: DBState } deriving (Eq)
 
 instance Show Handle where
-  show (Handle (DBState r1 _ _ _)) = r1
+  show (Handle (DBState r1 _ _ _ _)) = r1
 
 ------------------------------------------------------------------------------
 -- Internal
@@ -287,10 +288,12 @@ open r = do
   acid <- liftIO $ openLocalStateFrom (masterPath root) emptyMaster
   s <- liftIO $ newMVar Map.empty
   l <- liftIO $ newMVar False
+  bk <- BK.open $ (</> "blocks.db") <$> r
   let h = Handle DBState { rootDir    = root
                          , master     = acid
                          , masterLock = l
                          , shards     = s
+                         , blockHnd   = bk
                          }
   checkPending h
   return h
@@ -298,6 +301,7 @@ open r = do
 getStats :: MonadIO m => Handle -> m (StatsMaster, [(ShardID, UTCTime, ShardSize)])
 getStats h = do
   s <- mquery h GetStatsAcid
+  --BK.put (blockHnd $ unHandle h) s
   liftIO $ bracket
     (takeMVar $ shards $ unHandle h)
     (putMVar $ shards $ unHandle h)
@@ -308,7 +312,10 @@ getStats h = do
       return (s, sds))
 
 getShardStats :: MonadIO m => Handle -> m (Seq.Seq (ShardID, ShardSize))
-getShardStats h = mquery h GetShardsAcid
+getShardStats h = --do
+  --a <- BK.get (blockHnd $ unHandle h) 53
+  -- liftIO $ putStrLn $ "TEST: " ++ show (a :: Either String StatsMaster)
+  mquery h GetShardsAcid
 
 checkpoint :: MonadIO m => Handle -> m ()
 checkpoint h = do
@@ -341,6 +348,7 @@ close :: MonadIO m => Handle -> m ()
 close h = do
   liftIO $ closeAcidState $ master $ unHandle h
   closeShards h
+  BK.close $ blockHnd $ unHandle h
 
 deleteDB :: MonadIO m => Handle -> m ()
 deleteDB h = do

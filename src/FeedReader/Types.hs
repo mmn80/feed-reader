@@ -389,7 +389,7 @@ data StatsMaster = StatsMaster
   , countPersons  :: Int
   , countItemsAll :: Int
   , countShards   :: Int
-  }
+  } deriving (Show)
 
 data Shard = Shard
   { shSize  :: !ShardSize

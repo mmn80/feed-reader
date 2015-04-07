@@ -21,6 +21,8 @@ library
     time,
     containers,
     mtl,
+    bytestring,
+    cereal,
     safecopy,
     filepath,
     directory,
@@ -32,6 +34,7 @@ library
   exposed-modules:
     FeedReader.Types,
     FeedReader.Queries,
+    FeedReader.BlockDB,
     FeedReader.DB,
     FeedReader.Convert
 
@@ -55,6 +58,8 @@ executable feeds-console
     directory,
     pipes,
     pipes-safe,
+    bytestring,
+    cereal,
     safecopy,
     acid-state,
     xml,
