@@ -17,21 +17,12 @@
 module FeedReader.DB
   ( module FeedReader.Types
   , Handle
+  , TableMethods (..)
   , open
   , close
   , getStats
   , getShardStats
-  , findCat
-  , findFeed
-  , findPerson
-  , findItem
   , getItemPage
-  , getCats
-  , getFeeds
-  , addCat
-  , addFeed
-  , addPerson
-  , addItems
   , addItemConv
   , addFeedConv
   , checkpoint
@@ -42,13 +33,13 @@ module FeedReader.DB
 import           Control.Concurrent  (MVar, modifyMVar_, newMVar, putMVar,
                                       takeMVar)
 import           Control.Exception   (bracket)
-import           Control.Monad       (forM, forM_, when, unless)
+import           Control.Monad       (forM, forM_, unless, when)
 import           Control.Monad.Trans (MonadIO (liftIO))
 import           Data.Acid           (AcidState, EventResult, QueryEvent,
                                       UpdateEvent, closeAcidState,
                                       createArchive, createCheckpoint,
                                       openLocalStateFrom, query, update)
-import           Data.Acid.Advanced  (MethodState)
+import           Data.Acid.Advanced  (MethodResult, MethodState)
 import           Data.Acid.Local     (createCheckpointAndClose)
 import           Data.List           (groupBy, sortBy)
 import qualified Data.Map            as Map
@@ -228,6 +219,64 @@ createShard h t sid sz = liftIO $ bracket
 -- Main DB Functions
 ------------------------------------------------------------------------------
 
+class TableMethods a where
+  findRecord    :: MonadIO m => Handle -> Int -> m (Maybe a)
+  getAllRecords :: MonadIO m => Handle -> m (Seq.Seq a)
+  addRecord     :: MonadIO m => Handle -> a -> m a
+
+  addRecords    :: MonadIO m => Handle -> [a] -> m [a]
+  addRecords h as = forM as $ addRecord h
+
+instance TableMethods Cat where
+  findRecord h k  = mquery h $ FindCatAcid k
+  getAllRecords h = mquery h GetCatsAcid
+  addRecord  h a  = mupdate h $ AddCatAcid a
+
+instance TableMethods Feed where
+  findRecord h k  = mquery h $ FindFeedAcid k
+  getAllRecords h = mquery h GetFeedsAcid
+  addRecord  h a  = mupdate h $ AddFeedAcid a
+
+instance TableMethods Person where
+  findRecord h k  = mquery h $ FindPersonAcid k
+  getAllRecords h = mquery h GetPersonsAcid
+  addRecord  h a  = mupdate h $ AddPersonAcid a
+
+instance TableMethods Item where
+  findRecord h k = do
+    s <- mquery h $ FindItemShardAcid k
+    withShard h s $ \(a, _) ->
+      liftIO $ query a $ FindShardItemAcid k
+
+  getAllRecords h = undefined
+
+  addRecord h a = head <$> addRecords h [a]
+
+  addRecords h is = withMasterLock h $ do
+    iss <- forM is $ \i -> do
+      iid <- mquery h $ MkUniqueIDAcid i     {- TODO: check for self collisions -}
+      s   <- mquery h $ FindItemShardAcid $ toInt iid
+      return (i { itemID = iid }, s)
+    ps <- forM (groupByShard iss) $ \gs ->
+      withShard h (snd $ head gs) $ \(a, _) -> do
+        gs' <- forM gs $ \(i, _) -> do
+                 _ <- mupdate_ h $ AddMasterItemAcid i
+                 _ <- liftIO $ update a $ AddShardItemAcid i
+                 mupdate_ h $ UpdatePendingOpAcid NoPendingOp
+                 return i
+        rsy <- resyncShard h a $ snd $ head gs
+        return (gs', rsy)
+    resyncShards h $ concat $ snd <$> ps
+    return $ concat $ fst <$> ps
+
+getItemPage :: MonadIO m => Handle -> Int -> Int -> m [Item]
+getItemPage h k l = do
+  iss <- mquery h $ GetItemPageAcid k l
+  mbs <- forM (groupByShard iss) $ \gs ->
+    withShard h (snd $ head gs) $ \(a, _) ->
+      liftIO $ query a $ GetShardItemsAcid $ fst <$> gs
+  return $ fromJust <$> filter (not . null) (concat $ reverse <$> mbs)
+
 open :: MonadIO m => Maybe FilePath -> m Handle
 open r = do
   let root = fromMaybe "data" r
@@ -278,62 +327,6 @@ getStats h = do
 getShardStats :: MonadIO m => Handle -> m (Seq.Seq (ShardID, ShardSize))
 getShardStats h = mquery h GetShardsAcid
 
-findCat :: MonadIO m => Handle -> Int -> m (Maybe Cat)
-findCat h c = mquery h $ FindCatAcid c
-
-findFeed :: MonadIO m => Handle -> Int -> m (Maybe Feed)
-findFeed h f = mquery h $ FindFeedAcid f
-
-findPerson :: MonadIO m => Handle -> Int -> m (Maybe Person)
-findPerson h p = mquery h $ FindPersonAcid p
-
-findItem :: MonadIO m => Handle -> Int -> m (Maybe Item)
-findItem h k = do
-  s <- mquery h $ FindItemShardAcid k
-  withShard h s $ \(a, _) ->
-    liftIO $ query a $ FindShardItemAcid k
-
-getItemPage :: MonadIO m => Handle -> Int -> Int -> m [Item]
-getItemPage h k l = do
-  iss <- mquery h $ GetItemPageAcid k l
-  mbs <- forM (groupByShard iss) $ \gs ->
-    withShard h (snd $ head gs) $ \(a, _) ->
-      liftIO $ query a $ GetShardItemsAcid $ fst <$> gs
-  return $ fromJust <$> filter (not . null) (concat $ reverse <$> mbs)
-
-getCats :: MonadIO m => Handle -> m (Seq.Seq Cat)
-getCats h = mquery h GetCatsAcid
-
-getFeeds :: MonadIO m => Handle -> m (Seq.Seq Feed)
-getFeeds h = mquery h GetFeedsAcid
-
-addCat :: MonadIO m => Handle -> Cat -> m Cat
-addCat h c = mupdate h $ AddCatAcid c
-
-addFeed :: MonadIO m => Handle -> Feed -> m Feed
-addFeed h f = mupdate h $ AddFeedAcid f
-
-addPerson :: MonadIO m => Handle -> Person -> m Person
-addPerson h c = mupdate h $ AddPersonAcid c
-
-addItems :: MonadIO m => Handle -> [Item] -> m [Item]
-addItems h is = withMasterLock h $ do
-  iss <- forM is $ \i -> do
-    iid <- mquery h $ MkUniqueIDAcid i     {- TODO: check for self collisions -}
-    s   <- mquery h $ FindItemShardAcid $ toInt iid
-    return (i { itemID = iid }, s)
-  ps <- forM (groupByShard iss) $ \gs ->
-    withShard h (snd $ head gs) $ \(a, _) -> do
-      gs' <- forM gs $ \(i, _) -> do
-               _ <- mupdate_ h $ AddMasterItemAcid i
-               _ <- liftIO $ update a $ AddShardItemAcid i
-               mupdate_ h $ UpdatePendingOpAcid NoPendingOp
-               return i
-      rsy <- resyncShard h a $ snd $ head gs
-      return (gs', rsy)
-  resyncShards h $ concat $ snd <$> ps
-  return $ concat $ fst <$> ps
-
 wipeDB :: MonadIO m => Handle -> m ()
 wipeDB h = do
   ss <- mquery h GetShardsAcid
@@ -353,8 +346,8 @@ addItemConv :: (MonadIO m, ToItem i) => Handle -> i -> FeedID -> URL -> m Item
 addItemConv h it fid u = do
   df <- liftIO getCurrentTime
   let (i, as, cs) = toItem it fid u df
-  as' <- sequence $ addPerson h <$> as
-  cs' <- sequence $ addPerson h <$> cs
+  as' <- sequence $ addRecord h <$> as
+  cs' <- sequence $ addRecord h <$> cs
   let i' = i { itemAuthors      = personID <$> as'
              , itemContributors = personID <$> cs'
              }
@@ -364,8 +357,8 @@ addFeedConv :: (MonadIO m, ToFeed f) => Handle -> f -> CatID -> URL -> m Feed
 addFeedConv h it cid u = do
   df <- liftIO getCurrentTime
   let (f, as, cs) = toFeed it cid u df
-  as' <- sequence $ addPerson h <$> as
-  cs' <- sequence $ addPerson h <$> cs
+  as' <- sequence $ addRecord h <$> as
+  cs' <- sequence $ addRecord h <$> cs
   let f' = f { feedAuthors      = personID <$> as'
              , feedContributors = personID <$> cs'
              }

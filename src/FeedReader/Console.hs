@@ -164,10 +164,10 @@ cmdGet h args = timed $ do
               Just s -> each $ lines s
               _      -> yield $ "No record found with ID == " ++ show k
   case t of
-    "cat"    -> liftBase (DB.findCat    h k) >>= out . fmap show
-    "feed"   -> liftBase (DB.findFeed   h k) >>= out . fmap show
-    "person" -> liftBase (DB.findPerson h k) >>= out . fmap show
-    "item"   -> liftBase (DB.findItem   h k) >>= out . fmap show
+    "cat"    -> liftBase (DB.findRecord h k :: IO (Maybe Cat))    >>= out . fmap show
+    "feed"   -> liftBase (DB.findRecord h k :: IO (Maybe Feed))   >>= out . fmap show
+    "person" -> liftBase (DB.findRecord h k :: IO (Maybe Person)) >>= out . fmap show
+    "item"   -> liftBase (DB.findRecord h k :: IO (Maybe Item))   >>= out . fmap show
     _        -> yield $ t ++ " is not a valid table name."
 
 showShortHeader = "ID" ++ replicate (24 - 2) ' ' ++
@@ -200,25 +200,25 @@ cmdGen h args = timed $ do
     "cat"  -> do
        cs <- replicateM n $ do
          a <- liftBase randomCat
-         liftBase $ DB.addCat h a
+         liftBase $ DB.addRecord h a
        showIDs $ (show . DB.catID) <$> cs
     "person"  -> do
        ps <- replicateM n $ do
          a <- liftBase randomPerson
-         liftBase $ DB.addPerson h a
+         liftBase $ DB.addRecord h a
        showIDs $ (show . DB.personID) <$> ps
     "feed" -> do
-      cs <- liftBase $ DB.getCats h
+      cs <- liftBase $ DB.getAllRecords h
       let rs = take n $ randomRs (0, S.length cs - 1) g
       fs <- forM rs $ \r -> do
         f <- liftBase $ randomFeed $ DB.catID $ S.index cs r
-        liftBase $ DB.addFeed h f
+        liftBase $ DB.addRecord h f
       showIDs $ (show . DB.feedID) <$> fs
     "item" -> do
-      fs <- liftBase $ DB.getFeeds h
+      fs <- liftBase $ DB.getAllRecords h
       let rfids = (DB.feedID . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
       is <- forM rfids $ liftBase . randomItem
-      is' <- liftBase $ DB.addItems h is
+      is' <- liftBase $ DB.addRecords h is
       showIDs $ (show . DB.itemID) <$> is'
       return ()
     _      -> yield $ t ++ " is not a valid table name."

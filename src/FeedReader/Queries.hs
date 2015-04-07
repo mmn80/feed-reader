@@ -6,6 +6,7 @@ module FeedReader.Queries
   , GetPendingOpAcid (..)
   , GetCatsAcid (..)
   , GetFeedsAcid (..)
+  , GetPersonsAcid (..)
   , GetShardsAcid (..)
   , GetShardIdxAcid (..)
   , FindCatAcid (..)
@@ -68,6 +69,11 @@ getFeedsAcid :: Query Master (Seq.Seq Feed)
 getFeedsAcid = do
   db <- ask
   return $ foldr (flip (Seq.|>)) Seq.empty $ tblFeed db
+
+getPersonsAcid :: Query Master (Seq.Seq Person)
+getPersonsAcid = do
+  db <- ask
+  return $ foldr (flip (Seq.|>)) Seq.empty $ tblPerson db
 
 getShardIdxAcid :: ShardID -> Query Master (Maybe (ShardIdx ItemID))
 getShardIdxAcid k = do
@@ -276,6 +282,17 @@ instance Method GetFeedsAcid where
 instance QueryEvent GetFeedsAcid
 
 
+data GetPersonsAcid = GetPersonsAcid
+
+$(deriveSafeCopy 0 'base ''GetPersonsAcid)
+
+instance Method GetPersonsAcid where
+  type MethodResult GetPersonsAcid = Seq.Seq Person
+  type MethodState GetPersonsAcid = Master
+
+instance QueryEvent GetPersonsAcid
+
+
 data GetShardsAcid = GetShardsAcid
 
 $(deriveSafeCopy 0 'base ''GetShardsAcid)
@@ -447,6 +464,7 @@ instance IsAcidic Master where
     , QueryEvent  (\ GetPendingOpAcid        -> getPendingOpAcid)
     , QueryEvent  (\ GetCatsAcid             -> getCatsAcid)
     , QueryEvent  (\ GetFeedsAcid            -> getFeedsAcid)
+    , QueryEvent  (\ GetPersonsAcid          -> getPersonsAcid)
     , QueryEvent  (\ GetShardsAcid           -> getShardsAcid)
     , QueryEvent  (\(GetShardIdxAcid k)      -> getShardIdxAcid k)
     , QueryEvent  (\(FindCatAcid k)          -> findCatAcid k)

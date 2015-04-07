@@ -95,7 +95,7 @@ instance Show FeedID   where show (FeedID k)   = show k
 instance Show ItemID   where show (ItemID k)   = show k
 instance Show ShardID  where show (ShardID k)  = show k
 
-class TableID a b | a -> b where
+class TableID a b | a -> b, b -> a where
   unsetID :: a
   toInt :: a -> Int
   fromRecord :: b -> a
