@@ -102,7 +102,7 @@ shardPath :: Handle -> ShardID -> FilePath
 shardPath h i = rootDir (unHandle h) </> "shard_" ++ show i
 
 groupByShard :: [(t, ShardID)] -> [[(t, ShardID)]]
-groupByShard = groupBy (\(_,x) (_,y) -> x == y) . sortBy (\(_,x) (_,y) -> compare x y)
+groupByShard = groupBy (\(_,x) (_,y) -> x == y) . sortBy (\(_,x) (_,y) -> compare y x)
 
 checkOpenedShards :: MonadIO m => OpenedShards -> m OpenedShards
 checkOpenedShards ss =

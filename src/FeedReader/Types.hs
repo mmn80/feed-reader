@@ -289,11 +289,10 @@ foldPage sid f stop x idx =
   let mbs = Map.lookup (unShardID sid) m in
   if null mbs then x
   else let x' = f sid (fromJust mbs) x in
-       let mbs' = Map.lookupGT (unShardID sid) m in
-       if null mbs' then x'
+       let mbs' = Map.lookupLT (unShardID sid) m in
+       if stop sid x' || null mbs' then x'
        else let (sid', _) = fromJust mbs' in
-            if stop (ShardID sid') x' then x'
-            else foldPage (ShardID sid') f stop x' idx
+            foldPage (ShardID sid') f stop x' idx
 
 findUnusedID :: ItemID -> PrimaryIdx ItemID -> ItemID
 findUnusedID k0 idx =
@@ -301,8 +300,8 @@ findUnusedID k0 idx =
   where
     checkSet sid is k =
       if Set.notMember (unItemID k) (unShardSet $ shardKeys is) then k
-      else checkSet sid is $ ItemID $ unItemID k + 1
-    stop sid x = unItemID x < unShardID sid
+      else checkSet sid is $ ItemID $ unItemID k - 1
+    stop sid x = unItemID x >= unShardID sid
 
 nextPage :: Int -> Int -> PrimaryIdx ItemID -> [(ItemID, ShardID)]
 nextPage i l idx =
@@ -315,7 +314,7 @@ nextPage i l idx =
                Just x' -> go sid x' (n - 1, (x', sid) : rs) m
       f sid (ShardIdx _ (ShardSet s)) (n, rs) = go sid (ItemID i) (n, rs) s
       stop _ (n, _) = n == 0
-      getNext k ks = ItemID <$> Set.lookupGT (unItemID k) ks
+      getNext k ks = ItemID <$> Set.lookupLT (unItemID k) ks
 
 splitShard :: ShardID -> PrimaryIdx ItemID -> (PrimaryIdx ItemID,
                      ([ItemID], [ItemID], ShardSize, ShardSize, ShardID))

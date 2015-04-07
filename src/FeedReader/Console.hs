@@ -172,11 +172,11 @@ cmdGet h args = timed $ do
 
 showShortHeader = "ID" ++ replicate (24 - 2) ' ' ++
                   "FeedID" ++ replicate (24 - 6) ' ' ++
-                  "Published"
+                  "Updated"
 
 showShort i = format 24 (show $ itemID i) ++
               format 24 (show $ itemFeedID i) ++
-              show (itemPublished i)
+              show (itemUpdated i)
 
 cmdPage h args = timed $ do
   let p = (read $ args !! 1) :: Int
