@@ -27,7 +27,8 @@ module FeedReader.DB
   , addFeedConv
   , checkpoint
   , archive
-  , wipeDB
+  , deleteArchives
+  , deleteDB
   ) where
 
 import           Control.Concurrent  (MVar, modifyMVar_, newMVar, putMVar,
@@ -100,6 +101,9 @@ mupdate h e = withMasterLock h $ mupdate_ h e
 
 shardPath :: Handle -> ShardID -> FilePath
 shardPath h i = rootDir (unHandle h) </> "shard_" ++ show i
+
+masterPath :: FilePath -> FilePath
+masterPath r = r </> "master"
 
 groupByShard :: [(t, ShardID)] -> [[(t, ShardID)]]
 groupByShard = groupBy (\(_,x) (_,y) -> x == y) . sortBy (\(_,x) (_,y) -> compare y x)
@@ -280,7 +284,7 @@ getItemPage h k l = do
 open :: MonadIO m => Maybe FilePath -> m Handle
 open r = do
   let root = fromMaybe "data" r
-  acid <- liftIO $ openLocalStateFrom (root </> "master") emptyMaster
+  acid <- liftIO $ openLocalStateFrom (masterPath root) emptyMaster
   s <- liftIO $ newMVar Map.empty
   l <- liftIO $ newMVar False
   let h = Handle DBState { rootDir    = root
@@ -291,10 +295,20 @@ open r = do
   checkPending h
   return h
 
-close :: MonadIO m => Handle -> m ()
-close h = do
-  liftIO $ closeAcidState $ master $ unHandle h
-  closeShards h
+getStats :: MonadIO m => Handle -> m (StatsMaster, [(ShardID, UTCTime, ShardSize)])
+getStats h = do
+  s <- mquery h GetStatsAcid
+  liftIO $ bracket
+    (takeMVar $ shards $ unHandle h)
+    (putMVar $ shards $ unHandle h)
+    (\ss -> do
+      sds <- forM (Map.toList ss) $ \(k,(t,a)) -> do
+        sz <- liftIO $ query a GetShardSizeAcid
+        return (k, t, sz)
+      return (s, sds))
+
+getShardStats :: MonadIO m => Handle -> m (Seq.Seq (ShardID, ShardSize))
+getShardStats h = mquery h GetShardsAcid
 
 checkpoint :: MonadIO m => Handle -> m ()
 checkpoint h = do
@@ -312,23 +326,24 @@ archive h = do
     withShard h sid $ \(a, _) ->
       liftIO $ createArchive a
 
-getStats :: MonadIO m => Handle -> m (StatsMaster, [(ShardID, UTCTime, ShardSize)])
-getStats h = do
-  s <- mquery h GetStatsAcid
-  liftIO $ bracket
-    (takeMVar $ shards $ unHandle h)
-    (putMVar $ shards $ unHandle h)
-    (\ss -> do
-      sds <- forM (Map.toList ss) $ \(k,(t,a)) -> do
-        sz <- liftIO $ query a GetShardSizeAcid
-        return (k, t, sz)
-      return (s, sds))
+deleteArchives :: MonadIO m => Handle -> m ()
+deleteArchives h = do
+  let f = masterPath (rootDir $ unHandle h) </> "Archive"
+  ex <- liftIO $ doesDirectoryExist f
+  when ex $ liftIO $ removeDirectoryRecursive f
+  ss <- mquery h GetShardsAcid
+  forM_ ss $ \(s, _) -> do
+    let sf = shardPath h s </> "Archive"
+    ex <- liftIO $ doesDirectoryExist sf
+    when ex $ liftIO $ removeDirectoryRecursive sf
 
-getShardStats :: MonadIO m => Handle -> m (Seq.Seq (ShardID, ShardSize))
-getShardStats h = mquery h GetShardsAcid
+close :: MonadIO m => Handle -> m ()
+close h = do
+  liftIO $ closeAcidState $ master $ unHandle h
+  closeShards h
 
-wipeDB :: MonadIO m => Handle -> m ()
-wipeDB h = do
+deleteDB :: MonadIO m => Handle -> m ()
+deleteDB h = do
   ss <- mquery h GetShardsAcid
   mupdate h WipeMasterAcid
   liftIO $ createCheckpoint $ master $ unHandle h

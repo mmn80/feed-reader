@@ -28,10 +28,11 @@ helpMessage = do
   yield "  get t k : prints the item with ID == k"
   yield "          : t is the table, one of 'cat', 'feed', 'person' or 'item'"
   yield "  page p k: prints the next p entries with ID > k"
-  yield "  gen t n : inserts n random records into the DB (t as above)"
+  yield "  add t n : inserts n random records into the DB (t as above)"
   yield "  snap    : creates a checkpoint"
   yield "  archive : archives the unused log files"
-  yield "  clean   : wipes clean the database"
+  yield "  clean   : deletes all archives"
+  yield "  deldb   : deletes the database"
   -- yield "  date d  : shows the result of parsing a RSS/Atom date field"
   -- yield "  rand l r: generates a random string of length in range l..r"
   yield "  quit    : quits the program"
@@ -44,13 +45,14 @@ processCommand h = do
     "shards"  -> checkArgs 0 args h cmdShards
     "get"     -> checkArgs 2 args h cmdGet
     "page"    -> checkArgs 2 args h cmdPage
-    "gen"     -> checkArgs 2 args h cmdGen
+    "add"     -> checkArgs 2 args h cmdAdd
     "snap"    -> checkArgs 0 args h cmdSnap
     "archive" -> checkArgs 0 args h cmdArchive
     -- "date"  -> checkArgs 1 args h cmdDate
     -- "rand"  -> checkArgs 2 args h cmdRand
-    "clean" -> checkArgs 0 args h cmdClean
-    _       -> yield $ "Command '" ++ head args ++ "' not understood."
+    "clean"   -> checkArgs 0 args h cmdClean
+    "deldb"   -> checkArgs 0 args h cmdDelDB
+    _         -> yield $ "Command '" ++ head args ++ "' not understood."
   processCommand h
 
 checkArgs n args h f =
@@ -185,7 +187,7 @@ cmdPage h args = timed $ do
   yield showShortHeader
   each $ showShort <$> is
 
-cmdGen h args = timed $ do
+cmdAdd h args = timed $ do
   let t = args !! 1
   let n = (read $ args !! 2) :: Int
   g <- liftBase getStdGen
@@ -233,12 +235,16 @@ cmdArchive h _ = timed $ do
   yield "Archive created."
 
 cmdClean h _ = timed $ do
+  liftBase $ DB.deleteArchives h
+  yield "Archive folders deleted."
+
+cmdDelDB h _ = timed $ do
   yield "Are you sure? (y/n)"
   r <- await
   case r of
     "y" -> do
-             liftBase $ DB.wipeDB h
-             yield "Database wiped clean. Have a nice day."
+             liftBase $ DB.deleteDB h
+             yield "Database deleted. Have a nice day."
     _   -> yield "Crisis averted."
 
 pipeLine h =
