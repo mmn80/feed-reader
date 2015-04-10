@@ -34,7 +34,7 @@ library
   exposed-modules:
     FeedReader.Types,
     FeedReader.Queries,
-    FeedReader.BlockDB,
+    FeedReader.DocDB,
     FeedReader.DB,
     FeedReader.Convert
 

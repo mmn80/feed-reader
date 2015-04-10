@@ -47,7 +47,7 @@ import qualified Data.Map            as Map
 import           Data.Maybe          (fromJust, fromMaybe)
 import qualified Data.Sequence       as Seq
 import           Data.Time.Clock     (UTCTime, getCurrentTime)
-import qualified FeedReader.BlockDB  as BK
+import qualified FeedReader.DocDB  as DB
 import           FeedReader.Queries
 import           FeedReader.Types
 import           System.Directory    (doesDirectoryExist,
@@ -61,7 +61,7 @@ data DBState = DBState
   , master     :: AcidState Master
   , masterLock :: MVar Bool
   , shards     :: MVar OpenedShards
-  , blockHnd   :: BK.Handle
+  , blockHnd   :: DB.Handle
   }
 
 instance Eq DBState where
@@ -288,7 +288,7 @@ open r = do
   acid <- liftIO $ openLocalStateFrom (masterPath root) emptyMaster
   s <- liftIO $ newMVar Map.empty
   l <- liftIO $ newMVar False
-  bk <- BK.open $ (</> "blocks.db") <$> r
+  bk <- DB.open Nothing Nothing
   let h = Handle DBState { rootDir    = root
                          , master     = acid
                          , masterLock = l
@@ -348,7 +348,7 @@ close :: MonadIO m => Handle -> m ()
 close h = do
   liftIO $ closeAcidState $ master $ unHandle h
   closeShards h
-  BK.close $ blockHnd $ unHandle h
+  DB.close $ blockHnd $ unHandle h
 
 deleteDB :: MonadIO m => Handle -> m ()
 deleteDB h = do
