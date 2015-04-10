@@ -1,3 +1,4 @@
+
 -----------------------------------------------------------------------------
 -- |
 -- Module : FeedReader.Data.DB
@@ -15,20 +16,20 @@ module FeedReader.BlockDB
   ( Handle
   , open
   , close
-  , get
-  , put
+  , getV
+  , putV
   ) where
 
 import           Control.Concurrent  (MVar, newMVar, putMVar, takeMVar)
 import           Control.Exception   (bracket)
 import           Control.Monad.Trans (MonadIO (liftIO))
-import           Data.ByteString     (hGet, hPut)
+import           Data.ByteString     (ByteString, hGet, hPut)
 import           Data.Maybe          (fromMaybe)
-import           Data.SafeCopy       (SafeCopy, safeGet, safePut)
-import           Data.Serialize.Get  (runGet)
-import           Data.Serialize.Put  (runPut)
+import           Data.Serialize
+import           FeedReader.Closure
 import           System.FilePath     ((</>))
 import qualified System.IO           as F
+
 
 data BlockDBState = BlockDBState
   { filePath   :: FilePath
@@ -63,11 +64,11 @@ withHandle h = liftIO . bracket
   (takeMVar $ fileHandle $ unHandle h)
   (putMVar (fileHandle $ unHandle h))
 
-put :: (SafeCopy a, MonadIO m) => Handle -> a -> m ()
-put h a = withHandle h $ \fh ->
-  hPut fh $ runPut $ safePut a
+putV :: (Serialize a) => a -> Handle -> IO ()
+putV a h = withHandle h $ \fh ->
+  hPut fh $ encode a
 
-get :: (SafeCopy a, MonadIO m) => Handle -> Int -> m (Either String a)
-get h sz = withHandle h $ \fh -> do
+getV :: (Serialize a, MonadIO m) => Int -> Handle -> m (Either String a)
+getV sz h = withHandle h $ \fh -> do
   bs <- hGet fh sz
-  return $ runGet safeGet bs
+  return $ decode bs
