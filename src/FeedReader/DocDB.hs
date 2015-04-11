@@ -23,10 +23,12 @@ module FeedReader.DocDB
 
 import           Control.Concurrent  (MVar, newMVar, putMVar, takeMVar)
 import           Control.Exception   (bracket)
+import           Control.Monad       (replicateM)
 import           Control.Monad.Trans (MonadIO (liftIO))
 import           Data.ByteString     (ByteString, hGet, hPut)
 import qualified Data.IntMap         as Map
 import qualified Data.IntSet         as Set
+import           Data.List           (foldl')
 import           Data.Maybe          (fromMaybe)
 import qualified Data.Sequence       as Seq
 import           Data.Serialize
@@ -42,6 +44,9 @@ newtype DBWord = DBWord { unDBWord :: Word32 }
 instance Serialize DBWord where
   put = putWord32be . unDBWord
   get = DBWord <$> getWord32be
+
+instance Show DBWord where
+  show (DBWord d) = show d
 
 type Addr = DBWord
 type DID  = DBWord
@@ -109,7 +114,7 @@ open lf df = do
   (pos, lsz) <- readLogPos lfh
   let m = MasterState { logHandle = lfh
                       , logPos    = pos
-                      , datPos    = 0
+                      , datPos    = 0 --TODO: compute this during readLog
                       , logSize   = lsz
                       , datSize   = fromInteger dsz
                       , gaps      = Map.empty
@@ -117,7 +122,10 @@ open lf df = do
                       , fwdIdx    = Map.empty
                       , bckIdx    = Map.empty
                       }
-  mv <- liftIO $ newMVar m
+  m' <- if (pos > 0) && (toInt lsz > wordSize)
+        then readLog m
+        else return m
+  mv <- liftIO $ newMVar m'
   dv <- liftIO $ newMVar dfh
   jv <- liftIO $ newMVar []
   return $ Handle DBState { logFilePath  = logPath
@@ -166,15 +174,20 @@ readMaster pos sz h = withMasterLock h $ \m -> do
   liftIO $ F.hSeek fh F.AbsoluteSeek $ toInteger pos
   liftIO $ hGet fh $ fromIntegral sz
 
+readWord :: MonadIO m => F.Handle -> m DBWord
+readWord h = do
+  bs <- liftIO $ hGet h wordSize
+  case decode bs of
+    Right x  -> return x
+    Left err -> logError h err
+
 readLogPos :: MonadIO m => F.Handle -> m (Addr, Size)
 readLogPos h = do
   sz <- liftIO $ F.hFileSize h
   if sz >= fromIntegral wordSize then do
     liftIO $ F.hSeek h F.AbsoluteSeek 0
-    bs <- liftIO $ hGet h wordSize
-    case decode bs of
-     Right x  -> return (x, fromIntegral sz)
-     Left err -> liftIO $ ioError $ userError err
+    w <- readWord h
+    return (w, fromIntegral sz)
   else
     return (0, 0)
 
@@ -183,3 +196,119 @@ writeLogPos h p = do
   liftIO $ F.hSeek h F.AbsoluteSeek 0
   let bs = encode p
   liftIO $ hPut h bs
+
+logError :: MonadIO m => F.Handle -> String -> m a
+logError h err = do
+  pos <- liftIO $ F.hTell h
+  liftIO $ ioError $ userError $ "Corrupted log. " ++ err ++ " Position: " ++ show pos
+
+updateBckIdx :: Map.IntMap (Map.IntMap Set.IntSet) -> [DocRecord] ->
+                Map.IntMap (Map.IntMap Set.IntSet)
+updateBckIdx = foldl' f
+  where f idx r =
+          let did = toInt (docID r) in
+          let g idx' ref =
+                let tag  = toInt (refTag ref) in
+                let rfid = toInt (refDID ref) in
+                let sng = Map.singleton rfid (Set.singleton did) in
+                case Map.lookup tag idx' of
+                  Nothing   -> Map.insert tag sng idx'
+                  Just tidx -> Map.insert tag is idx'
+                    where is = case Map.lookup rfid tidx of
+                                 Nothing -> sng
+                                 Just ss -> Map.insert rfid (Set.insert did ss) tidx in
+          foldl' g idx (docRefs r)
+
+updateGaps :: Map.IntMap [Addr] -> [DocRecord] -> Map.IntMap [Addr]
+updateGaps = foldl' f
+  where f idx r =
+          let a = toInt (docAddr r) in
+          let s = toInt (docSize r) in
+          let did = toInt (docID r) in
+          if Map.null idx
+          then Map.insert maxBound [fromIntegral (a + s)] $ Map.insert a [0] idx
+          else case Map.lookupGE s idx of
+                 Nothing          -> error "Gap update error."
+                 Just (sz, DBWord fa:as) ->
+                   let idx' = Map.insert sz as idx in
+                   let d = sz - s in
+                   if d == 0 then idx'
+                   else let addr = DBWord (fa + fromIntegral d) in
+                        case Map.lookup d idx' of
+                          Nothing  -> Map.insert d [addr] idx'
+                          Just ads -> Map.insert d (addr:ads) idx'
+
+
+data TRec = Pending TID DocRecord | Completed TID
+
+toInt :: DBWord -> Int
+toInt (DBWord d) = fromIntegral d
+
+readLog :: MonadIO m => MasterState -> m MasterState
+readLog m = do
+  let h = logHandle m
+  let l = transLog m
+  ln <- readLogTRec h
+  m' <- case ln of
+          Pending tid r ->
+            case Map.lookup (toInt tid) l of
+              Nothing -> return m { transLog = Map.insert (toInt tid) [r] l }
+              Just rs -> return m { transLog = Map.insert (toInt tid) (r:rs) l }
+          Completed tid ->
+            case Map.lookup (toInt tid) l of
+              Nothing -> logError h $ "Completed TID:" ++ show tid ++
+                " found but transaction did not previously occur."
+              Just rs -> return m { transLog = Map.delete (toInt tid) l
+                                  , fwdIdx = Map.insert (toInt tid) rs $ fwdIdx m
+                                  , bckIdx = updateBckIdx (bckIdx m) rs
+                                  , gaps = updateGaps (gaps m) rs
+                                  }
+  pos <- liftIO $ F.hTell h
+  if pos >= (fromIntegral (logPos m) - 1) then return m'
+  else readLog m'
+
+pendingTag :: Int
+pendingTag = 112 -- ASCII 'p'
+
+completedTag :: Int
+completedTag = 99 -- ASCII 'c'
+
+trueTag :: Int
+trueTag = 84 -- ASCII 'T'
+
+falseTag :: Int
+falseTag = 70 -- ASCII 'F'
+
+readLogTRec :: MonadIO m => F.Handle -> m TRec
+readLogTRec h = do
+  tag <- readWord h
+  case toInt tag of
+    x | x == pendingTag -> do
+      tid <- readWord h
+      did <- readWord h
+      adr <- readWord h
+      siz <- readWord h
+      del <- readWord h
+      dlb <- case toInt del of
+               x | x == trueTag  -> return True
+               x | x == falseTag -> return False
+               _ -> logError h $ "True ('T') or False ('F') tag expected but " ++
+                      show del ++ " found."
+      rfc <- readWord h
+      rfs <- replicateM (toInt rfc) $ do
+               rtag <- readWord h
+               rdid <- readWord h
+               return Reference { refTag = rtag
+                                , refDID = rdid
+                                }
+      return $ Pending tid DocRecord { docID   = did
+                                     , docRefs = rfs
+                                     , docAddr = adr
+                                     , docSize = siz
+                                     , docDel  = dlb
+                                     }
+    x | x == completedTag -> do
+      tid <- readWord h
+      return $ Completed tid
+    _ -> logError h $ "Pending ('p') or Completed ('c') tag expected but " ++
+           show tag ++ " found."
