@@ -114,7 +114,7 @@ open lf df = do
   (pos, lsz) <- readLogPos lfh
   let m = MasterState { logHandle = lfh
                       , logPos    = pos
-                      , datPos    = 0 --TODO: compute this during readLog
+                      , datPos    = 0
                       , logSize   = lsz
                       , datSize   = fromInteger dsz
                       , gaps      = Map.empty
@@ -162,13 +162,13 @@ withJobsLock h = liftIO . bracket
   (takeMVar $ jobs $ unHandle h)
   (putMVar (jobs $ unHandle h))
 
-writeMaster :: (MonadIO m) => Addr -> ByteString -> Handle -> m ()
+writeMaster :: MonadIO m => Addr -> ByteString -> Handle -> m ()
 writeMaster pos str h = withMasterLock h $ \m -> do
   let fh = logHandle m
   liftIO $ F.hSeek fh F.AbsoluteSeek $ toInteger pos
   liftIO $ hPut fh str
 
-readMaster :: (MonadIO m) => Addr -> Size -> Handle -> m ByteString
+readMaster :: MonadIO m => Addr -> Size -> Handle -> m ByteString
 readMaster pos sz h = withMasterLock h $ \m -> do
   let fh = logHandle m
   liftIO $ F.hSeek fh F.AbsoluteSeek $ toInteger pos
@@ -258,11 +258,13 @@ readLog m = do
             case Map.lookup (toInt tid) l of
               Nothing -> logError h $ "Completed TID:" ++ show tid ++
                 " found but transaction did not previously occur."
-              Just rs -> return m { transLog = Map.delete (toInt tid) l
-                                  , fwdIdx = Map.insert (toInt tid) rs $ fwdIdx m
-                                  , bckIdx = updateBckIdx (bckIdx m) rs
-                                  , gaps = updateGaps (gaps m) rs
+              Just rs -> return m { datSize  = max (datSize m) maxDoc
+                                  , transLog = Map.delete (toInt tid) l
+                                  , fwdIdx   = Map.insert (toInt tid) rs $ fwdIdx m
+                                  , bckIdx   = updateBckIdx (bckIdx m) rs
+                                  , gaps     = updateGaps (gaps m) rs
                                   }
+                         where maxDoc = maximum $ (\d -> docAddr d + docSize d) <$> rs
   pos <- liftIO $ F.hTell h
   if pos >= (fromIntegral (logPos m) - 1) then return m'
   else readLog m'
