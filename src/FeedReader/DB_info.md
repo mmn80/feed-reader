@@ -66,7 +66,7 @@ No "wrapping up" needs to be performed at the end.
 Transaction Monad
 -----------------
 
-A State monad over IO that holds inside a `Handle`, a read list, and an update list.
+A State monad over IO that holds inside a `Handle`, a `TID`, a read list, and an update list.
 
 Reads are executed live, while updates are just accumulated in the list.
 The transaction is written in the log at the end, and contains the updated DID list.
@@ -93,24 +93,24 @@ Also range/page queries, and queries on the `bckIdx`.
 ### Running Transactions
 
 ```haskell
-runTrans :: Handle -> Trans a -> IO a
+runTrans :: Handle -> Trans a -> IO (Maybe a)
 
 ReadList   = [DID]
-UpdateList = [(DID, ByteString, Deleted)]
+UpdateList = [(DocRecord, ByteString)]
 
 ```
 ```
 begin:
   with master lock:
-    fix a TID
-    grab a ref to master
+    tid <- generate TID
   init update list
   init read list
-middle:
-  execute lookups either in the in-mem ref (in case only IDs are queried),
-    or directly in the DB, based on the TID in the state monad (with lock on Data)
+middle (the part users write):
+  execute index lookups in-memory (with master lock and TID < tid)
+  execute document lookups in the DB (with data lock and TID < tid)
+  execute other user IO
   collect lookups to the read list
-  collect updates to the update list, after serialization
+  collect updates to the update list
 end:
   with master lock:
     check new transactions in master:
@@ -118,8 +118,8 @@ end:
       if they contain deleted DIDs that clash with update list, abort
       if they contain updated DIDs that clash with update list, abort or ignore
         based on policy
-    generate TID
-    allocate space and update all indexes in master accordingly
+    allocate space and update gaps accordingly
+    update logPos, logSize, transLog
     logPos' := logPos + trans size
     write to transaction log:
       increase file size if < logPos'
@@ -140,6 +140,7 @@ for each job:
   with jobs lock:
     remove job from list
   with master lock:
+    update fwdIdx, bckIdx
     add "Completed: TID" to the transaction log
 ```
 

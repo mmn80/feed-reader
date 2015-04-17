@@ -19,17 +19,20 @@ module FeedReader.DocDB
   , close
   , writeMaster
   , readMaster
+  , Transaction
+  , runTransaction
   ) where
 
 import           Control.Concurrent  (MVar, newMVar, putMVar, takeMVar)
-import           Control.Exception   (bracket)
-import           Control.Monad       (replicateM)
+import           Control.Exception   (bracket, bracketOnError)
+import           Control.Monad       (replicateM, forM_)
+import           Control.Monad.State (StateT, runStateT)
 import           Control.Monad.Trans (MonadIO (liftIO))
 import           Data.ByteString     (ByteString, hGet, hPut)
 import qualified Data.IntMap         as Map
 import qualified Data.IntSet         as Set
 import           Data.List           (foldl')
-import           Data.Maybe          (fromMaybe)
+import           Data.Maybe          (fromMaybe, fromJust)
 import qualified Data.Sequence       as Seq
 import           Data.Serialize
 import           Data.Serialize.Get  (getWord32be)
@@ -54,6 +57,8 @@ type TID  = DBWord
 type Size = DBWord
 type RefTag = DBWord
 
+type Deleted = Bool
+
 data Reference = Reference
   { refTag :: RefTag
   , refDID :: DID
@@ -64,7 +69,7 @@ data DocRecord = DocRecord
   , docRefs :: [Reference]
   , docAddr :: Addr
   , docSize :: Size
-  , docDel  :: Bool
+  , docDel  :: Deleted
   }
 
 data MasterState = MasterState
@@ -73,6 +78,7 @@ data MasterState = MasterState
   , datPos    :: Addr
   , logSize   :: Size
   , datSize   :: Size
+  , newTID    :: TID
   , gaps      :: Map.IntMap [Addr]
   , transLog  :: Map.IntMap [DocRecord]
   , fwdIdx    :: Map.IntMap [DocRecord]
@@ -104,6 +110,19 @@ newtype Handle = Handle { unHandle :: DBState } deriving (Eq)
 instance Show Handle where
   show (Handle (DBState r1 _ _ _ _)) = r1
 
+data TransactionState = TransactionState
+  { transHandle     :: Handle
+  , transTID        :: TID
+  , transReadList   :: [DID]
+  , transUpdateList :: [(DocRecord, ByteString)]
+  }
+
+newtype Transaction m a = Transaction { unTransaction :: StateT TransactionState m a }
+  deriving (Functor, Applicative, Monad)
+
+instance MonadIO m => MonadIO (Transaction m) where
+  liftIO = Transaction . liftIO
+
 open :: MonadIO m => Maybe FilePath -> Maybe FilePath -> m Handle
 open lf df = do
   let logPath = fromMaybe ("data" </> "docdb.log") lf
@@ -117,6 +136,7 @@ open lf df = do
                       , datPos    = 0
                       , logSize   = lsz
                       , datSize   = fromInteger dsz
+                      , newTID    = 1
                       , gaps      = Map.empty
                       , transLog  = Map.empty
                       , fwdIdx    = Map.empty
@@ -140,6 +160,66 @@ close h = do
   withMasterLock h $ \m -> F.hClose (logHandle m)
   withDataLock   h $ \d -> F.hClose d
 
+runTransaction :: MonadIO m => Handle -> Transaction m a -> m (Maybe a)
+runTransaction h (Transaction t) = do
+  tid <- withMaster h $ \m -> return (m { newTID = newTID m + 1 }, newTID m)
+  (a, q, u) <- runUserCode tid
+  (mba, ts) <- withMaster h $ \m -> do
+    let l = transLog m
+    let (_, newTs) = Map.split (toInt tid) l
+    let ck lst f = Map.null $ Map.intersection l $ Map.fromList $ f <$> lst
+    if ck q (\k -> (toInt k, ())) && ck u (\(d,_) -> (toInt (docID d), ()))
+    then do
+      let tsz = sum $ (tRecSize . fst) <$> u
+      let pos = toInt (logPos m) + tsz
+      lsz <- checkFileSize m pos
+      let (ts, gs) = foldl' allocFold ([], gaps m) u
+      let m' = m { logPos   = fromIntegral pos
+                 , logSize  = fromIntegral lsz
+                 , gaps     = gs
+                 , transLog = Map.insert (toInt tid) (fst <$> ts) l
+                 }
+      writeTransactions m tid ts
+      writeLogPos (logHandle m) $ fromIntegral pos
+      return (m', (Just a, ts))
+    else return (m, (Nothing, []))
+  enqueueJob tid ts
+  return mba
+  where
+    runUserCode tid = do
+      (a, TransactionState _ _ q u) <- runStateT t
+        TransactionState
+          { transHandle     = h
+          , transTID        = tid
+          , transReadList   = []
+          , transUpdateList = []
+          }
+      return (a, q, u)
+
+    checkFileSize m pos = let osz = toInt (logSize m) in
+      if pos > osz
+      then do
+             let sz = max pos $ osz + 4096
+             F.hSetFileSize (logHandle m) $ fromIntegral sz
+             return sz
+      else return osz
+
+    allocFold (ts, gs) (r, bs) =
+      let (a, gs') = alloc gs (toInt $ docSize r) in
+      let t = r { docAddr = a } in
+      ((t, bs):ts, gs')
+
+    writeTransactions m tid ts = do
+      liftIO $ F.hSeek (logHandle m) F.AbsoluteSeek $ fromIntegral (logPos m)
+      forM_ ts $ \(t, _) ->
+        writeLogTRec (logHandle m) $ Pending tid t
+
+    enqueueJob tid ts =
+      withJobs h $ \js -> do
+        let jis = (\(r, bs) -> JobItem (docID r) (docAddr r) (docSize r) bs) <$> ts
+        return ((tid, jis):js, ())
+
+
 ------------------------------------------------------------------------------
 -- Internal
 ------------------------------------------------------------------------------
@@ -152,15 +232,28 @@ withMasterLock h = liftIO . bracket
   (takeMVar $ master $ unHandle h)
   (putMVar (master $ unHandle h))
 
+withMaster :: MonadIO m => Handle -> (MasterState -> IO (MasterState, a)) -> m a
+withMaster h f = liftIO $ bracketOnError
+  (takeMVar $ master $ unHandle h)
+  (putMVar (master $ unHandle h))
+  (\m -> do
+    (m', a) <- f m
+    putMVar (master $ unHandle h) m'
+    return a)
+
 withDataLock :: MonadIO m => Handle -> (F.Handle -> IO a) -> m a
 withDataLock h = liftIO . bracket
   (takeMVar $ dataHandle $ unHandle h)
   (putMVar (dataHandle $ unHandle h))
 
-withJobsLock :: MonadIO m => Handle -> ([Job] -> IO a) -> m a
-withJobsLock h = liftIO . bracket
+withJobs :: MonadIO m => Handle -> ([Job] -> IO ([Job], a)) -> m a
+withJobs h f = liftIO $ bracketOnError
   (takeMVar $ jobs $ unHandle h)
   (putMVar (jobs $ unHandle h))
+  (\js -> do
+    (js', a) <- f js
+    putMVar (jobs $ unHandle h) js'
+    return a)
 
 writeMaster :: MonadIO m => Addr -> ByteString -> Handle -> m ()
 writeMaster pos str h = withMasterLock h $ \m -> do
@@ -180,6 +273,9 @@ readWord h = do
   case decode bs of
     Right x  -> return x
     Left err -> logError h err
+
+writeWord :: MonadIO m => F.Handle -> DBWord -> m ()
+writeWord h w = liftIO $ hPut h $ encode w
 
 readLogPos :: MonadIO m => F.Handle -> m (Addr, Size)
 readLogPos h = do
@@ -238,6 +334,15 @@ updateGaps = foldl' f
                           Nothing  -> Map.insert d [addr] idx'
                           Just ads -> Map.insert d (addr:ads) idx'
 
+alloc :: Map.IntMap [Addr] -> Int -> (Addr, Map.IntMap [Addr])
+alloc gs sz =
+  let (gsz, a:as) = fromJust (Map.lookupGE sz gs) in
+  let gs' = Map.insert gsz as gs in
+  let g' = gsz - sz in
+  if g' == 0 then (a, gs')
+  else let as' = fromMaybe [] (Map.lookup g' gs') in
+       (a, Map.insert g' ((a + fromIntegral sz):as') gs')
+
 
 data TRec = Pending TID DocRecord | Completed TID
 
@@ -251,14 +356,18 @@ readLog m = do
   ln <- readLogTRec h
   m' <- case ln of
           Pending tid r ->
+            let ntid = max (newTID m) (tid + 1) in
             case Map.lookup (toInt tid) l of
-              Nothing -> return m { transLog = Map.insert (toInt tid) [r] l }
-              Just rs -> return m { transLog = Map.insert (toInt tid) (r:rs) l }
+              Nothing -> return m { newTID = ntid
+                                  , transLog = Map.insert (toInt tid) [r] l }
+              Just rs -> return m { newTID = ntid
+                                  , transLog = Map.insert (toInt tid) (r:rs) l }
           Completed tid ->
             case Map.lookup (toInt tid) l of
               Nothing -> logError h $ "Completed TID:" ++ show tid ++
                 " found but transaction did not previously occur."
               Just rs -> return m { datSize  = max (datSize m) maxDoc
+                                  , newTID   = max (newTID m) (tid + 1)
                                   , transLog = Map.delete (toInt tid) l
                                   , fwdIdx   = Map.insert (toInt tid) rs $ fwdIdx m
                                   , bckIdx   = updateBckIdx (bckIdx m) rs
@@ -314,3 +423,24 @@ readLogTRec h = do
       return $ Completed tid
     _ -> logError h $ "Pending ('p') or Completed ('c') tag expected but " ++
            show tag ++ " found."
+
+writeLogTRec :: MonadIO m => F.Handle -> TRec -> m ()
+writeLogTRec h t =
+  case t of
+    Pending tid doc -> do
+      writeWord h $ fromIntegral pendingTag
+      writeWord h tid
+      writeWord h $ docID doc
+      writeWord h $ docAddr doc
+      writeWord h $ docSize doc
+      writeWord h $ fromIntegral $ if docDel doc then trueTag else falseTag
+      writeWord h $ fromIntegral $ length $ docRefs doc
+      forM_ (docRefs doc) $ \r -> do
+         writeWord h $ refTag r
+         writeWord h $ refDID r
+    Completed tid -> do
+      writeWord h $ fromIntegral completedTag
+      writeWord h tid
+
+tRecSize :: DocRecord -> Int
+tRecSize r = 7 + 2 * length (docRefs r)
