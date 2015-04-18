@@ -15,6 +15,7 @@ transLog  :: TID -> [(DID, Addr, Size, Del, [(RefTag, DID)])]
 gaps      :: Size -> [Addr]
 fwdIdx    :: DID -> [(TID, Addr, Size, [(RefTag, DID)])]
 bckIdx    :: RefTag -> DID -> [DID]
+tblIdx    :: TypeID -> [DID]
 logHandle :: Handle
 ```
 
@@ -28,7 +29,7 @@ jobs       :: MVar [(TID, [(DID, ByteString, Addr, Size)])]
 Data Files Format
 -----------------
 
-`TID`, `DID`, `Addr`, `RefTag`, `Del` and `Size` are all aliases of `DBWord`, a newtype wrapper around `Word32`.
+`TID`, `DID`, `TypeID`, `Addr`, `RefTag`, `Del` and `Size` are all aliases of `DBWord`, a newtype wrapper around `Word32`.
 `DBWord` has a custom serializer that enforces Big Endianess.
 
 The pseudo-Haskell represents just a byte sequence in lexical order.
@@ -43,7 +44,7 @@ Any ordered subset of a valid log is a valid log.
 logPos :: Addr
 recs   :: [TRec]
 
-TRec = Pending TID DID Addr Size Del RefCount [(RefTag, DID)]
+TRec = Pending TID DID TypeID Addr Size Del RefCount [(RefTag, DID)]
      | Completed TID
 ```
 
@@ -82,7 +83,7 @@ See: https://en.wikipedia.org/wiki/Multiversion_concurrency_control
 ### Primitive ops
 
 ```haskell
-lookup :: DID a -> Trans (Maybe a)
+fetch  :: DID a -> Trans (Maybe a)
 insert :: a -> Trans (DID a)
 update :: DID a -> a -> Trans ()
 delete :: DID a -> Trans ()
