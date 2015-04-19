@@ -232,9 +232,10 @@ runTransaction h (Transaction t) = do
       else return osz
 
     allocFold (ts, gs) (r, bs) =
-      let (a, gs') = alloc gs (toInt $ docSize r) in
-      let t = r { docAddr = a } in
-      ((t, bs):ts, gs')
+      if docDel r then ((r, bs):ts, gs)
+      else ((t, bs):ts, gs')
+        where (a, gs') = alloc gs (toInt $ docSize r)
+              t = r { docAddr = a }
 
     writeTransactions m ts = do
       liftIO $ IO.hSeek (logHandle m) IO.AbsoluteSeek $ fromIntegral (logPos m)
@@ -249,9 +250,8 @@ runTransaction h (Transaction t) = do
 lookup :: (Document a, MonadIO m) => DocID a -> Transaction m (Maybe a)
 lookup (DocID did) = Transaction $ do
   t <- S.get
-  mbr <- withMasterLock (transHandle t) $ \m -> return $ do
-           rs <- Map.lookup (toInt did) (fwdIdx m)
-           find (\r -> docTID r <= transTID t) rs
+  mbr <- withMasterLock (transHandle t) $ \m ->
+           return $ findFirstDoc (fwdIdx m) (transTID t) did
   mba <- if null mbr then return Nothing
          else Just <$> readDocument (transHandle t) (fromJust mbr)
   S.put t { transReadList = did : transReadList t }
@@ -279,14 +279,18 @@ insert a = Transaction $ do
   return $ DocID tid
 
 delete :: forall a m. (Document a, MonadIO m) => DocID a -> Transaction m ()
-delete did = Transaction $ do
+delete (DocID did) = Transaction $ do
   t <- S.get
-  let r = DocRecord { docID   = unDocID did
+  (addr, sz) <- withMasterLock (transHandle t) $ \m -> return $
+                  case findFirstDoc (fwdIdx m) (transTID t) did of
+                    Nothing -> (0, 0)
+                    Just r  -> (docAddr r, docSize r)
+  let r = DocRecord { docID   = did
                     , docTID  = transTID t
                     , docType = mkTypeID (Proxy :: Proxy a)
                     , docRefs = []
-                    , docAddr = 0
-                    , docSize = 0
+                    , docAddr = addr
+                    , docSize = sz
                     , docDel  = True
                     }
   S.put t { transUpdateList = (r, B.empty) : transUpdateList t }
@@ -301,8 +305,7 @@ page mdid p = Transaction $ do
                       Nothing -> []
                       Just ds -> getPage st p ds
                         where st = toInt $ unDocID $ fromMaybe maxBound mdid
-           let mbds = (\d -> Map.lookup d (fwdIdx m) >>=
-                             find (\r -> docTID r <= transTID t)) <$> ds
+           let mbds = findFirstDoc (fwdIdx m) (transTID t) . fromIntegral <$> ds
            return [ fromJust mb | mb <- mbds, not (null mb) ]
   dds' <- forM dds $ \d -> readDocument (transHandle t) d
   S.put t { transReadList = (unDocID . fst <$> dds') ++ transReadList t }
@@ -573,6 +576,11 @@ readDocument h r = withDataLock h $ \hnd -> do
   case decode bs of
     Right x  -> return x
     Left err -> dataError hnd err
+
+findFirstDoc :: Map.IntMap [DocRecord] -> TID -> DID -> Maybe DocRecord
+findFirstDoc idx tid did = do
+  rs <- Map.lookup (toInt did) idx
+  find (\r -> docTID r <= tid) rs
 
 getPage :: Int -> Int -> Set.IntSet -> [Int]
 getPage st p idx = go st p idx []

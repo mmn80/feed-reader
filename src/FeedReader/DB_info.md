@@ -141,7 +141,7 @@ for each job:
   with jobs lock:
     remove job from list
   with master lock:
-    update fwdIdx, bckIdx
+    update fwdIdx, bckIdx, tblIdx
     add "Completed: TID" to the transaction log
 ```
 
