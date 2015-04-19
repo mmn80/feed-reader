@@ -11,10 +11,10 @@ The handle is created by an `open` IO action, used for running transaction monad
 ### Master State
 
 ```haskell
-transLog  :: TID -> [(DID, Addr, Size, Del, [(RefTag, DID)])]
+transLog  :: TID -> [(DID, Addr, Size, Del, [(PropID, DID)])]
 gaps      :: Size -> [Addr]
-fwdIdx    :: DID -> [(TID, Addr, Size, [(RefTag, DID)])]
-bckIdx    :: RefTag -> DID -> [DID]
+fwdIdx    :: DID -> [(TID, Addr, Size, [(PropID, DID)])]
+bckIdx    :: PropID -> DID -> [DID]
 tblIdx    :: TypeID -> [DID]
 logHandle :: Handle
 ```
@@ -29,7 +29,7 @@ jobs       :: MVar [(TID, [(DID, ByteString, Addr, Size)])]
 Data Files Format
 -----------------
 
-`TID`, `DID`, `TypeID`, `Addr`, `RefTag`, `Del` and `Size` are all aliases of `DBWord`, a newtype wrapper around `Word32`.
+`TID`, `DID`, `TypeID`, `Addr`, `PropID`, `Del` and `Size` are all aliases of `DBWord`, a newtype wrapper around `Word32`.
 `DBWord` has a custom serializer that enforces Big Endianess.
 
 The pseudo-Haskell represents just a byte sequence in lexical order.
@@ -44,7 +44,7 @@ Any ordered subset of a valid log is a valid log.
 logPos :: Addr
 recs   :: [TRec]
 
-TRec = Pending TID DID TypeID Addr Size Del RefCount [(RefTag, DID)]
+TRec = Pending TID DID TypeID Addr Size Del RefCount [(PropID, DID)]
      | Completed TID
 ```
 
@@ -83,7 +83,7 @@ See: https://en.wikipedia.org/wiki/Multiversion_concurrency_control
 ### Primitive ops
 
 ```haskell
-fetch  :: DID a -> Trans (Maybe a)
+lookup :: DID a -> Trans (Maybe a)
 insert :: a -> Trans (DID a)
 update :: DID a -> a -> Trans ()
 delete :: DID a -> Trans ()
@@ -107,8 +107,8 @@ begin:
   init update list
   init read list
 middle (the part users write):
-  execute index lookups in-memory (with master lock and TID < tid)
-  execute document lookups in the DB (with data lock and TID < tid)
+  execute index lookups in-memory (with master lock and TID <= tid)
+  execute document lookups in the DB (with data lock and TID <= tid)
   execute other user IO
   collect lookups to the read list
   collect updates to the update list

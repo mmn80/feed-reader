@@ -24,20 +24,25 @@ module FeedReader.DocDB
   , DocID
   , RefList (..)
   , Document (..)
-  , fetch
+  , lookup
+  , insert
   , update
+  , delete
+  , page
   ) where
 
+import           Control.Arrow       (first)
 import           Control.Concurrent  (MVar, newMVar, putMVar, takeMVar)
 import           Control.Exception   (bracket, bracketOnError)
-import           Control.Monad       (forM_, replicateM)
+import           Control.Monad       (forM, forM_, replicateM)
 import qualified Control.Monad.State as S
 import           Control.Monad.Trans (MonadIO (liftIO))
 import qualified Data.ByteString     as B
+import           Data.Function       (on)
 import           Data.Hashable       (hash)
 import qualified Data.IntMap         as Map
 import qualified Data.IntSet         as Set
-import           Data.List           (foldl')
+import           Data.List           (find, foldl', nubBy)
 import           Data.Maybe          (fromJust, fromMaybe)
 import qualified Data.Sequence       as Seq
 import           Data.Serialize      (Serialize (..), decode, encode)
@@ -45,11 +50,12 @@ import           Data.Serialize.Get  (getWord32be)
 import           Data.Serialize.Put  (putWord32be)
 import           Data.Typeable       (Proxy (..), Typeable, typeRep)
 import           Data.Word           (Word32)
+import           Prelude             hiding (lookup)
 import           System.FilePath     ((</>))
 import qualified System.IO           as IO
 
 newtype DBWord = DBWord { unDBWord :: Word32 }
-  deriving (Eq, Ord, Num, Enum, Real, Integral)
+  deriving (Eq, Ord, Bounded, Num, Enum, Real, Integral)
 
 instance Serialize DBWord where
   put = putWord32be . unDBWord
@@ -72,6 +78,7 @@ data Reference = Reference
 
 data DocRecord = DocRecord
   { docID   :: DID
+  , docTID  :: TID
   , docType :: TypeID
   , docRefs :: [Reference]
   , docAddr :: Addr
@@ -132,7 +139,9 @@ instance MonadIO m => MonadIO (Transaction m) where
   liftIO = Transaction . liftIO
 
 newtype DocID a = DocID { unDocID :: DID }
-  deriving (Eq, Ord, Serialize)
+  deriving (Eq, Ord, Bounded, Serialize)
+
+instance Show (DocID a) where show (DocID k) = show k
 
 data RefList a = forall b. RefList [DocID b]
 
@@ -179,7 +188,7 @@ close h = do
 
 runTransaction :: MonadIO m => Handle -> Transaction m a -> m (Maybe a)
 runTransaction h (Transaction t) = do
-  tid <- withMaster h $ \m -> return (m { newTID = newTID m + 1 }, newTID m)
+  tid <- mkNewTID h
   (a, q, u) <- runUserCode tid
   (mba, ts) <- withMaster h $ \m -> do
     let l = transLog m
@@ -196,7 +205,7 @@ runTransaction h (Transaction t) = do
                  , gaps     = gs
                  , transLog = Map.insert (toInt tid) (fst <$> ts) l
                  }
-      writeTransactions m tid ts
+      writeTransactions m ts
       writeLogPos (logHandle m) $ fromIntegral pos
       return (m', (Just a, ts))
     else return (m, (Nothing, []))
@@ -211,7 +220,8 @@ runTransaction h (Transaction t) = do
           , transReadList   = []
           , transUpdateList = []
           }
-      return (a, q, u)
+      let u' = nubBy ((==) `on` docID . fst) u
+      return (a, q, u')
 
     checkFileSize m pos = let osz = toInt (logSize m) in
       if pos > osz
@@ -226,27 +236,33 @@ runTransaction h (Transaction t) = do
       let t = r { docAddr = a } in
       ((t, bs):ts, gs')
 
-    writeTransactions m tid ts = do
+    writeTransactions m ts = do
       liftIO $ IO.hSeek (logHandle m) IO.AbsoluteSeek $ fromIntegral (logPos m)
       forM_ ts $ \(t, _) ->
-        writeLogTRec (logHandle m) $ Pending tid t
+        writeLogTRec (logHandle m) $ Pending t
 
     enqueueJob tid ts =
       withJobs h $ \js -> do
         let jis = (\(r, bs) -> JobItem (docID r) (docAddr r) (docSize r) bs) <$> ts
         return ((tid, jis):js, ())
 
-fetch :: MonadIO m => DocID a -> Transaction m (Maybe a)
-fetch did = Transaction $ do
+lookup :: (Document a, MonadIO m) => DocID a -> Transaction m (Maybe a)
+lookup (DocID did) = Transaction $ do
   t <- S.get
-  S.put t { transReadList = unDocID did : transReadList t }
-  return Nothing
+  mbr <- withMasterLock (transHandle t) $ \m -> return $ do
+           rs <- Map.lookup (toInt did) (fwdIdx m)
+           find (\r -> docTID r <= transTID t) rs
+  mba <- if null mbr then return Nothing
+         else Just <$> readDocument (transHandle t) (fromJust mbr)
+  S.put t { transReadList = did : transReadList t }
+  return mba
 
 update :: forall a m. (Document a, MonadIO m) => DocID a -> a -> Transaction m ()
 update did a = Transaction $ do
   t <- S.get
   let bs = encode a
   let r = DocRecord { docID   = unDocID did
+                    , docTID  = transTID t
                     , docType = mkTypeID (Proxy :: Proxy a)
                     , docRefs = getRefsConv a
                     , docAddr = 0
@@ -254,6 +270,43 @@ update did a = Transaction $ do
                     , docDel  = False
                     }
   S.put t { transUpdateList = (r, bs) : transUpdateList t }
+
+insert :: (Document a, MonadIO m) => a -> Transaction m (DocID a)
+insert a = Transaction $ do
+  t <- S.get
+  tid <- mkNewTID $ transHandle t
+  unTransaction $ update (DocID tid) a
+  return $ DocID tid
+
+delete :: forall a m. (Document a, MonadIO m) => DocID a -> Transaction m ()
+delete did = Transaction $ do
+  t <- S.get
+  let r = DocRecord { docID   = unDocID did
+                    , docTID  = transTID t
+                    , docType = mkTypeID (Proxy :: Proxy a)
+                    , docRefs = []
+                    , docAddr = 0
+                    , docSize = 0
+                    , docDel  = True
+                    }
+  S.put t { transUpdateList = (r, B.empty) : transUpdateList t }
+
+page :: forall a m. (Document a, MonadIO m) => Maybe (DocID a) ->
+                    Int -> Transaction m [(DocID a, a)]
+page mdid p = Transaction $ do
+  t <- S.get
+  let yid = mkTypeID (Proxy :: Proxy a)
+  dds <- withMasterLock (transHandle t) $ \m -> do
+           let ds = case Map.lookup (toInt yid) (tblIdx m) of
+                      Nothing -> []
+                      Just ds -> getPage st p ds
+                        where st = toInt $ unDocID $ fromMaybe maxBound mdid
+           let mbds = (\d -> Map.lookup d (fwdIdx m) >>=
+                             find (\r -> docTID r <= transTID t)) <$> ds
+           return [ fromJust mb | mb <- mbds, not (null mb) ]
+  dds' <- forM dds $ \d -> readDocument (transHandle t) d
+  S.put t { transReadList = (unDocID . fst <$> dds') ++ transReadList t }
+  return dds'
 
 
 ------------------------------------------------------------------------------
@@ -322,6 +375,17 @@ logError h err = do
   pos <- liftIO $ IO.hTell h
   liftIO $ ioError $ userError $ "Corrupted log. " ++ err ++ " Position: " ++ show pos
 
+mkNewTID :: MonadIO m => Handle -> m TID
+mkNewTID h = withMaster h $ \m -> return (m { newTID = newTID m + 1 }, newTID m)
+
+updateFwdIdx :: Map.IntMap [DocRecord] -> [DocRecord] -> Map.IntMap [DocRecord]
+updateFwdIdx = foldl' f
+  where f idx r = let did = toInt $ docID r in
+                  let rs' = case Map.lookup did idx of
+                              Nothing  -> [r]
+                              Just ors -> r : ors in
+                  Map.insert did rs' idx
+
 updateBckIdx :: Map.IntMap (Map.IntMap Set.IntSet) -> [DocRecord] ->
                 Map.IntMap (Map.IntMap Set.IntSet)
 updateBckIdx = foldl' f
@@ -378,7 +442,7 @@ alloc gs sz =
        (a, Map.insert g' ((a + fromIntegral sz):as') gs')
 
 
-data TRec = Pending TID DocRecord | Completed TID
+data TRec = Pending DocRecord | Completed TID
 
 toInt :: DBWord -> Int
 toInt (DBWord d) = fromIntegral d
@@ -389,13 +453,14 @@ readLog m = do
   let l = transLog m
   ln <- readLogTRec h
   m' <- case ln of
-          Pending tid r ->
-            let ntid = max (newTID m) (tid + 1) in
-            case Map.lookup (toInt tid) l of
+          Pending r ->
+            let tid = toInt $ docTID r in
+            let ntid = max (newTID m) (fromIntegral tid + 1) in
+            case Map.lookup tid l of
               Nothing -> return m { newTID = ntid
-                                  , transLog = Map.insert (toInt tid) [r] l }
+                                  , transLog = Map.insert tid [r] l }
               Just rs -> return m { newTID = ntid
-                                  , transLog = Map.insert (toInt tid) (r:rs) l }
+                                  , transLog = Map.insert tid (r:rs) l }
           Completed tid ->
             case Map.lookup (toInt tid) l of
               Nothing -> logError h $ "Completed TID:" ++ show tid ++
@@ -403,7 +468,7 @@ readLog m = do
               Just rs -> return m { datSize  = max (datSize m) maxDoc
                                   , newTID   = max (newTID m) (tid + 1)
                                   , transLog = Map.delete (toInt tid) l
-                                  , fwdIdx   = Map.insert (toInt tid) rs $ fwdIdx m
+                                  , fwdIdx   = updateFwdIdx (fwdIdx m) rs
                                   , bckIdx   = updateBckIdx (bckIdx m) rs
                                   , tblIdx   = updateTblIdx (tblIdx m) rs
                                   , gaps     = updateGaps (gaps m) rs
@@ -448,13 +513,14 @@ readLogTRec h = do
                return Reference { propID = rpid
                                 , refDID = rdid
                                 }
-      return $ Pending tid DocRecord { docID   = did
-                                     , docType = yid
-                                     , docRefs = rfs
-                                     , docAddr = adr
-                                     , docSize = siz
-                                     , docDel  = dlb
-                                     }
+      return $ Pending DocRecord { docID   = did
+                                 , docTID  = tid
+                                 , docType = yid
+                                 , docRefs = rfs
+                                 , docAddr = adr
+                                 , docSize = siz
+                                 , docDel  = dlb
+                                 }
     x | x == completedTag -> do
       tid <- readWord h
       return $ Completed tid
@@ -464,9 +530,9 @@ readLogTRec h = do
 writeLogTRec :: MonadIO m => IO.Handle -> TRec -> m ()
 writeLogTRec h t =
   case t of
-    Pending tid doc -> do
+    Pending doc -> do
       writeWord h $ fromIntegral pendingTag
-      writeWord h tid
+      writeWord h $ docTID doc
       writeWord h $ docID doc
       writeWord h $ docType doc
       writeWord h $ docAddr doc
@@ -493,3 +559,25 @@ getRefsConv :: forall a. Document a => a -> [Reference]
 getRefsConv a = snd $ foldl' f (1, []) $ (\(RefList rs) -> unDocID <$> rs) <$> getRefs a
   where yid = mkTypeID (Proxy :: Proxy a)
         f (i, rfs) rs = (i + 1, (Reference (mkPropID yid i) <$> rs) ++ rfs)
+
+dataError :: MonadIO m => IO.Handle -> String -> m a
+dataError h err = do
+  pos <- liftIO $ IO.hTell h
+  liftIO $ ioError $ userError $ "Corrupted data file. " ++ err ++
+    " Position: " ++ show pos
+
+readDocument :: (Serialize a, MonadIO m) => Handle -> DocRecord -> m a
+readDocument h r = withDataLock h $ \hnd -> do
+  IO.hSeek hnd IO.AbsoluteSeek $ fromIntegral $ docAddr r
+  bs <- B.hGet hnd $ fromIntegral $ docSize r
+  case decode bs of
+    Right x  -> return x
+    Left err -> dataError hnd err
+
+getPage :: Int -> Int -> Set.IntSet -> [Int]
+getPage st p idx = go st p idx []
+  where go st p idx acc =
+          if p == 0 then acc
+          else case Set.lookupLT st idx of
+                 Nothing -> acc
+                 Just n  -> go n (p - 1) idx (n:acc)
