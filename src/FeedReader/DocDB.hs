@@ -32,9 +32,10 @@ module FeedReader.DocDB
   ) where
 
 import           Control.Arrow       (first)
-import           Control.Concurrent  (MVar, newMVar, putMVar, takeMVar)
+import           Control.Concurrent  (MVar, ThreadId, forkIO, killThread,
+                                      newMVar, putMVar, takeMVar, threadDelay)
 import           Control.Exception   (bracket, bracketOnError)
-import           Control.Monad       (forM, forM_, replicateM)
+import           Control.Monad       (forM, forM_, replicateM, unless, when)
 import qualified Control.Monad.State as S
 import           Control.Monad.Trans (MonadIO (liftIO))
 import qualified Data.ByteString     as B
@@ -91,7 +92,6 @@ data MasterState = MasterState
   , logPos    :: Addr
   , datPos    :: Addr
   , logSize   :: Size
-  , datSize   :: Size
   , newTID    :: TID
   , gaps      :: Map.IntMap [Addr]
   , transLog  :: Map.IntMap [DocRecord]
@@ -100,14 +100,7 @@ data MasterState = MasterState
   , tblIdx    :: Map.IntMap Set.IntSet
   }
 
-data JobItem = JobItem
-  { jobDocID   :: DID
-  , jobDocAddr :: Addr
-  , jobDocSize :: Size
-  , jobDocStr  :: B.ByteString
-  }
-
-type Job = (TID, [JobItem])
+type Job = (TID, [(DocRecord, B.ByteString)])
 
 data DBState = DBState
   { logFilePath  :: FilePath
@@ -115,15 +108,16 @@ data DBState = DBState
   , master       :: MVar MasterState
   , dataHandle   :: MVar IO.Handle
   , jobs         :: MVar [Job]
+  , updateMan    :: Maybe ThreadId
   }
 
 instance Eq DBState where
-  DBState r1 _ _ _ _ == DBState r2 _ _ _ _ = r1 == r2
+  DBState r1 _ _ _ _ _ == DBState r2 _ _ _ _ _ = r1 == r2
 
 newtype Handle = Handle { unHandle :: DBState } deriving (Eq)
 
 instance Show Handle where
-  show (Handle (DBState r1 _ _ _ _)) = r1
+  show (Handle (DBState r1 _ _ _ _ _)) = r1
 
 data TransactionState = TransactionState
   { transHandle     :: Handle
@@ -154,13 +148,11 @@ open lf df = do
   let datPath = fromMaybe ("data" </> "docdb.dat") df
   lfh <- liftIO $ IO.openBinaryFile logPath IO.ReadWriteMode
   dfh <- liftIO $ IO.openBinaryFile datPath IO.ReadWriteMode
-  dsz <- liftIO $ IO.hFileSize dfh
   (pos, lsz) <- readLogPos lfh
   let m = MasterState { logHandle = lfh
                       , logPos    = pos
                       , datPos    = 0
                       , logSize   = lsz
-                      , datSize   = fromInteger dsz
                       , newTID    = 1
                       , gaps      = Map.empty
                       , transLog  = Map.empty
@@ -174,15 +166,21 @@ open lf df = do
   mv <- liftIO $ newMVar m'
   dv <- liftIO $ newMVar dfh
   jv <- liftIO $ newMVar []
-  return $ Handle DBState { logFilePath  = logPath
-                          , dataFilePath = datPath
-                          , master       = mv
-                          , dataHandle   = dv
-                          , jobs         = jv
-                          }
+  let h = Handle DBState { logFilePath  = logPath
+                         , dataFilePath = datPath
+                         , master       = mv
+                         , dataHandle   = dv
+                         , jobs         = jv
+                         , updateMan    = Nothing
+                         }
+  ut <- liftIO $ forkIO $ updateManThread h True
+  return $ Handle $ (unHandle h) { updateMan = Just ut }
 
 close :: MonadIO m => Handle -> m ()
 close h = do
+  case updateMan $ unHandle h of
+    Nothing -> return ()
+    Just ut -> liftIO $ killThread ut
   withMasterLock h $ \m -> IO.hClose (logHandle m)
   withDataLock   h $ \d -> IO.hClose d
 
@@ -209,7 +207,7 @@ runTransaction h (Transaction t) = do
       writeLogPos (logHandle m) $ fromIntegral pos
       return (m', (Just a, ts))
     else return (m, (Nothing, []))
-  enqueueJob tid ts
+  withJobs h $ \js -> return ((tid, ts):js, ())
   return mba
   where
     runUserCode tid = do
@@ -241,11 +239,6 @@ runTransaction h (Transaction t) = do
       liftIO $ IO.hSeek (logHandle m) IO.AbsoluteSeek $ fromIntegral (logPos m)
       forM_ ts $ \(t, _) ->
         writeLogTRec (logHandle m) $ Pending t
-
-    enqueueJob tid ts =
-      withJobs h $ \js -> do
-        let jis = (\(r, bs) -> JobItem (docID r) (docAddr r) (docSize r) bs) <$> ts
-        return ((tid, jis):js, ())
 
 lookup :: (Document a, MonadIO m) => DocID a -> Transaction m (Maybe a)
 lookup (DocID did) = Transaction $ do
@@ -394,26 +387,34 @@ updateBckIdx :: Map.IntMap (Map.IntMap Set.IntSet) -> [DocRecord] ->
 updateBckIdx = foldl' f
   where f idx r =
           let did = toInt (docID r) in
+          let del = docDel r in
           let g idx' ref =
                 let pid  = toInt (propID ref) in
                 let rfid = toInt (refDID ref) in
                 let sng = Map.singleton rfid (Set.singleton did) in
                 case Map.lookup pid idx' of
-                  Nothing   -> Map.insert pid sng idx'
+                  Nothing   -> if del then idx'
+                               else Map.insert pid sng idx'
                   Just tidx -> Map.insert pid is idx'
                     where is = case Map.lookup rfid tidx of
-                                 Nothing -> sng
-                                 Just ss -> Map.insert rfid (Set.insert did ss) tidx in
+                                 Nothing -> if del then tidx
+                                            else sng
+                                 Just ss -> Map.insert rfid ss' tidx
+                                   where ss' = if del then Set.delete did ss
+                                               else Set.insert did ss in
           foldl' g idx (docRefs r)
 
 updateTblIdx :: Map.IntMap Set.IntSet -> [DocRecord] -> Map.IntMap Set.IntSet
 updateTblIdx = foldl' f
   where f idx r =
+          let del = docDel r in
           let did = toInt (docID r) in
           let yid = toInt (docType r) in
           let ss = case Map.lookup yid idx of
-                     Nothing -> Set.singleton did
-                     Just ds -> Set.insert did ds in
+                     Nothing -> if del then Set.empty
+                                else Set.singleton did
+                     Just ds -> if del then Set.delete did ds
+                                else Set.insert did ds in
           Map.insert yid ss idx
 
 updateGaps :: Map.IntMap [Addr] -> [DocRecord] -> Map.IntMap [Addr]
@@ -444,7 +445,6 @@ alloc gs sz =
   else let as' = fromMaybe [] (Map.lookup g' gs') in
        (a, Map.insert g' ((a + fromIntegral sz):as') gs')
 
-
 data TRec = Pending DocRecord | Completed TID
 
 toInt :: DBWord -> Int
@@ -468,15 +468,13 @@ readLog m = do
             case Map.lookup (toInt tid) l of
               Nothing -> logError h $ "Completed TID:" ++ show tid ++
                 " found but transaction did not previously occur."
-              Just rs -> return m { datSize  = max (datSize m) maxDoc
-                                  , newTID   = max (newTID m) (tid + 1)
+              Just rs -> return m { newTID   = max (newTID m) (tid + 1)
                                   , transLog = Map.delete (toInt tid) l
                                   , fwdIdx   = updateFwdIdx (fwdIdx m) rs
                                   , bckIdx   = updateBckIdx (bckIdx m) rs
                                   , tblIdx   = updateTblIdx (tblIdx m) rs
                                   , gaps     = updateGaps (gaps m) rs
                                   }
-                         where maxDoc = maximum $ (\d -> docAddr d + docSize d) <$> rs
   pos <- liftIO $ IO.hTell h
   if pos >= (fromIntegral (logPos m) - 1) then return m'
   else readLog m'
@@ -580,7 +578,9 @@ readDocument h r = withDataLock h $ \hnd -> do
 findFirstDoc :: Map.IntMap [DocRecord] -> TID -> DID -> Maybe DocRecord
 findFirstDoc idx tid did = do
   rs <- Map.lookup (toInt did) idx
-  find (\r -> docTID r <= tid) rs
+  r  <- find (\r -> docTID r <= tid) rs
+  if docDel r then Nothing
+  else Just r
 
 getPage :: Int -> Int -> Set.IntSet -> [Int]
 getPage st p idx = go st p idx []
@@ -589,3 +589,37 @@ getPage st p idx = go st p idx []
           else case Set.lookupLT st idx of
                  Nothing -> acc
                  Just n  -> go n (p - 1) idx (n:acc)
+
+updateManThread :: Handle -> Bool -> IO ()
+updateManThread h w = do
+  when w $ threadDelay $ 100 * 1000
+  (mbj, end) <- withJobs h $ \js ->
+    case js of
+      []    -> return (js, (Nothing, True))
+      j:js' -> return (js', (Just j, null js'))
+  unless (null mbj) $ do
+    let (tid, rs) = fromJust mbj
+    withDataLock h $ \hnd -> do
+      let maxAddr = toInteger $ maximum $ (\r -> docAddr r + docSize r) . fst <$> rs
+      sz <- IO.hFileSize hnd
+      when (sz < maxAddr) $ do
+        let nsz = max maxAddr $ sz + 4096
+        IO.hSetFileSize hnd nsz
+      forM_ rs $ \(r, bs) ->
+        unless (docDel r) $ do
+          IO.hSeek hnd IO.AbsoluteSeek $ fromIntegral $ docAddr r
+          B.hPut hnd bs
+    withMaster h $ \m -> do
+      let rs' = fst <$> rs
+      let m' = m { transLog = Map.delete (toInt tid) $ transLog m
+                 , fwdIdx   = updateFwdIdx (fwdIdx m) rs'
+                 , bckIdx   = updateBckIdx (bckIdx m) rs'
+                 , tblIdx   = updateTblIdx (tblIdx m) rs'
+                 }
+      let lh = logHandle m
+      IO.hSeek lh IO.AbsoluteSeek $ fromIntegral (logPos m)
+      writeLogTRec lh $ Completed tid
+      let pos = logPos m + 2
+      writeLogPos lh $ fromIntegral pos
+      return (m', ())
+  updateManThread h end

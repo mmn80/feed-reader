@@ -127,22 +127,23 @@ end:
       write records
       logPos := logPos'
   with jobs lock:
-    add update list and new TID as job to the async update manager
+    add update list and new TID as job
 ```
 
 Update Manager
 --------------
 
 ```
-for each job:
+repeat:
+  with jobs lock:
+    get job from list
   with dataHandle lock:
     increase file size if needed
-    write all updates
-  with jobs lock:
-    remove job from list
+    write updates
   with master lock:
-    update fwdIdx, bckIdx, tblIdx
+    update transLog, fwdIdx, bckIdx, tblIdx
     add "Completed: TID" to the transaction log
+    update logPos in the transaction log
 ```
 
 Garbage Collector
@@ -161,7 +162,7 @@ with master lock:
 write new transactions to new log
 with master lock:
   write new transactions to new log
-  update master
+  update master (rebuild gaps)
   rename log files
   switch transaction log file handle to the fresh one
 with dataHandle lock:
