@@ -22,9 +22,8 @@ module FeedReader.DocDB
   , Transaction
   , runTransaction
   , DocID
+  , RefList (..)
   , Document (..)
-  , DocID'
-  , DocTypeID
   , fetch
   , update
   ) where
@@ -35,6 +34,7 @@ import           Control.Monad       (forM_, replicateM)
 import qualified Control.Monad.State as S
 import           Control.Monad.Trans (MonadIO (liftIO))
 import qualified Data.ByteString     as B
+import           Data.Hashable       (hash)
 import qualified Data.IntMap         as Map
 import qualified Data.IntSet         as Set
 import           Data.List           (foldl')
@@ -43,8 +43,8 @@ import qualified Data.Sequence       as Seq
 import           Data.Serialize      (Serialize (..), decode, encode)
 import           Data.Serialize.Get  (getWord32be)
 import           Data.Serialize.Put  (putWord32be)
+import           Data.Typeable       (Proxy (..), Typeable, typeRep)
 import           Data.Word           (Word32)
-import           GHC.TypeLits        (Symbol)
 import           System.FilePath     ((</>))
 import qualified System.IO           as IO
 
@@ -62,11 +62,11 @@ type Addr = DBWord
 type TID  = DBWord
 type DID  = DBWord
 type Size = DBWord
-type RefTag = DBWord
+type PropID = DBWord
 type TypeID = DBWord
 
 data Reference = Reference
-  { refTag :: RefTag
+  { propID :: PropID
   , refDID :: DID
   }
 
@@ -134,15 +134,10 @@ instance MonadIO m => MonadIO (Transaction m) where
 newtype DocID a = DocID { unDocID :: DID }
   deriving (Eq, Ord, Serialize)
 
-data DocID' = forall r. DocID' { unDocID' :: DocID r }
+data RefList a = forall b. RefList [DocID b]
 
-newtype DocTypeID a = DocTypeID { unDocTypeID :: DID }
-  deriving (Eq, Ord, Num)
-
-class Serialize a => Document a where
-  docTypeID :: DocTypeID a
-  getRefs   :: a -> [(RefTag, DocID')]
-
+class (Typeable a, Serialize a) => Document a where
+  getRefs :: a -> [RefList a]
 
 open :: MonadIO m => Maybe FilePath -> Maybe FilePath -> m Handle
 open lf df = do
@@ -251,15 +246,14 @@ update :: forall a m. (Document a, MonadIO m) => DocID a -> a -> Transaction m (
 update did a = Transaction $ do
   t <- S.get
   let bs = encode a
-  let rs = (\(tag, DocID' doc) -> Reference tag (unDocID doc)) <$> getRefs a
   let r = DocRecord { docID   = unDocID did
-                    , docType = unDocTypeID (docTypeID :: DocTypeID a)
-                    , docRefs = rs
+                    , docType = mkTypeID (Proxy :: Proxy a)
+                    , docRefs = getRefsConv a
                     , docAddr = 0
                     , docSize = fromIntegral $ B.length bs
                     , docDel  = False
                     }
-  S.put t { transUpdateList = (r, encode a) : transUpdateList t }
+  S.put t { transUpdateList = (r, bs) : transUpdateList t }
 
 
 ------------------------------------------------------------------------------
@@ -334,12 +328,12 @@ updateBckIdx = foldl' f
   where f idx r =
           let did = toInt (docID r) in
           let g idx' ref =
-                let tag  = toInt (refTag ref) in
+                let pid  = toInt (propID ref) in
                 let rfid = toInt (refDID ref) in
                 let sng = Map.singleton rfid (Set.singleton did) in
-                case Map.lookup tag idx' of
-                  Nothing   -> Map.insert tag sng idx'
-                  Just tidx -> Map.insert tag is idx'
+                case Map.lookup pid idx' of
+                  Nothing   -> Map.insert pid sng idx'
+                  Just tidx -> Map.insert pid is idx'
                     where is = case Map.lookup rfid tidx of
                                  Nothing -> sng
                                  Just ss -> Map.insert rfid (Set.insert did ss) tidx in
@@ -449,9 +443,9 @@ readLogTRec h = do
                       show del ++ " found."
       rfc <- readWord h
       rfs <- replicateM (toInt rfc) $ do
-               rtag <- readWord h
+               rpid <- readWord h
                rdid <- readWord h
-               return Reference { refTag = rtag
+               return Reference { propID = rpid
                                 , refDID = rdid
                                 }
       return $ Pending tid DocRecord { docID   = did
@@ -480,7 +474,7 @@ writeLogTRec h t =
       writeWord h $ fromIntegral $ if docDel doc then trueTag else falseTag
       writeWord h $ fromIntegral $ length $ docRefs doc
       forM_ (docRefs doc) $ \r -> do
-         writeWord h $ refTag r
+         writeWord h $ propID r
          writeWord h $ refDID r
     Completed tid -> do
       writeWord h $ fromIntegral completedTag
@@ -488,3 +482,14 @@ writeLogTRec h t =
 
 tRecSize :: DocRecord -> Int
 tRecSize r = 8 + 2 * length (docRefs r)
+
+mkTypeID :: Typeable a => Proxy a -> TypeID
+mkTypeID proxy = fromIntegral $ hash $ show $ typeRep proxy
+
+mkPropID :: TypeID -> Int -> PropID
+mkPropID yid i = fromIntegral $ hash (toInt yid, i)
+
+getRefsConv :: forall a. Document a => a -> [Reference]
+getRefsConv a = snd $ foldl' f (1, []) $ (\(RefList rs) -> unDocID <$> rs) <$> getRefs a
+  where yid = mkTypeID (Proxy :: Proxy a)
+        f (i, rfs) rs = (i + 1, (Reference (mkPropID yid i) <$> rs) ++ rfs)
