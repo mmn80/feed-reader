@@ -19,6 +19,7 @@ module FeedReader.DocDB
   ( Handle
   , open
   , close
+  , performGC
   , Transaction
   , runTransaction
   , DocID
@@ -104,6 +105,8 @@ data MasterState = MasterState
 
 type Job = (TID, [(DocRecord, B.ByteString)])
 
+data GCState = IdleGC | PerformGC | KillGC deriving (Eq)
+
 data DBState = DBState
   { logFilePath  :: FilePath
   , dataFilePath :: FilePath
@@ -111,15 +114,16 @@ data DBState = DBState
   , dataHandle   :: MVar IO.Handle
   , jobs         :: MVar [Job]
   , updateMan    :: MVar Bool
+  , gcState      :: MVar GCState
   }
 
 instance Eq DBState where
-  DBState r1 _ _ _ _ _ == DBState r2 _ _ _ _ _ = r1 == r2
+  s == s' = logFilePath s == logFilePath s'
 
 newtype Handle = Handle { unHandle :: DBState } deriving (Eq)
 
 instance Show Handle where
-  show (Handle (DBState r1 _ _ _ _ _)) = r1
+  show (Handle s) = logFilePath s
 
 data TransactionState = TransactionState
   { transHandle     :: Handle
@@ -181,21 +185,28 @@ open lf df = do
   dv <- liftIO $ newMVar dfh
   jv <- liftIO $ newMVar []
   um <- liftIO $ newMVar False
+  gc <- liftIO $ newMVar IdleGC
   let h = Handle DBState { logFilePath  = logPath
                          , dataFilePath = datPath
                          , master       = mv
                          , dataHandle   = dv
                          , jobs         = jv
                          , updateMan    = um
+                         , gcState      = gc
                          }
   liftIO $ forkIO $ updateManThread h True
+  liftIO $ forkIO $ gcThread h
   return h
 
 close :: MonadIO m => Handle -> m ()
 close h = do
-  withUpdateMan h $ \kill -> return (True, ())
+  withGC h $ const $ return (KillGC, ())
+  withUpdateMan h $ const $ return (True, ())
   withMasterLock h $ \m -> IO.hClose (logHandle m)
   withDataLock   h $ \d -> IO.hClose d
+
+performGC :: MonadIO m => Handle -> m ()
+performGC h = withGC h $ const $ return (PerformGC, ())
 
 runTransaction :: MonadIO m => Handle -> Transaction m a -> m (Maybe a)
 runTransaction h (Transaction t) = do
@@ -358,6 +369,15 @@ withUpdateMan h f = liftIO $ bracketOnError
   (\kill -> do
     (kill', a) <- f kill
     putMVar (updateMan $ unHandle h) kill'
+    return a)
+
+withGC :: MonadIO m => Handle -> (GCState -> IO (GCState, a)) -> m a
+withGC h f = liftIO $ bracketOnError
+  (takeMVar $ gcState $ unHandle h)
+  (putMVar (gcState $ unHandle h))
+  (\s -> do
+    (s', a) <- f s
+    putMVar (gcState $ unHandle h) s'
     return a)
 
 readWord :: MonadIO m => IO.Handle -> m DBWord
@@ -629,3 +649,13 @@ updateManThread h w = do
       return wait
     return (kill, (kill, wait))
   unless kill $ updateManThread h wait
+
+gcThread :: Handle -> IO ()
+gcThread h = do
+  sgn <- withGC h $ \sgn -> do
+    when (sgn == PerformGC) $
+      return ()
+    return (sgn, sgn)
+  unless (sgn == KillGC) $ do
+    threadDelay $ 1000 * 1000
+    gcThread h
