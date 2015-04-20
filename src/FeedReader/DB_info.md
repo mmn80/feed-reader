@@ -15,7 +15,6 @@ transLog  :: TID -> [(DID, Addr, Size, Del, [(PropID, DID)])]
 gaps      :: Size -> [Addr]
 fwdIdx    :: DID -> [(TID, Addr, Size, [(PropID, DID)])]
 bckIdx    :: PropID -> DID -> [DID]
-tblIdx    :: TypeID -> [DID]
 logHandle :: Handle
 ```
 
@@ -29,7 +28,7 @@ jobs       :: MVar [(TID, [(DID, ByteString, Addr, Size)])]
 Data Files Format
 -----------------
 
-`TID`, `DID`, `TypeID`, `Addr`, `PropID`, `Del` and `Size` are all aliases of `DBWord`, a newtype wrapper around `Word32`.
+`TID`, `DID`, `Addr`, `PropID`, `Del` and `Size` are all aliases of `DBWord`, a newtype wrapper around `Word32`.
 `DBWord` has a custom serializer that enforces Big Endianess.
 
 The pseudo-Haskell represents just a byte sequence in lexical order.
@@ -44,7 +43,7 @@ Any ordered subset of a valid log is a valid log.
 logPos :: Addr
 recs   :: [TRec]
 
-TRec = Pending TID DID TypeID Addr Size Del RefCount [(PropID, DID)]
+TRec = Pending TID DID Addr Size Del RefCount [(PropID, DID)]
      | Completed TID
 ```
 
@@ -141,7 +140,7 @@ repeat:
     increase file size if needed
     write updates
   with master lock:
-    update transLog, fwdIdx, bckIdx, tblIdx
+    update transLog, fwdIdx, bckIdx
     add "Completed: TID" to the transaction log
     update logPos in the transaction log
 ```

@@ -75,7 +75,6 @@ type TID  = DBWord
 type DID  = DBWord
 type Size = DBWord
 type PropID = DBWord
-type TypeID = DBWord
 
 data Reference = Reference
   { propID :: PropID
@@ -85,7 +84,6 @@ data Reference = Reference
 data DocRecord = DocRecord
   { docID   :: DID
   , docTID  :: TID
-  , docType :: TypeID
   , docRefs :: [Reference]
   , docAddr :: Addr
   , docSize :: Size
@@ -102,7 +100,6 @@ data MasterState = MasterState
   , transLog  :: Map.IntMap [DocRecord]
   , fwdIdx    :: Map.IntMap [DocRecord]
   , bckIdx    :: Map.IntMap (Map.IntMap Set.IntSet)
-  , tblIdx    :: Map.IntMap Set.IntSet
   }
 
 type Job = (TID, [(DocRecord, B.ByteString)])
@@ -142,12 +139,16 @@ newtype DocID a = DocID { unDocID :: DID }
 
 instance Show (DocID a) where show (DocID k) = show k
 
-data DocRefList a = forall b. DocRefList [DocID b]
+data DocRefList a = forall b. DocRefList { docPropName :: String
+                                         , docPropVals :: [DocID b]
+                                         }
 
 newtype ExtID a = ExtID { unExtID :: DID }
   deriving (Eq, Ord, Num, Show)
 
-data ExtRefList a = forall b. ExtRefList [ExtID b]
+data ExtRefList a = forall b. ExtRefList { extPropName :: String
+                                         , extPropVals :: [ExtID b]
+                                         }
 
 class (Typeable a, Serialize a) => Document a where
   getDocRefs :: a -> [DocRefList a]
@@ -172,7 +173,6 @@ open lf df = do
                       , transLog  = Map.empty
                       , fwdIdx    = Map.empty
                       , bckIdx    = Map.empty
-                      , tblIdx    = Map.empty
                       }
   m' <- if (pos > 0) && (toInt lsz > wordSize)
         then readLog m
@@ -269,7 +269,6 @@ update did a = Transaction $ do
   let bs = encode a
   let r = DocRecord { docID   = unDocID did
                     , docTID  = transTID t
-                    , docType = mkTypeID (Proxy :: Proxy a)
                     , docRefs = getRefsConv a
                     , docAddr = 0
                     , docSize = fromIntegral $ B.length bs
@@ -293,7 +292,6 @@ delete (DocID did) = Transaction $ do
                     Just r  -> (docAddr r, docSize r)
   let r = DocRecord { docID   = did
                     , docTID  = transTID t
-                    , docType = mkTypeID (Proxy :: Proxy a)
                     , docRefs = []
                     , docAddr = addr
                     , docSize = sz
@@ -302,14 +300,14 @@ delete (DocID did) = Transaction $ do
   S.put t { transUpdateList = (r, B.empty) : transUpdateList t }
 
 page :: forall a m. (Document a, MonadIO m) => Maybe (DocID a) ->
-                    Int -> Transaction m [(DocID a, a)]
-page mdid p = Transaction $ do
+                    String -> Int -> Transaction m [(DocID a, a)]
+page mdid prop pg = Transaction $ do
   t <- S.get
-  let yid = mkTypeID (Proxy :: Proxy a)
+  let pid = mkPropID (Proxy :: Proxy a) prop
   dds <- withMasterLock (transHandle t) $ \m -> do
-           let ds = case Map.lookup (toInt yid) (tblIdx m) of
+           let ds = case Map.lookup (toInt pid) (bckIdx m) of
                       Nothing -> []
-                      Just ds -> getPage st p ds
+                      Just ds -> concat $ Set.toDescList <$> getPage st pg ds
                         where st = toInt $ unDocID $ fromMaybe maxBound mdid
            let mbds = findFirstDoc (fwdIdx m) (transTID t) . fromIntegral <$> ds
            return [ fromJust mb | mb <- mbds, not (null mb) ]
@@ -427,19 +425,6 @@ updateBckIdx = foldl' f
                                                else Set.insert did ss
 
 
-updateTblIdx :: Map.IntMap Set.IntSet -> [DocRecord] -> Map.IntMap Set.IntSet
-updateTblIdx = foldl' f
-  where f idx r =
-          let del = docDel r in
-          let did = toInt (docID r) in
-          let yid = toInt (docType r) in
-          let ss = case Map.lookup yid idx of
-                     Nothing -> if del then Set.empty
-                                else Set.singleton did
-                     Just ds -> if del then Set.delete did ds
-                                else Set.insert did ds in
-          Map.insert yid ss idx
-
 updateGaps :: Map.IntMap [Addr] -> [DocRecord] -> Map.IntMap [Addr]
 updateGaps = foldl' f
   where f idx r =
@@ -495,7 +480,6 @@ readLog m = do
                                   , transLog = Map.delete (toInt tid) l
                                   , fwdIdx   = updateFwdIdx (fwdIdx m) rs
                                   , bckIdx   = updateBckIdx (bckIdx m) rs
-                                  , tblIdx   = updateTblIdx (tblIdx m) rs
                                   , gaps     = updateGaps (gaps m) rs
                                   }
   pos <- liftIO $ IO.hTell h
@@ -521,7 +505,6 @@ readLogTRec h = do
     x | x == pendingTag -> do
       tid <- readWord h
       did <- readWord h
-      yid <- readWord h
       adr <- readWord h
       siz <- readWord h
       del <- readWord h
@@ -539,7 +522,6 @@ readLogTRec h = do
                                 }
       return $ Pending DocRecord { docID   = did
                                  , docTID  = tid
-                                 , docType = yid
                                  , docRefs = rfs
                                  , docAddr = adr
                                  , docSize = siz
@@ -558,7 +540,6 @@ writeLogTRec h t =
       writeWord h $ fromIntegral pendingTag
       writeWord h $ docTID doc
       writeWord h $ docID doc
-      writeWord h $ docType doc
       writeWord h $ docAddr doc
       writeWord h $ docSize doc
       writeWord h $ fromIntegral $ if docDel doc then trueTag else falseTag
@@ -571,21 +552,17 @@ writeLogTRec h t =
       writeWord h tid
 
 tRecSize :: DocRecord -> Int
-tRecSize r = 8 + 2 * length (docRefs r)
+tRecSize r = 7 + 2 * length (docRefs r)
 
-mkTypeID :: Typeable a => Proxy a -> TypeID
-mkTypeID proxy = fromIntegral $ hash $ show $ typeRep proxy
-
-mkPropID :: TypeID -> Int -> PropID
-mkPropID yid i = fromIntegral $ hash (toInt yid, i)
+mkPropID :: Typeable a => Proxy a -> String -> PropID
+mkPropID proxy p = fromIntegral $ hash (show $ typeRep proxy, p)
 
 getRefsConv :: forall a. Document a => a -> [Reference]
-getRefsConv a = snd (foldl' f (1,     []) docRs) ++
-                snd (foldl' f (10000, []) extRs)
-  where yid = mkTypeID (Proxy :: Proxy a)
-        docRs = (\(DocRefList rs) -> unDocID <$> rs) <$> getDocRefs a
-        extRs = (\(ExtRefList rs) -> unExtID <$> rs) <$> getExtRefs a
-        f (i, rfs) rs = (i + 1, (Reference (mkPropID yid i) <$> rs) ++ rfs)
+getRefsConv a = concat docRs ++ concat extRs
+  where docRs = (\(DocRefList p rs) -> mkDRef p <$> rs) <$> getDocRefs a
+        extRs = (\(ExtRefList p rs) -> mkERef p <$> rs) <$> getExtRefs a
+        mkDRef p (DocID k) = Reference (mkPropID (Proxy :: Proxy a) p) k
+        mkERef p (ExtID k) = Reference (mkPropID (Proxy :: Proxy a) p) k
 
 dataError :: MonadIO m => IO.Handle -> String -> m a
 dataError h err = do
@@ -608,13 +585,13 @@ findFirstDoc idx tid did = do
   if docDel r then Nothing
   else Just r
 
-getPage :: Int -> Int -> Set.IntSet -> [Int]
+getPage :: Int -> Int -> Map.IntMap a -> [a]
 getPage st p idx = go st p idx []
   where go st p idx acc =
           if p == 0 then acc
-          else case Set.lookupLT st idx of
-                 Nothing -> acc
-                 Just n  -> go n (p - 1) idx (n:acc)
+          else case Map.lookupLT st idx of
+                 Nothing     -> acc
+                 Just (n, a) -> go n (p - 1) idx (a:acc)
 
 updateManThread :: Handle -> Bool -> IO ()
 updateManThread h w = do
@@ -642,7 +619,6 @@ updateManThread h w = do
           let m' = m { transLog = Map.delete (toInt tid) $ transLog m
                      , fwdIdx   = updateFwdIdx (fwdIdx m) rs'
                      , bckIdx   = updateBckIdx (bckIdx m) rs'
-                     , tblIdx   = updateTblIdx (tblIdx m) rs'
                      }
           let lh = logHandle m
           IO.hSeek lh IO.AbsoluteSeek $ fromIntegral (logPos m)
