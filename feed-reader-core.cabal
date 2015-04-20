@@ -23,17 +23,14 @@ library
     mtl,
     bytestring,
     cereal,
-    safecopy,
     filepath,
     directory,
-    acid-state,
     hashable,
     xml,
     feed
 
   exposed-modules:
     FeedReader.Types,
-    FeedReader.Queries,
     FeedReader.DocDB,
     FeedReader.DB,
     FeedReader.Convert
@@ -60,7 +57,5 @@ executable feeds-console
     pipes-safe,
     bytestring,
     cereal,
-    safecopy,
-    acid-state,
     xml,
     feed

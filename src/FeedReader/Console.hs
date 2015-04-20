@@ -9,7 +9,8 @@ import qualified Data.Sequence         as S
 import           Data.Time.Clock       (getCurrentTime)
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
-import           FeedReader.DB         as DB
+import qualified FeedReader.DB         as DB
+import           FeedReader.Types
 import           Pipes
 import qualified Pipes.Prelude         as P
 import           Pipes.Safe
@@ -24,17 +25,12 @@ helpMessage = do
   yield "Commands (use _ instead of space inside arguments):"
   yield "  help    : prints this helpful message"
   yield "  stats   : prints general stats"
-  yield "  shards  : lists all shard IDs with their record counts"
   yield "  get t k : prints the item with ID == k"
   yield "          : t is the table, one of 'cat', 'feed', 'person' or 'item'"
   yield "  page p k: prints the next p entries with ID > k"
   yield "  add t n : inserts n random records into the DB (t as above)"
-  yield "  snap    : creates a checkpoint"
-  yield "  archive : archives the unused log files"
-  yield "  clean   : deletes all archives"
+  yield "  gc      : performs GC"
   yield "  deldb   : deletes the database"
-  -- yield "  date d  : shows the result of parsing a RSS/Atom date field"
-  -- yield "  rand l r: generates a random string of length in range l..r"
   yield "  quit    : quits the program"
 
 processCommand h = do
@@ -42,15 +38,10 @@ processCommand h = do
   case head args of
     "help"    -> helpMessage
     "stats"   -> checkArgs 0 args h cmdStats
-    "shards"  -> checkArgs 0 args h cmdShards
     "get"     -> checkArgs 2 args h cmdGet
     "page"    -> checkArgs 2 args h cmdPage
     "add"     -> checkArgs 2 args h cmdAdd
-    "snap"    -> checkArgs 0 args h cmdSnap
-    "archive" -> checkArgs 0 args h cmdArchive
-    -- "date"  -> checkArgs 1 args h cmdDate
-    -- "rand"  -> checkArgs 2 args h cmdRand
-    "clean"   -> checkArgs 0 args h cmdClean
+    "gc"      -> checkArgs 0 args h cmdGC
     "deldb"   -> checkArgs 0 args h cmdDelDB
     _         -> yield $ "Command '" ++ head args ++ "' not understood."
   processCommand h
@@ -76,11 +67,10 @@ randomTime = do
   return $ posixSecondsToUTCTime $ fromInteger ti
 
 randomCat =
-  DB.Cat <$> pure DB.unsetID <*> randomString 10 30
+  DB.Cat <$> randomString 10 30
 
 randomFeed c =
-  DB.Feed <$> pure DB.unsetID
-          <*> pure c
+  DB.Feed <$> pure c
           <*> randomString 100 300
           <*> (DB.Text <$> randomString 100 300)
           <*> (DB.Text <$> randomString 100 300)
@@ -92,14 +82,12 @@ randomFeed c =
           <*> randomTime
 
 randomPerson =
-  DB.Person <$> pure DB.unsetID
-            <*> randomString 10 30
+  DB.Person <$> randomString 10 30
             <*> randomString 100 300
             <*> randomString 10 30
 
 randomItem f =
-  DB.Item <$> pure DB.unsetID
-          <*> pure f
+  DB.Item <$> pure f
           <*> randomString 100 300
           <*> (DB.Text <$> randomString 100 300)
           <*> (DB.Text <$> randomString 100 300)
@@ -115,21 +103,6 @@ randomItem f =
 -- Command Functions
 ------------------------------------------------------------------------------
 
--- under '_' = ' '
--- under c   = c
-
--- cmdDate acid args = do
---   df <- liftBase getCurrentTime
---   yield $ "Using " ++ show df ++ " as default date."
---   let d = DB.text2UTCTime (under <$> args !! 1) df
---   yield $ "Date parsed as: " ++ show d
---
--- cmdRand acid args = do
---   let l = (read $ args !! 1) :: Int
---   let r = (read $ args !! 2) :: Int
---   str <- liftBase $ randomString l r
---   yield str
-
 timed f = do
   t0 <- liftBase getCurrentTime
   f
@@ -139,25 +112,11 @@ timed f = do
 format sz i = i ++ replicate (sz - length i) ' '
 
 cmdStats h _ = timed $ do
-  (s, ss) <- liftBase $ DB.getStats h
-  yield $ "Pending       : " ++ show (DB.statsPending s)
+  s <- liftBase $ DB.getStats h
   yield $ "Category count: " ++ show (DB.countCats s)
   yield $ "Feed count    : " ++ show (DB.countFeeds s)
   yield $ "Person count  : " ++ show (DB.countPersons s)
-  yield $ "Entry count   : " ++ show (DB.countItemsAll s)
-  yield $ "Shard count   : " ++ show (DB.countShards s)
-  yield $ "Opened shards :" ++ if null ss then " 0" else ""
-  unless (null ss) $ yield $ "  Shard ID"  ++ replicate (20 - 8) ' ' ++
-                             "Entries" ++ replicate (10 - 7) ' ' ++
-                             "Last accessed"
-  forM_ ss $ \(sid, t, sz) ->
-    yield $ "  " ++ format 20 (show sid) ++ format 10 (show sz) ++ show t
-
-cmdShards h _ = timed $ do
-  ss <- liftBase $ DB.getShardStats h
-  yield $ "  Shard ID"  ++ replicate (20 - 8) ' ' ++ "Entries"
-  forM_ ss $ \(sid, sz) ->
-    yield $ "  " ++ format 20 (show sid) ++ format 10 (show sz)
+  yield $ "Entry count   : " ++ show (DB.countItems s)
 
 cmdGet h args = timed $ do
   let t = args !! 1
@@ -166,24 +125,24 @@ cmdGet h args = timed $ do
               Just s -> each $ lines s
               _      -> yield $ "No record found with ID == " ++ show k
   case t of
-    "cat"    -> liftBase (DB.findRecord h k :: IO (Maybe Cat))    >>= out . fmap show
-    "feed"   -> liftBase (DB.findRecord h k :: IO (Maybe Feed))   >>= out . fmap show
-    "person" -> liftBase (DB.findRecord h k :: IO (Maybe Person)) >>= out . fmap show
-    "item"   -> liftBase (DB.findRecord h k :: IO (Maybe Item))   >>= out . fmap show
+    "cat"    -> liftBase (DB.runLookup h k :: IO (Maybe Cat))    >>= out . fmap show
+    "feed"   -> liftBase (DB.runLookup h k :: IO (Maybe Feed))   >>= out . fmap show
+    "person" -> liftBase (DB.runLookup h k :: IO (Maybe Person)) >>= out . fmap show
+    "item"   -> liftBase (DB.runLookup h k :: IO (Maybe Item))   >>= out . fmap show
     _        -> yield $ t ++ " is not a valid table name."
 
 showShortHeader = "ID" ++ replicate (24 - 2) ' ' ++
                   "FeedID" ++ replicate (24 - 6) ' ' ++
                   "Updated"
 
-showShort i = format 24 (show $ itemID i) ++
+showShort (iid, i) = format 24 (show iid) ++
               format 24 (show $ itemFeedID i) ++
               show (itemUpdated i)
 
 cmdPage h args = timed $ do
   let p = (read $ args !! 1) :: Int
   let k = (read $ args !! 2) :: Int
-  is <- liftBase $ DB.getItemPage h k p
+  is <- liftBase $ DB.runPage h (Just $ fromIntegral k) "Updated" p
   yield showShortHeader
   each $ showShort <$> is
 
@@ -202,41 +161,35 @@ cmdAdd h args = timed $ do
     "cat"  -> do
        cs <- replicateM n $ do
          a <- liftBase randomCat
-         liftBase $ DB.addRecord h a
-       showIDs $ (show . DB.catID) <$> cs
+         liftBase $ DB.runInsert h a
+       showIDs $ show <$> cs
     "person"  -> do
        ps <- replicateM n $ do
          a <- liftBase randomPerson
-         liftBase $ DB.addRecord h a
-       showIDs $ (show . DB.personID) <$> ps
+         liftBase $ DB.runInsert h a
+       showIDs $ show <$> ps
     "feed" -> do
-      cs <- liftBase $ DB.getAllRecords h
+      cs' <- liftBase $ DB.runPage h Nothing "ID" 100
+      let cs = S.fromList cs'
       let rs = take n $ randomRs (0, S.length cs - 1) g
       fs <- forM rs $ \r -> do
-        f <- liftBase $ randomFeed $ DB.catID $ S.index cs r
-        liftBase $ DB.addRecord h f
-      showIDs $ (show . DB.feedID) <$> fs
+        f <- liftBase $ randomFeed $ fst $ S.index cs r
+        liftBase $ DB.runInsert h f
+      showIDs $ show <$> fs
     "item" -> do
-      fs <- liftBase $ DB.getAllRecords h
-      let rfids = (DB.feedID . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
+      fs' <- liftBase $ DB.runPage h Nothing "Updated" 1000
+      let fs = S.fromList fs'
+      let rfids = (fst . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
       is <- forM rfids $ liftBase . randomItem
-      is' <- liftBase $ DB.addRecords h is
-      showIDs $ (show . DB.itemID) <$> is'
+      is' <- liftBase $ forM is $ DB.runInsert h
+      showIDs $ show <$> is'
       return ()
     _      -> yield $ t ++ " is not a valid table name."
 
 
-cmdSnap h _ = timed $ do
-  liftBase $ DB.checkpoint h
+cmdGC h _ = timed $ do
+  liftBase $ DB.performGC h
   yield "Checkpoint created."
-
-cmdArchive h _ = timed $ do
-  liftBase $ DB.archive h
-  yield "Archive created."
-
-cmdClean h _ = timed $ do
-  liftBase $ DB.deleteArchives h
-  yield "Archive folders deleted."
 
 cmdDelDB h _ = timed $ do
   yield "Are you sure? (y/n)"
@@ -258,8 +211,8 @@ pipeLine h =
 main :: IO ()
 main = runSafeT $ runEffect $ bracket
     (do t0 <- getCurrentTime
-        putStrLn "  Opening master DB..."
-        h <- DB.open Nothing
+        putStrLn "  Opening DB..."
+        h <- DB.open Nothing Nothing
         t1 <- getCurrentTime
         putStrLn $ "  DB opened in " ++ show (DB.diffMs t0 t1) ++ " ms."
         return h )

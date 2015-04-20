@@ -38,8 +38,7 @@ tryEContent2DB c = eContent2DB $ fromMaybe (A.TextContent "") c
 
 instance ToPerson A.Person where
   toPerson p = Person
-    { personID    = unsetID
-    , personName  = A.personName p
+    { personName  = A.personName p
     , personURL   = fromMaybe "" $ A.personURI p
     , personEmail = fromMaybe "" $ A.personEmail p
     }
@@ -47,8 +46,7 @@ instance ToPerson A.Person where
 instance ToFeed A.Feed where
   toFeed f c u df =
     ( Feed
-      { feedID           = unsetID
-      , feedCatID        = c
+      { feedCatID        = c
       , feedURL          = u
       , feedTitle        = content2DB $ A.feedTitle f
       , feedDescription  = tryContent2DB $ A.feedSubtitle f
@@ -67,8 +65,7 @@ instance ToFeed A.Feed where
 instance ToItem A.Entry where
   toItem i f u df =
     ( Item
-      { itemID           = unsetID
-      , itemFeedID       = f
+      { itemFeedID       = f
       , itemURL          = u
       , itemTitle        = content2DB $ A.entryTitle i
       , itemSummary      = tryContent2DB $ A.entrySummary i

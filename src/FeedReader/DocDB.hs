@@ -20,6 +20,7 @@ module FeedReader.DocDB
   , open
   , close
   , performGC
+  , deleteDB
   , Transaction
   , runTransaction
   , DocID
@@ -33,6 +34,9 @@ module FeedReader.DocDB
   , update
   , delete
   , page
+  , runLookup
+  , runPage
+  , runInsert
   ) where
 
 import           Control.Arrow         (first)
@@ -208,6 +212,9 @@ close h = do
 performGC :: MonadIO m => Handle -> m ()
 performGC h = withGC h $ const $ return (PerformGC, ())
 
+deleteDB :: MonadIO m => Handle -> m ()
+deleteDB = close
+
 runTransaction :: MonadIO m => Handle -> Transaction m a -> m (Maybe a)
 runTransaction h (Transaction t) = do
   tid <- mkNewTID h
@@ -231,7 +238,7 @@ runTransaction h (Transaction t) = do
       writeLogPos (logHandle m) $ fromIntegral pos
       return (m', (Just a, ts))
     else return (m, (Nothing, []))
-  withJobs h $ \js -> return ((tid, ts):js, ())
+  unless (null ts) $ withJobs h $ \js -> return ((tid, ts):js, ())
   return mba
   where
     runUserCode tid = do
@@ -274,6 +281,14 @@ lookup (DocID did) = Transaction $ do
   S.put t { transReadList = did : transReadList t }
   return mba
 
+runLookup :: (Document a, MonadIO m) => Handle -> Int -> m (Maybe a)
+runLookup h k = do
+  mbb <- runTransaction h $
+    lookup $ DocID $ fromIntegral k
+  case mbb of
+    Nothing  -> return Nothing
+    Just mba -> return mba
+
 update :: forall a m. (Document a, MonadIO m) => DocID a -> a -> Transaction m ()
 update did a = Transaction $ do
   t <- S.get
@@ -293,6 +308,13 @@ insert a = Transaction $ do
   tid <- mkNewTID $ transHandle t
   unTransaction $ update (DocID tid) a
   return $ DocID tid
+
+runInsert :: (Document a, MonadIO m) => Handle -> a -> m (DocID a)
+runInsert h a = do
+  mb <- runTransaction h $ insert a
+  case mb of
+    Nothing  -> return $ DocID 0
+    Just did -> return did
 
 delete :: forall a m. (Document a, MonadIO m) => DocID a -> Transaction m ()
 delete (DocID did) = Transaction $ do
@@ -325,6 +347,15 @@ page mdid prop pg = Transaction $ do
   dds' <- forM dds $ \d -> readDocument (transHandle t) d
   S.put t { transReadList = (unDocID . fst <$> dds') ++ transReadList t }
   return dds'
+
+runPage :: (Document a, MonadIO m) => Handle -> Maybe (ExtID a) ->
+           String -> Int -> m [(DocID a, a)]
+runPage h k prop pg = do
+  mb <- runTransaction h $
+    page (DocID . unExtID <$> k) prop pg
+  case mb of
+    Nothing -> return []
+    Just ps -> return ps
 
 
 ------------------------------------------------------------------------------
