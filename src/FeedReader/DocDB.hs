@@ -22,7 +22,10 @@ module FeedReader.DocDB
   , Transaction
   , runTransaction
   , DocID
-  , RefList (..)
+  , ExtID
+  , utcTime2ExtID
+  , DocRefList (..)
+  , ExtRefList (..)
   , Document (..)
   , lookup
   , insert
@@ -31,29 +34,31 @@ module FeedReader.DocDB
   , page
   ) where
 
-import           Control.Arrow       (first)
-import           Control.Concurrent  (MVar, ThreadId, forkIO,
-                                      newMVar, putMVar, takeMVar, threadDelay)
-import           Control.Exception   (bracket, bracketOnError)
-import           Control.Monad       (forM, forM_, replicateM, unless, when)
-import qualified Control.Monad.State as S
-import           Control.Monad.Trans (MonadIO (liftIO))
-import qualified Data.ByteString     as B
-import           Data.Function       (on)
-import           Data.Hashable       (hash)
-import qualified Data.IntMap         as Map
-import qualified Data.IntSet         as Set
-import           Data.List           (find, foldl', nubBy)
-import           Data.Maybe          (fromJust, fromMaybe)
-import qualified Data.Sequence       as Seq
-import           Data.Serialize      (Serialize (..), decode, encode)
-import           Data.Serialize.Get  (getWord32be)
-import           Data.Serialize.Put  (putWord32be)
-import           Data.Typeable       (Proxy (..), Typeable, typeRep)
-import           Data.Word           (Word32)
-import           Prelude             hiding (lookup)
-import           System.FilePath     ((</>))
-import qualified System.IO           as IO
+import           Control.Arrow         (first)
+import           Control.Concurrent    (MVar, ThreadId, forkIO, newMVar,
+                                        putMVar, takeMVar, threadDelay)
+import           Control.Exception     (bracket, bracketOnError)
+import           Control.Monad         (forM, forM_, replicateM, unless, when)
+import qualified Control.Monad.State   as S
+import           Control.Monad.Trans   (MonadIO (liftIO))
+import qualified Data.ByteString       as B
+import           Data.Function         (on)
+import           Data.Hashable         (hash)
+import qualified Data.IntMap           as Map
+import qualified Data.IntSet           as Set
+import           Data.List             (find, foldl', nubBy)
+import           Data.Maybe            (fromJust, fromMaybe)
+import qualified Data.Sequence         as Seq
+import           Data.Serialize        (Serialize (..), decode, encode)
+import           Data.Serialize.Get    (getWord32be)
+import           Data.Serialize.Put    (putWord32be)
+import           Data.Time.Clock       (UTCTime)
+import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
+import           Data.Typeable         (Proxy (..), Typeable, typeRep)
+import           Data.Word             (Word32)
+import           Prelude               hiding (lookup)
+import           System.FilePath       ((</>))
+import qualified System.IO             as IO
 
 newtype DBWord = DBWord { unDBWord :: Word32 }
   deriving (Eq, Ord, Bounded, Num, Enum, Real, Integral)
@@ -137,10 +142,19 @@ newtype DocID a = DocID { unDocID :: DID }
 
 instance Show (DocID a) where show (DocID k) = show k
 
-data RefList a = forall b. RefList [DocID b]
+data DocRefList a = forall b. DocRefList [DocID b]
+
+newtype ExtID a = ExtID { unExtID :: DID }
+  deriving (Eq, Ord, Num, Show)
+
+data ExtRefList a = forall b. ExtRefList [ExtID b]
 
 class (Typeable a, Serialize a) => Document a where
-  getRefs :: a -> [RefList a]
+  getDocRefs :: a -> [DocRefList a]
+  getExtRefs :: a -> [ExtRefList a]
+
+utcTime2ExtID :: UTCTime -> ExtID a
+utcTime2ExtID = fromInteger . round . utcTimeToPOSIXSeconds
 
 open :: MonadIO m => Maybe FilePath -> Maybe FilePath -> m Handle
 open lf df = do
@@ -393,10 +407,11 @@ updateFwdIdx = foldl' f
 updateBckIdx :: Map.IntMap (Map.IntMap Set.IntSet) -> [DocRecord] ->
                 Map.IntMap (Map.IntMap Set.IntSet)
 updateBckIdx = foldl' f
-  where f idx r =
-          let did = toInt (docID r) in
-          let del = docDel r in
-          let g idx' ref =
+  where f idx r = foldl' g idx (docRefs r)
+          where
+            did = toInt (docID r)
+            del = docDel r
+            g idx' ref =
                 let pid  = toInt (propID ref) in
                 let rfid = toInt (refDID ref) in
                 let sng = Map.singleton rfid (Set.singleton did) in
@@ -409,8 +424,8 @@ updateBckIdx = foldl' f
                                             else sng
                                  Just ss -> Map.insert rfid ss' tidx
                                    where ss' = if del then Set.delete did ss
-                                               else Set.insert did ss in
-          foldl' g idx (docRefs r)
+                                               else Set.insert did ss
+
 
 updateTblIdx :: Map.IntMap Set.IntSet -> [DocRecord] -> Map.IntMap Set.IntSet
 updateTblIdx = foldl' f
@@ -565,8 +580,11 @@ mkPropID :: TypeID -> Int -> PropID
 mkPropID yid i = fromIntegral $ hash (toInt yid, i)
 
 getRefsConv :: forall a. Document a => a -> [Reference]
-getRefsConv a = snd $ foldl' f (1, []) $ (\(RefList rs) -> unDocID <$> rs) <$> getRefs a
+getRefsConv a = snd (foldl' f (1,     []) docRs) ++
+                snd (foldl' f (10000, []) extRs)
   where yid = mkTypeID (Proxy :: Proxy a)
+        docRs = (\(DocRefList rs) -> unDocID <$> rs) <$> getDocRefs a
+        extRs = (\(ExtRefList rs) -> unExtID <$> rs) <$> getExtRefs a
         f (i, rfs) rs = (i + 1, (Reference (mkPropID yid i) <$> rs) ++ rfs)
 
 dataError :: MonadIO m => IO.Handle -> String -> m a
