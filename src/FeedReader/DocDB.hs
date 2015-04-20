@@ -32,7 +32,7 @@ module FeedReader.DocDB
   ) where
 
 import           Control.Arrow       (first)
-import           Control.Concurrent  (MVar, ThreadId, forkIO, killThread,
+import           Control.Concurrent  (MVar, ThreadId, forkIO,
                                       newMVar, putMVar, takeMVar, threadDelay)
 import           Control.Exception   (bracket, bracketOnError)
 import           Control.Monad       (forM, forM_, replicateM, unless, when)
@@ -108,7 +108,7 @@ data DBState = DBState
   , master       :: MVar MasterState
   , dataHandle   :: MVar IO.Handle
   , jobs         :: MVar [Job]
-  , updateMan    :: Maybe ThreadId
+  , updateMan    :: MVar Bool
   }
 
 instance Eq DBState where
@@ -166,21 +166,20 @@ open lf df = do
   mv <- liftIO $ newMVar m'
   dv <- liftIO $ newMVar dfh
   jv <- liftIO $ newMVar []
+  um <- liftIO $ newMVar False
   let h = Handle DBState { logFilePath  = logPath
                          , dataFilePath = datPath
                          , master       = mv
                          , dataHandle   = dv
                          , jobs         = jv
-                         , updateMan    = Nothing
+                         , updateMan    = um
                          }
-  ut <- liftIO $ forkIO $ updateManThread h True
-  return $ Handle $ (unHandle h) { updateMan = Just ut }
+  liftIO $ forkIO $ updateManThread h True
+  return h
 
 close :: MonadIO m => Handle -> m ()
 close h = do
-  case updateMan $ unHandle h of
-    Nothing -> return ()
-    Just ut -> liftIO $ killThread ut
+  withUpdateMan h $ \kill -> return (True, ())
   withMasterLock h $ \m -> IO.hClose (logHandle m)
   withDataLock   h $ \d -> IO.hClose d
 
@@ -338,6 +337,15 @@ withJobs h f = liftIO $ bracketOnError
   (\js -> do
     (js', a) <- f js
     putMVar (jobs $ unHandle h) js'
+    return a)
+
+withUpdateMan :: MonadIO m => Handle -> (Bool -> IO (Bool, a)) -> m a
+withUpdateMan h f = liftIO $ bracketOnError
+  (takeMVar $ updateMan $ unHandle h)
+  (putMVar (updateMan $ unHandle h))
+  (\kill -> do
+    (kill', a) <- f kill
+    putMVar (updateMan $ unHandle h) kill'
     return a)
 
 readWord :: MonadIO m => IO.Handle -> m DBWord
@@ -592,34 +600,38 @@ getPage st p idx = go st p idx []
 
 updateManThread :: Handle -> Bool -> IO ()
 updateManThread h w = do
-  when w $ threadDelay $ 100 * 1000
-  (mbj, end) <- withJobs h $ \js ->
-    case js of
-      []    -> return (js, (Nothing, True))
-      j:js' -> return (js', (Just j, null js'))
-  unless (null mbj) $ do
-    let (tid, rs) = fromJust mbj
-    withDataLock h $ \hnd -> do
-      let maxAddr = toInteger $ maximum $ (\r -> docAddr r + docSize r) . fst <$> rs
-      sz <- IO.hFileSize hnd
-      when (sz < maxAddr) $ do
-        let nsz = max maxAddr $ sz + 4096
-        IO.hSetFileSize hnd nsz
-      forM_ rs $ \(r, bs) ->
-        unless (docDel r) $ do
-          IO.hSeek hnd IO.AbsoluteSeek $ fromIntegral $ docAddr r
-          B.hPut hnd bs
-    withMaster h $ \m -> do
-      let rs' = fst <$> rs
-      let m' = m { transLog = Map.delete (toInt tid) $ transLog m
-                 , fwdIdx   = updateFwdIdx (fwdIdx m) rs'
-                 , bckIdx   = updateBckIdx (bckIdx m) rs'
-                 , tblIdx   = updateTblIdx (tblIdx m) rs'
-                 }
-      let lh = logHandle m
-      IO.hSeek lh IO.AbsoluteSeek $ fromIntegral (logPos m)
-      writeLogTRec lh $ Completed tid
-      let pos = logPos m + 2
-      writeLogPos lh $ fromIntegral pos
-      return (m', ())
-  updateManThread h end
+  (kill, wait) <- withUpdateMan h $ \kill -> do
+    wait <- if kill then return True else do
+      when w $ threadDelay $ 100 * 1000
+      (mbj, wait) <- withJobs h $ \js ->
+        case js of
+          []    -> return (js, (Nothing, True))
+          j:js' -> return (js', (Just j, null js'))
+      unless (null mbj) $ do
+        let (tid, rs) = fromJust mbj
+        withDataLock h $ \hnd -> do
+          let maxAddr = toInteger $ maximum $ (\r -> docAddr r + docSize r) . fst <$> rs
+          sz <- IO.hFileSize hnd
+          when (sz < maxAddr) $ do
+            let nsz = max maxAddr $ sz + 4096
+            IO.hSetFileSize hnd nsz
+          forM_ rs $ \(r, bs) ->
+            unless (docDel r) $ do
+              IO.hSeek hnd IO.AbsoluteSeek $ fromIntegral $ docAddr r
+              B.hPut hnd bs
+        withMaster h $ \m -> do
+          let rs' = fst <$> rs
+          let m' = m { transLog = Map.delete (toInt tid) $ transLog m
+                     , fwdIdx   = updateFwdIdx (fwdIdx m) rs'
+                     , bckIdx   = updateBckIdx (bckIdx m) rs'
+                     , tblIdx   = updateTblIdx (tblIdx m) rs'
+                     }
+          let lh = logHandle m
+          IO.hSeek lh IO.AbsoluteSeek $ fromIntegral (logPos m)
+          writeLogTRec lh $ Completed tid
+          let pos = logPos m + 2
+          writeLogPos lh $ fromIntegral pos
+          return (m', ())
+      return wait
+    return (kill, (kill, wait))
+  unless kill $ updateManThread h wait
