@@ -212,7 +212,7 @@ main :: IO ()
 main = runSafeT $ runEffect $ bracket
     (do t0 <- getCurrentTime
         putStrLn "  Opening DB..."
-        h <- DB.open Nothing Nothing
+        h <- DB.open (Just "feeds.log") (Just "feeds.dat")
         t1 <- getCurrentTime
         putStrLn $ "  DB opened in " ++ show (DB.diffMs t0 t1) ++ " ms."
         return h )

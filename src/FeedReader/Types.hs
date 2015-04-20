@@ -19,7 +19,6 @@ module FeedReader.Types
   , Feed (..)
   , Person (..)
   , Item (..)
-  , itemID
   , URL
   , Language
   , Tag
@@ -140,9 +139,6 @@ instance Document Item where
                  , DocRefList "Authors" $ itemAuthors a
                  , DocRefList "Contributors" $ itemContributors a
                  ]
-
-itemID :: Item -> ExtID Item
-itemID a = utcTime2ExtID $ itemUpdated a
 
 class ToFeed f where
   toFeed :: f -> DocID Cat -> URL -> UTCTime -> (Feed, [Person], [Person])

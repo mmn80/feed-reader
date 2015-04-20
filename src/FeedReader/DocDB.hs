@@ -177,7 +177,7 @@ open lf df = do
                       , datPos    = 0
                       , logSize   = lsz
                       , newTID    = 1
-                      , gaps      = Map.empty
+                      , gaps      = Map.singleton maxBound [0]
                       , transLog  = Map.empty
                       , fwdIdx    = Map.empty
                       , bckIdx    = Map.empty
@@ -227,7 +227,7 @@ runTransaction h (Transaction t) = do
     then do
       let tsz = sum $ (tRecSize . fst) <$> u
       let pos = toInt (logPos m) + tsz
-      lsz <- checkFileSize m pos
+      lsz <- checkLogSize m pos
       let (ts, gs) = foldl' allocFold ([], gaps m) u
       let m' = m { logPos   = fromIntegral pos
                  , logSize  = fromIntegral lsz
@@ -252,14 +252,6 @@ runTransaction h (Transaction t) = do
       let u' = nubBy ((==) `on` docID . fst) u
       return (a, q, u')
 
-    checkFileSize m pos = let osz = toInt (logSize m) in
-      if pos > osz
-      then do
-             let sz = max pos $ osz + 4096
-             IO.hSetFileSize (logHandle m) $ fromIntegral sz
-             return sz
-      else return osz
-
     allocFold (ts, gs) (r, bs) =
       if docDel r then ((r, bs):ts, gs)
       else ((t, bs):ts, gs')
@@ -267,7 +259,7 @@ runTransaction h (Transaction t) = do
               t = r { docAddr = a }
 
     writeTransactions m ts = do
-      liftIO $ IO.hSeek (logHandle m) IO.AbsoluteSeek $ fromIntegral (logPos m)
+      logSeek m
       forM_ ts $ \(t, _) ->
         writeLogTRec (logHandle m) $ Pending t
 
@@ -478,36 +470,48 @@ updateBckIdx = foldl' f
 
 updateGaps :: Map.IntMap [Addr] -> [DocRecord] -> Map.IntMap [Addr]
 updateGaps = foldl' f
-  where f idx r =
-          let a = toInt (docAddr r) in
-          let s = toInt (docSize r) in
-          let did = toInt (docID r) in
-          if Map.null idx
-          then Map.insert maxBound [fromIntegral (a + s)] $ Map.insert a [0] idx
-          else case Map.lookupGE s idx of
-                 Nothing          -> error "Gap update error."
-                 Just (sz, DBWord fa:as) ->
-                   let idx' = Map.insert sz as idx in
-                   let d = sz - s in
-                   if d == 0 then idx'
-                   else let addr = DBWord (fa + fromIntegral d) in
-                        case Map.lookup d idx' of
-                          Nothing  -> Map.insert d [addr] idx'
-                          Just ads -> Map.insert d (addr:ads) idx'
+  where f idx r = case Map.lookupGE s idx of
+          Nothing          -> error "Gap update error."
+          Just (sz, DBWord fa:as) ->
+            let idx' = Map.insert sz as idx in
+            let d = sz - s in
+            if d == 0 then idx'
+            else let addr = DBWord (fa + fromIntegral d) in
+                 case Map.lookup d idx' of
+                   Nothing  -> Map.insert d [addr] idx'
+                   Just ads -> Map.insert d (addr:ads) idx'
+          where a = toInt (docAddr r)
+                s = toInt (docSize r)
+                did = toInt (docID r)
 
 alloc :: Map.IntMap [Addr] -> Int -> (Addr, Map.IntMap [Addr])
 alloc gs sz =
-  let (gsz, a:as) = fromJust (Map.lookupGE sz gs) in
-  let gs' = Map.insert gsz as gs in
-  let g' = gsz - sz in
   if g' == 0 then (a, gs')
   else let as' = fromMaybe [] (Map.lookup g' gs') in
        (a, Map.insert g' ((a + fromIntegral sz):as') gs')
+  where (gsz, a:as) = fromJust (Map.lookupGE sz gs)
+        gs' = Map.insert gsz as gs
+        g' = gsz - sz
 
 data TRec = Pending DocRecord | Completed TID
 
 toInt :: DBWord -> Int
 toInt (DBWord d) = fromIntegral d
+
+checkLogSize :: MonadIO m => MasterState -> Int -> m Int
+checkLogSize m pos =
+  let osz = toInt (logSize m) in
+  let bpos = wordSize * (pos + 1) in
+  if bpos > osz then do
+    let sz = max bpos $ osz + 4096
+    liftIO $ IO.hSetFileSize (logHandle m) $ fromIntegral sz
+    return sz
+  else return osz
+
+logSeek :: MonadIO m => MasterState -> m ()
+logSeek m = liftIO $ IO.hSeek h IO.AbsoluteSeek p
+  where h = logHandle m
+        p = fromIntegral $ wordSize * toInt (1 + logPos m)
 
 readLog :: MonadIO m => MasterState -> m MasterState
 readLog m = do
@@ -537,31 +541,31 @@ readLog m = do
   if pos >= (fromIntegral (logPos m) - 1) then return m'
   else readLog m'
 
-pendingTag :: Int
-pendingTag = 112 -- ASCII 'p'
+pndTag :: Int
+pndTag = 0x70 -- ASCII 'p'
 
-completedTag :: Int
-completedTag = 99 -- ASCII 'c'
+cmpTag :: Int
+cmpTag = 0x63 -- ASCII 'c'
 
-trueTag :: Int
-trueTag = 84 -- ASCII 'T'
+truTag :: Int
+truTag = 0x54 -- ASCII 'T'
 
-falseTag :: Int
-falseTag = 70 -- ASCII 'F'
+flsTag :: Int
+flsTag = 0x46 -- ASCII 'F'
 
 readLogTRec :: MonadIO m => IO.Handle -> m TRec
 readLogTRec h = do
   tag <- readWord h
   case toInt tag of
-    x | x == pendingTag -> do
+    x | x == pndTag -> do
       tid <- readWord h
       did <- readWord h
       adr <- readWord h
       siz <- readWord h
       del <- readWord h
       dlb <- case toInt del of
-               x | x == trueTag  -> return True
-               x | x == falseTag -> return False
+               x | x == truTag  -> return True
+               x | x == flsTag -> return False
                _ -> logError h $ "True ('T') or False ('F') tag expected but " ++
                       show del ++ " found."
       rfc <- readWord h
@@ -578,7 +582,7 @@ readLogTRec h = do
                                  , docSize = siz
                                  , docDel  = dlb
                                  }
-    x | x == completedTag -> do
+    x | x == cmpTag -> do
       tid <- readWord h
       return $ Completed tid
     _ -> logError h $ "Pending ('p') or Completed ('c') tag expected but " ++
@@ -588,18 +592,18 @@ writeLogTRec :: MonadIO m => IO.Handle -> TRec -> m ()
 writeLogTRec h t =
   case t of
     Pending doc -> do
-      writeWord h $ fromIntegral pendingTag
+      writeWord h $ fromIntegral pndTag
       writeWord h $ docTID doc
       writeWord h $ docID doc
       writeWord h $ docAddr doc
       writeWord h $ docSize doc
-      writeWord h $ fromIntegral $ if docDel doc then trueTag else falseTag
+      writeWord h $ fromIntegral $ if docDel doc then truTag else flsTag
       writeWord h $ fromIntegral $ length $ docRefs doc
       forM_ (docRefs doc) $ \r -> do
          writeWord h $ propID r
          writeWord h $ refDID r
     Completed tid -> do
-      writeWord h $ fromIntegral completedTag
+      writeWord h $ fromIntegral cmpTag
       writeWord h tid
 
 tRecSize :: DocRecord -> Int
@@ -623,7 +627,7 @@ dataError h err = do
 
 readDocument :: (Serialize a, MonadIO m) => Handle -> DocRecord -> m a
 readDocument h r = withDataLock h $ \hnd -> do
-  IO.hSeek hnd IO.AbsoluteSeek $ fromIntegral $ docAddr r
+  liftIO $ IO.hSeek hnd IO.AbsoluteSeek $ fromIntegral $ docAddr r
   bs <- B.hGet hnd $ fromIntegral $ docSize r
   case decode bs of
     Right x  -> return x
@@ -658,8 +662,8 @@ updateManThread h w = do
         withDataLock h $ \hnd -> do
           let maxAddr = toInteger $ maximum $ (\r -> docAddr r + docSize r) . fst <$> rs
           sz <- IO.hFileSize hnd
-          when (sz < maxAddr) $ do
-            let nsz = max maxAddr $ sz + 4096
+          when (sz < maxAddr + 1) $ do
+            let nsz = max (maxAddr + 1) $ sz + 4096
             IO.hSetFileSize hnd nsz
           forM_ rs $ \(r, bs) ->
             unless (docDel r) $ do
@@ -672,9 +676,10 @@ updateManThread h w = do
                      , bckIdx   = updateBckIdx (bckIdx m) rs'
                      }
           let lh = logHandle m
-          IO.hSeek lh IO.AbsoluteSeek $ fromIntegral (logPos m)
+          let pos = fromIntegral $ logPos m + 2
+          checkLogSize m pos
+          logSeek m
           writeLogTRec lh $ Completed tid
-          let pos = logPos m + 2
           writeLogPos lh $ fromIntegral pos
           return (m', ())
       return wait
