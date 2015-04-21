@@ -31,7 +31,7 @@ helpMessage = do
   yield "  page t p k: prints the next p entries with ID > k (t as above)"
   yield "  add t n   : inserts n random records into the DB (t as above)"
   yield "  gc        : performs GC"
-  yield "  deldb     : deletes the database"
+  yield "  debug     : prints a debug message"
   yield "  quit      : quits the program"
 
 processCommand h = do
@@ -43,7 +43,7 @@ processCommand h = do
     "page"    -> checkArgs 3 args h cmdPage
     "add"     -> checkArgs 2 args h cmdAdd
     "gc"      -> checkArgs 0 args h cmdGC
-    "deldb"   -> checkArgs 0 args h cmdDelDB
+    "debug"   -> checkArgs 0 args h cmdDebug
     _         -> yield $ "Command '" ++ head args ++ "' not understood."
   processCommand h
 
@@ -214,14 +214,9 @@ cmdGC h _ = timed $ do
   liftBase $ DB.performGC h
   yield "Checkpoint created."
 
-cmdDelDB h _ = timed $ do
-  yield "Are you sure? (y/n)"
-  r <- await
-  case r of
-    "y" -> do
-             liftBase $ DB.deleteDB h
-             yield "Database deleted. Have a nice day."
-    _   -> yield "Crisis averted."
+cmdDebug h _ = timed $ do
+  msg <- liftBase $ DB.debug h
+  each $ lines msg
 
 pipeLine h =
       P.stdinLn

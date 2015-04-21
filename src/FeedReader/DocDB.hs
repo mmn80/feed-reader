@@ -20,7 +20,6 @@ module FeedReader.DocDB
   , open
   , close
   , performGC
-  , deleteDB
   , Transaction
   , runTransaction
   , DocID
@@ -36,6 +35,7 @@ module FeedReader.DocDB
   , delete
   , page
   , size
+  , debug
   ) where
 
 import           Control.Arrow         (first)
@@ -85,7 +85,7 @@ type PropID = DBWord
 data Reference = Reference
   { propID :: PropID
   , refDID :: DID
-  }
+  } deriving (Show)
 
 data DocRecord = DocRecord
   { docID   :: DID
@@ -94,7 +94,7 @@ data DocRecord = DocRecord
   , docAddr :: Addr
   , docSize :: Size
   , docDel  :: Bool
-  }
+  } deriving (Show)
 
 data MasterState = MasterState
   { logHandle :: IO.Handle
@@ -218,9 +218,6 @@ close h = do
 performGC :: MonadIO m => Handle -> m ()
 performGC h = withGC h $ const $ return (PerformGC, ())
 
-deleteDB :: MonadIO m => Handle -> m ()
-deleteDB = close
-
 runTransaction :: MonadIO m => Handle -> Transaction m a -> m (Maybe a)
 runTransaction h (Transaction t) = do
   tid <- mkNewTID h
@@ -340,6 +337,22 @@ size prop = Transaction $ do
       Nothing -> 0
       Just ds -> sum $ Set.size . snd <$> Map.toList ds
 
+debug :: (MonadIO m) => Handle -> m String
+debug h = do
+  mbb <- runTransaction h $ Transaction $ do
+    t <- S.get
+    withMasterLock (transHandle t) $ \m -> return $
+      "logPos  : " ++ show (logPos m) ++
+      "\nlogSize : " ++ show (logSize m) ++
+      "\ndatPos  : " ++ show (datPos m) ++
+      "\nnewTID  : " ++ show (newTID m) ++
+      "\ntransLog:\n  " ++ show (transLog m) ++
+      "\ngaps    :\n  " ++ show (gaps m) ++
+      "\nfwdIdx  :\n  " ++ show (fwdIdx m) ++
+      "\nbckIdx  :\n  " ++ show (bckIdx m)
+  case mbb of
+    Nothing  -> return "Nothing"
+    Just mba -> return mba
 
 ------------------------------------------------------------------------------
 -- Internal
