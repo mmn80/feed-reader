@@ -6,6 +6,7 @@ module Main (main) where
 
 import           Control.Monad         (forM, forM_, replicateM, unless)
 import           Data.List             (intercalate)
+import           Data.Maybe            (fromJust)
 import qualified Data.Sequence         as S
 import           Data.Time.Clock       (getCurrentTime)
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
@@ -180,17 +181,18 @@ cmdAdd h args = timed $ do
                                else ("IDs: ", ".")
         yield $ show l ++ " records generated."
         yield $ prefix ++ intercalate ", " (take 10 ids) ++ suffix
+  let clean mbs = [ fromJust x | x <- mbs, not $ null x ]
   case t of
     "cat"  -> do
        cs <- replicateM n $ do
          a <- liftBase randomCat
          liftBase $ DB.runInsert h a
-       showIDs $ show <$> cs
+       showIDs $ show <$> clean cs
     "person"  -> do
        ps <- replicateM n $ do
          a <- liftBase randomPerson
          liftBase $ DB.runInsert h a
-       showIDs $ show <$> ps
+       showIDs $ show <$> clean ps
     "feed" -> do
       cs' <- liftBase $ DB.runPage h Nothing "ID" 100
       let cs = S.fromList cs'
@@ -198,14 +200,14 @@ cmdAdd h args = timed $ do
       fs <- forM rs $ \r -> do
         f <- liftBase $ randomFeed $ fst $ S.index cs r
         liftBase $ DB.runInsert h f
-      showIDs $ show <$> fs
+      showIDs $ show <$> clean fs
     "item" -> do
       fs' <- liftBase $ DB.runPage h Nothing "Updated" 1000
       let fs = S.fromList fs'
       let rfids = (fst . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
       is <- forM rfids $ liftBase . randomItem
       is' <- liftBase $ forM is $ DB.runInsert h
-      showIDs $ show <$> is'
+      showIDs $ show <$> clean is'
       return ()
     _      -> yield $ t ++ " is not a valid table name."
 

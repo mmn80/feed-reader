@@ -146,7 +146,7 @@ instance MonadIO m => MonadIO (Transaction m) where
 newtype DocID a = DocID { unDocID :: DID }
   deriving (Eq, Ord, Bounded, Serialize)
 
-instance Show (DocID a) where show (DocID k) = showHex k "0x"
+instance Show (DocID a) where show (DocID k) = "0x" ++ showHex k ""
 
 data DocRefList a = forall b. DocRefList { docPropName :: Property a
                                          , docPropVals :: [DocID b]
@@ -155,7 +155,7 @@ data DocRefList a = forall b. DocRefList { docPropName :: Property a
 newtype ExtID a = ExtID { unExtID :: DID }
   deriving (Eq, Ord, Bounded, Num)
 
-instance Show (ExtID a) where show (ExtID k) = showHex k "0x"
+instance Show (ExtID a) where show (ExtID k) =  "0x" ++ showHex k ""
 
 data ExtRefList a = forall b. ExtRefList { extPropName :: Property a
                                          , extPropVals :: [ExtID b]
@@ -222,27 +222,29 @@ runTransaction :: MonadIO m => Handle -> Transaction m a -> m (Maybe a)
 runTransaction h (Transaction t) = do
   tid <- mkNewTID h
   (a, q, u) <- runUserCode tid
-  (mba, ts) <- withMaster h $ \m -> do
-    let l = transLog m
-    let (_, newTs) = Map.split (toInt tid) l
-    let ck lst f = Map.null $ Map.intersection l $ Map.fromList $ f <$> lst
-    if ck q (\k -> (toInt k, ())) && ck u (\(d,_) -> (toInt (docID d), ()))
-    then do
-      let tsz = sum $ (tRecSize . fst) <$> u
-      let pos = toInt (logPos m) + tsz
-      lsz <- checkLogSize m pos
-      let (ts, gs) = foldl' allocFold ([], gaps m) u
-      let m' = m { logPos   = fromIntegral pos
-                 , logSize  = fromIntegral lsz
-                 , gaps     = gs
-                 , transLog = Map.insert (toInt tid) (fst <$> ts) l
-                 }
-      writeTransactions m ts
-      writeLogPos (logHandle m) $ fromIntegral pos
-      return (m', (Just a, ts))
-    else return (m, (Nothing, []))
-  unless (null ts) $ withJobs h $ \js -> return ((tid, ts):js, ())
-  return mba
+  if null u then return $ Just a
+  else do
+    (mba, ts) <- withMaster h $ \m -> do
+      let l = transLog m
+      let (_, newTs) = Map.split (toInt tid) l
+      let ck lst f = Map.null $ Map.intersection l $ Map.fromList $ f <$> lst
+      if ck q (\k -> (toInt k, ())) && ck u (\(d,_) -> (toInt (docID d), ()))
+      then do
+        let tsz = sum $ (tRecSize . fst) <$> u
+        let pos = toInt (logPos m) + tsz
+        lsz <- checkLogSize m pos
+        let (ts, gs) = foldl' allocFold ([], gaps m) u
+        let m' = m { logPos   = fromIntegral pos
+                   , logSize  = fromIntegral lsz
+                   , gaps     = gs
+                   , transLog = Map.insert (toInt tid) (fst <$> ts) l
+                   }
+        writeTransactions m ts
+        writeLogPos (logHandle m) $ fromIntegral pos
+        return (m', (Just a, ts))
+      else return (m, (Nothing, []))
+    unless (null ts) $ withJobs h $ \js -> return ((tid, ts):js, ())
+    return mba
   where
     runUserCode tid = do
       (a, TransactionState _ _ q u) <- S.runStateT t
