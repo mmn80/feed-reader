@@ -178,6 +178,8 @@ open lf df = do
   let datPath = fromMaybe ("data" </> "docdb.dat") df
   lfh <- liftIO $ IO.openBinaryFile logPath IO.ReadWriteMode
   dfh <- liftIO $ IO.openBinaryFile datPath IO.ReadWriteMode
+  liftIO $ IO.hSetBuffering lfh IO.NoBuffering
+  liftIO $ IO.hSetBuffering dfh IO.NoBuffering
   (pos, lsz) <- readLogPos lfh
   let m = MasterState { logHandle = lfh
                       , logPos    = pos
@@ -279,7 +281,9 @@ lookup (ExtID did) = Transaction $ do
   mbr <- withMasterLock (transHandle t) $ \m ->
            return $ findFirstDoc (fwdIdx m) (transTID t) did
   mba <- if null mbr then return Nothing
-         else Just <$> readDocument (transHandle t) (fromJust mbr)
+         else do
+           a <- readDocument (transHandle t) (fromJust mbr)
+           return $ Just (DocID did, a)
   S.put t { transReadList = did : transReadList t }
   return mba
 
@@ -331,7 +335,9 @@ page mdid prop pg = Transaction $ do
                         where st = toInt $ unExtID $ fromMaybe maxBound mdid
            let mbds = findFirstDoc (fwdIdx m) (transTID t) . fromIntegral <$> ds
            return [ fromJust mb | mb <- mbds, not (null mb) ]
-  dds' <- forM dds $ \d -> readDocument (transHandle t) d
+  dds' <- forM dds $ \d -> do
+    a <- readDocument (transHandle t) d
+    return (DocID $ docID d, a)
   S.put t { transReadList = (unDocID . fst <$> dds') ++ transReadList t }
   return dds'
 
@@ -630,19 +636,14 @@ getRefsConv a = concat docRs ++ concat extRs
         mkDRef p (DocID k) = Reference (mkPropID p) k
         mkERef p (ExtID k) = Reference (mkPropID p) k
 
-dataError :: MonadIO m => IO.Handle -> String -> m a
-dataError h err = do
-  pos <- liftIO $ IO.hTell h
-  liftIO $ ioError $ userError $ "Corrupted data file. " ++ err ++
-    " Position: " ++ show pos
-
 readDocument :: forall a m. (Serialize a, MonadIO m) => Handle -> DocRecord -> m a
-readDocument h r = withDataLock h $ \hnd -> do
-  liftIO $ IO.hSeek hnd IO.AbsoluteSeek $ fromIntegral $ docAddr r
-  bs <- B.hGet hnd $ fromIntegral $ docSize r
-  case decode bs :: Either String a of
+readDocument h r = do
+  bs <- withDataLock h $ \hnd -> do
+    liftIO $ IO.hSeek hnd IO.AbsoluteSeek $ fromIntegral $ docAddr r
+    liftIO $ B.hGet hnd $ fromIntegral $ docSize r
+  case decode bs of
     Right x  -> return x
-    Left err -> dataError hnd err
+    Left err -> liftIO $ ioError $ userError $ "Deserialization error: " ++ err
 
 findFirstDoc :: Map.IntMap [DocRecord] -> TID -> DID -> Maybe DocRecord
 findFirstDoc idx tid did = do

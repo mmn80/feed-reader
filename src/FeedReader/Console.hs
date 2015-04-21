@@ -17,6 +17,7 @@ import           Pipes
 import qualified Pipes.Prelude         as P
 import           Pipes.Safe
 import           System.Random         (getStdGen, randomRIO, randomRs)
+import           Data.Serialize        (Serialize (..), decode, encode)
 
 introMessage = do
   yield "Welcome to the Jungle!"
