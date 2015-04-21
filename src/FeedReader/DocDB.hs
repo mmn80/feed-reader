@@ -467,14 +467,14 @@ updateBckIdx = foldl' f
             g idx' ref =
                 let pid  = toInt (propID ref) in
                 let rfid = toInt (refDID ref) in
-                let sng = Map.singleton rfid (Set.singleton did) in
+                let sng = Set.singleton did in
                 case Map.lookup pid idx' of
                   Nothing   -> if del then idx'
-                               else Map.insert pid sng idx'
+                               else Map.insert pid (Map.singleton rfid sng) idx'
                   Just tidx -> Map.insert pid is idx'
                     where is = case Map.lookup rfid tidx of
                                  Nothing -> if del then tidx
-                                            else sng
+                                            else Map.insert rfid sng tidx
                                  Just ss -> Map.insert rfid ss' tidx
                                    where ss' = if del then Set.delete did ss
                                                else Set.insert did ss
