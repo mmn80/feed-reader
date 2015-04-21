@@ -224,12 +224,8 @@ runTransaction h (Transaction t) = do
   (a, q, u) <- runUserCode tid
   if null u then return $ Just a
   else do
-    (mba, ts) <- withMaster h $ \m -> do
-      let l = transLog m
-      let (_, newTs) = Map.split (toInt tid) l
-      let ck lst f = Map.null $ Map.intersection l $ Map.fromList $ f <$> lst
-      if ck q (\k -> (toInt k, ())) && ck u (\(d,_) -> (toInt (docID d), ()))
-      then do
+    (mba, ts) <- withMaster h $ \m ->
+      if checkValid tid (transLog m) q u then do
         let tsz = sum $ (tRecSize . fst) <$> u
         let pos = toInt (logPos m) + tsz
         lsz <- checkLogSize m pos
@@ -237,7 +233,7 @@ runTransaction h (Transaction t) = do
         let m' = m { logPos   = fromIntegral pos
                    , logSize  = fromIntegral lsz
                    , gaps     = gs
-                   , transLog = Map.insert (toInt tid) (fst <$> ts) l
+                   , transLog = Map.insert (toInt tid) (fst <$> ts) $ transLog m
                    }
         writeTransactions m ts
         writeLogPos (logHandle m) $ fromIntegral pos
@@ -257,10 +253,17 @@ runTransaction h (Transaction t) = do
       let u' = nubBy ((==) `on` docID . fst) u
       return (a, q, u')
 
+    checkValid tid l q u = ck qs && ck us
+      where
+        us = (\(d,_) -> (toInt (docID d), ())) <$> u
+        qs = (\k -> (toInt k, ())) <$> q
+        ck lst = Map.null $ Map.intersection newTs $ Map.fromList lst
+        (_, newTs) = Map.split (toInt tid) l
+
     allocFold (ts, gs) (r, bs) =
       if docDel r then ((r, bs):ts, gs)
       else ((t, bs):ts, gs')
-        where (a, gs') = alloc gs (toInt $ docSize r)
+        where (a, gs') = alloc gs $ docSize r
               t = r { docAddr = a }
 
     writeTransactions m ts = do
@@ -490,14 +493,16 @@ updateGaps = foldl' f
                 s = toInt (docSize r)
                 did = toInt (docID r)
 
-alloc :: Map.IntMap [Addr] -> Int -> (Addr, Map.IntMap [Addr])
-alloc gs sz =
-  if g' == 0 then (a, gs')
-  else let as' = fromMaybe [] (Map.lookup g' gs') in
-       (a, Map.insert g' ((a + fromIntegral sz):as') gs')
+alloc :: Map.IntMap [Addr] -> Size -> (Addr, Map.IntMap [Addr])
+alloc gs s =
+  if delta == 0 then (a, gs')
+  else let as' = fromMaybe [] (Map.lookup delta gs') in
+       (a, Map.insert delta ((a + fromIntegral sz):as') gs')
   where (gsz, a:as) = fromJust (Map.lookupGE sz gs)
-        gs' = Map.insert gsz as gs
-        g' = gsz - sz
+        gs' = if null as then Map.delete gsz gs
+                         else Map.insert gsz as gs
+        delta = gsz - sz
+        sz = toInt s
 
 data TRec = Pending DocRecord | Completed TID
 
