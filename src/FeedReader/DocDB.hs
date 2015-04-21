@@ -64,6 +64,7 @@ import           Data.Word             (Word32)
 import           Prelude               hiding (lookup)
 import           System.FilePath       ((</>))
 import qualified System.IO             as IO
+import           Numeric               (showHex)
 
 newtype DBWord = DBWord { unDBWord :: Word32 }
   deriving (Eq, Ord, Bounded, Num, Enum, Real, Integral)
@@ -145,14 +146,16 @@ instance MonadIO m => MonadIO (Transaction m) where
 newtype DocID a = DocID { unDocID :: DID }
   deriving (Eq, Ord, Bounded, Serialize)
 
-instance Show (DocID a) where show (DocID k) = show k
+instance Show (DocID a) where show (DocID k) = showHex k "0x"
 
 data DocRefList a = forall b. DocRefList { docPropName :: String
                                          , docPropVals :: [DocID b]
                                          }
 
 newtype ExtID a = ExtID { unExtID :: DID }
-  deriving (Eq, Ord, Num, Show)
+  deriving (Eq, Ord, Num)
+
+instance Show (ExtID a) where show (ExtID k) = showHex k "0x"
 
 data ExtRefList a = forall b. ExtRefList { extPropName :: String
                                          , extPropVals :: [ExtID b]

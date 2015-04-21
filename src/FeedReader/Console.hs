@@ -23,15 +23,15 @@ introMessage = do
 
 helpMessage = do
   yield "Commands (use _ instead of space inside arguments):"
-  yield "  help    : prints this helpful message"
-  yield "  stats   : prints general stats"
-  yield "  get t k : prints the item with ID == k"
-  yield "          : t is the table, one of 'cat', 'feed', 'person' or 'item'"
-  yield "  page p k: prints the next p entries with ID > k"
-  yield "  add t n : inserts n random records into the DB (t as above)"
-  yield "  gc      : performs GC"
-  yield "  deldb   : deletes the database"
-  yield "  quit    : quits the program"
+  yield "  help      : prints this helpful message"
+  yield "  stats     : prints general stats"
+  yield "  get t k   : prints the item with ID == k"
+  yield "            : t is the table, one of 'cat', 'feed', 'person' or 'item'"
+  yield "  page t p k: prints the next p entries with ID > k (t as above)"
+  yield "  add t n   : inserts n random records into the DB (t as above)"
+  yield "  gc        : performs GC"
+  yield "  deldb     : deletes the database"
+  yield "  quit      : quits the program"
 
 processCommand h = do
   args <- words <$> await
@@ -39,7 +39,7 @@ processCommand h = do
     "help"    -> helpMessage
     "stats"   -> checkArgs 0 args h cmdStats
     "get"     -> checkArgs 2 args h cmdGet
-    "page"    -> checkArgs 2 args h cmdPage
+    "page"    -> checkArgs 3 args h cmdPage
     "add"     -> checkArgs 2 args h cmdAdd
     "gc"      -> checkArgs 0 args h cmdGC
     "deldb"   -> checkArgs 0 args h cmdDelDB
@@ -109,8 +109,6 @@ timed f = do
   t1 <- liftBase getCurrentTime
   yield $ "Command: " ++ show (DB.diffMs t0 t1) ++ " ms"
 
-format sz i = i ++ replicate (sz - length i) ' '
-
 cmdStats h _ = timed $ do
   s <- liftBase $ DB.getStats h
   yield $ "Category count: " ++ show (DB.countCats s)
@@ -131,20 +129,38 @@ cmdGet h args = timed $ do
     "item"   -> liftBase (DB.runLookup h k :: IO (Maybe Item))   >>= out . fmap show
     _        -> yield $ t ++ " is not a valid table name."
 
-showShortHeader = "ID" ++ replicate (24 - 2) ' ' ++
-                  "FeedID" ++ replicate (24 - 6) ' ' ++
-                  "Updated"
-
-showShort (iid, i) = format 24 (show iid) ++
-              format 24 (show $ itemFeedID i) ++
-              show (itemUpdated i)
-
 cmdPage h args = timed $ do
-  let p = (read $ args !! 1) :: Int
-  let k = (read $ args !! 2) :: Int
-  is <- liftBase $ DB.runPage h (Just $ fromIntegral k) "Updated" p
-  yield showShortHeader
-  each $ showShort <$> is
+  let t = args !! 1
+  let p = (read $ args !! 2) :: Int
+  let k = (read $ args !! 3) :: Int
+  let extk k = if k == 0 then Nothing else Just $ fromIntegral k
+  let format i = i ++ replicate (12 - length i) ' '
+  let sCat (iid, i) = format (show iid) ++ show (catName i)
+  let sFeed (iid, i) = format (show iid) ++
+                       format (show $ feedCatID i) ++
+                       show (feedUpdated i)
+  let sPerson (iid, i) = format (show iid) ++ show (personName i)
+  let sItem (iid, i) = format (show iid) ++
+                       format (show $ itemFeedID i) ++
+                       show (itemUpdated i)
+  case t of
+    "cat"    -> do
+      as <- liftBase (DB.runPage h (extk k) "ID" p)
+      yield $ format "ID" ++ "Name"
+      each $ sCat <$> as
+    "feed"   -> do
+      as <- liftBase (DB.runPage h (extk k) "Updated" p)
+      yield $ format "ID" ++ format "CatID" ++ "Updated"
+      each $ sFeed <$> as
+    "person" -> do
+      as <- liftBase (DB.runPage h (extk k) "ID" p)
+      yield $ format "ID" ++ "Name"
+      each $ sPerson <$> as
+    "item"   -> do
+      as <- liftBase (DB.runPage h (extk k) "Updated" p)
+      yield $ format "ID" ++ format "FeedID" ++ "Updated"
+      each $ sItem <$> as
+    _        -> yield $ t ++ " is not a valid table name."
 
 cmdAdd h args = timed $ do
   let t = args !! 1
