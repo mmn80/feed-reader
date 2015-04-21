@@ -36,9 +36,6 @@ module FeedReader.DocDB
   , delete
   , page
   , size
-  , runLookup
-  , runPage
-  , runInsert
   ) where
 
 import           Control.Arrow         (first)
@@ -156,7 +153,7 @@ data DocRefList a = forall b. DocRefList { docPropName :: Property a
                                          }
 
 newtype ExtID a = ExtID { unExtID :: DID }
-  deriving (Eq, Ord, Num)
+  deriving (Eq, Ord, Bounded, Num)
 
 instance Show (ExtID a) where show (ExtID k) = showHex k "0x"
 
@@ -272,8 +269,8 @@ runTransaction h (Transaction t) = do
       forM_ ts $ \(t, _) ->
         writeLogTRec (logHandle m) $ Pending t
 
-lookup :: (Document a, MonadIO m) => DocID a -> Transaction m (Maybe a)
-lookup (DocID did) = Transaction $ do
+lookup :: (Document a, MonadIO m) => ExtID a -> Transaction m (Maybe (DocID a, a))
+lookup (ExtID did) = Transaction $ do
   t <- S.get
   mbr <- withMasterLock (transHandle t) $ \m ->
            return $ findFirstDoc (fwdIdx m) (transTID t) did
@@ -281,14 +278,6 @@ lookup (DocID did) = Transaction $ do
          else Just <$> readDocument (transHandle t) (fromJust mbr)
   S.put t { transReadList = did : transReadList t }
   return mba
-
-runLookup :: (Document a, MonadIO m) => Handle -> Int -> m (Maybe a)
-runLookup h k = do
-  mbb <- runTransaction h $
-    lookup $ DocID $ fromIntegral k
-  case mbb of
-    Nothing  -> return Nothing
-    Just mba -> return mba
 
 update :: forall a m. (Document a, MonadIO m) => DocID a -> a -> Transaction m ()
 update did a = Transaction $ do
@@ -310,13 +299,6 @@ insert a = Transaction $ do
   unTransaction $ update (DocID tid) a
   return $ DocID tid
 
-runInsert :: (Document a, MonadIO m) => Handle -> a -> m (DocID a)
-runInsert h a = do
-  mb <- runTransaction h $ insert a
-  case mb of
-    Nothing  -> return $ DocID 0
-    Just did -> return did
-
 delete :: forall a m. (Document a, MonadIO m) => DocID a -> Transaction m ()
 delete (DocID did) = Transaction $ do
   t <- S.get
@@ -333,7 +315,7 @@ delete (DocID did) = Transaction $ do
                     }
   S.put t { transUpdateList = (r, B.empty) : transUpdateList t }
 
-page :: forall a m. (Document a, MonadIO m) => Maybe (DocID a) ->
+page :: forall a m. (Document a, MonadIO m) => Maybe (ExtID a) ->
                     Property a -> Int -> Transaction m [(DocID a, a)]
 page mdid prop pg = Transaction $ do
   t <- S.get
@@ -342,21 +324,12 @@ page mdid prop pg = Transaction $ do
            let ds = case Map.lookup (toInt pid) (bckIdx m) of
                       Nothing -> []
                       Just ds -> concat $ Set.toDescList <$> getPage st pg ds
-                        where st = toInt $ unDocID $ fromMaybe maxBound mdid
+                        where st = toInt $ unExtID $ fromMaybe maxBound mdid
            let mbds = findFirstDoc (fwdIdx m) (transTID t) . fromIntegral <$> ds
            return [ fromJust mb | mb <- mbds, not (null mb) ]
   dds' <- forM dds $ \d -> readDocument (transHandle t) d
   S.put t { transReadList = (unDocID . fst <$> dds') ++ transReadList t }
   return dds'
-
-runPage :: (Document a, MonadIO m) => Handle -> Maybe (ExtID a) ->
-           Property a -> Int -> m [(DocID a, a)]
-runPage h k prop pg = do
-  mb <- runTransaction h $
-    page (DocID . unExtID <$> k) prop pg
-  case mb of
-    Nothing -> return []
-    Just ps -> return ps
 
 size :: forall a m. (Document a, MonadIO m) => Property a -> Transaction m Int
 size prop = Transaction $ do

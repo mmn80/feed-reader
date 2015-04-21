@@ -117,6 +117,8 @@ cmdStats h _ = timed $ do
   yield $ "Person count  : " ++ show (DB.countPersons s)
   yield $ "Entry count   : " ++ show (DB.countItems s)
 
+type LookupRet a = IO (Maybe (DB.DocID a, a))
+
 cmdGet h args = timed $ do
   let t = args !! 1
   let k = (read $ args !! 2) :: Int
@@ -124,10 +126,14 @@ cmdGet h args = timed $ do
               Just s -> each $ lines s
               _      -> yield $ "No record found with ID == " ++ show k
   case t of
-    "cat"    -> liftBase (DB.runLookup h k :: IO (Maybe Cat))    >>= out . fmap show
-    "feed"   -> liftBase (DB.runLookup h k :: IO (Maybe Feed))   >>= out . fmap show
-    "person" -> liftBase (DB.runLookup h k :: IO (Maybe Person)) >>= out . fmap show
-    "item"   -> liftBase (DB.runLookup h k :: IO (Maybe Item))   >>= out . fmap show
+    "cat"    -> liftBase (DB.runLookup h (fromIntegral k) :: LookupRet Cat)
+                  >>= out . fmap (show . snd)
+    "feed"   -> liftBase (DB.runLookup h (fromIntegral k) :: LookupRet Feed)
+                  >>= out . fmap (show . snd)
+    "person" -> liftBase (DB.runLookup h (fromIntegral k) :: LookupRet Person)
+                  >>= out . fmap (show . snd)
+    "item"   -> liftBase (DB.runLookup h (fromIntegral k) :: LookupRet Item)
+                  >>= out . fmap (show . snd)
     _        -> yield $ t ++ " is not a valid table name."
 
 cmdPage h args = timed $ do
