@@ -1,7 +1,10 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module FeedReader.DB
   ( module FeedReader.Types
   , module FeedReader.DocDB
   , getStats
+  , DBStats (..)
   , addItemConv
   , addFeedConv
   ) where
@@ -11,9 +14,23 @@ import           Data.Time.Clock     (getCurrentTime)
 import           FeedReader.DocDB
 import           FeedReader.Types
 
-getStats :: MonadIO m => Handle -> m StatsMaster
-getStats h =
-  return $ StatsMaster 0 0 0 0
+data DBStats = DBStats
+  { countCats    :: Int
+  , countFeeds   :: Int
+  , countPersons :: Int
+  , countItems   :: Int
+  } deriving (Show)
+
+getStats :: MonadIO m => Handle -> m DBStats
+getStats h = do
+  mb <- runTransaction h $ DBStats
+    <$> size ("ID"      :: Property Cat)
+    <*> size ("Updated" :: Property Feed)
+    <*> size ("ID"      :: Property Person)
+    <*> size ("Updated" :: Property Item)
+  case mb of
+    Nothing -> return $ DBStats 0 0 0 0
+    Just s  -> return s
 
 addItemConv :: (MonadIO m, ToItem i) => Handle -> i -> DocID Feed -> URL -> m Item
 addItemConv h it fid u = do

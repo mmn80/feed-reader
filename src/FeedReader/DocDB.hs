@@ -25,6 +25,7 @@ module FeedReader.DocDB
   , runTransaction
   , DocID
   , ExtID
+  , Property
   , utcTime2ExtID
   , DocRefList (..)
   , ExtRefList (..)
@@ -34,6 +35,7 @@ module FeedReader.DocDB
   , update
   , delete
   , page
+  , size
   , runLookup
   , runPage
   , runInsert
@@ -57,14 +59,15 @@ import qualified Data.Sequence         as Seq
 import           Data.Serialize        (Serialize (..), decode, encode)
 import           Data.Serialize.Get    (getWord32be)
 import           Data.Serialize.Put    (putWord32be)
+import           Data.String           (IsString (..))
 import           Data.Time.Clock       (UTCTime)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import           Data.Typeable         (Proxy (..), Typeable, typeRep)
 import           Data.Word             (Word32)
+import           Numeric               (showHex)
 import           Prelude               hiding (lookup)
 import           System.FilePath       ((</>))
 import qualified System.IO             as IO
-import           Numeric               (showHex)
 
 newtype DBWord = DBWord { unDBWord :: Word32 }
   deriving (Eq, Ord, Bounded, Num, Enum, Real, Integral)
@@ -148,7 +151,7 @@ newtype DocID a = DocID { unDocID :: DID }
 
 instance Show (DocID a) where show (DocID k) = showHex k "0x"
 
-data DocRefList a = forall b. DocRefList { docPropName :: String
+data DocRefList a = forall b. DocRefList { docPropName :: Property a
                                          , docPropVals :: [DocID b]
                                          }
 
@@ -157,9 +160,12 @@ newtype ExtID a = ExtID { unExtID :: DID }
 
 instance Show (ExtID a) where show (ExtID k) = showHex k "0x"
 
-data ExtRefList a = forall b. ExtRefList { extPropName :: String
+data ExtRefList a = forall b. ExtRefList { extPropName :: Property a
                                          , extPropVals :: [ExtID b]
                                          }
+
+newtype Property a = Property { unProperty :: String }
+  deriving (Eq, Show, IsString)
 
 class (Typeable a, Serialize a) => Document a where
   getDocRefs :: a -> [DocRefList a]
@@ -328,10 +334,10 @@ delete (DocID did) = Transaction $ do
   S.put t { transUpdateList = (r, B.empty) : transUpdateList t }
 
 page :: forall a m. (Document a, MonadIO m) => Maybe (DocID a) ->
-                    String -> Int -> Transaction m [(DocID a, a)]
+                    Property a -> Int -> Transaction m [(DocID a, a)]
 page mdid prop pg = Transaction $ do
   t <- S.get
-  let pid = mkPropID (Proxy :: Proxy a) prop
+  let pid = mkPropID prop
   dds <- withMasterLock (transHandle t) $ \m -> do
            let ds = case Map.lookup (toInt pid) (bckIdx m) of
                       Nothing -> []
@@ -344,13 +350,22 @@ page mdid prop pg = Transaction $ do
   return dds'
 
 runPage :: (Document a, MonadIO m) => Handle -> Maybe (ExtID a) ->
-           String -> Int -> m [(DocID a, a)]
+           Property a -> Int -> m [(DocID a, a)]
 runPage h k prop pg = do
   mb <- runTransaction h $
     page (DocID . unExtID <$> k) prop pg
   case mb of
     Nothing -> return []
     Just ps -> return ps
+
+size :: forall a m. (Document a, MonadIO m) => Property a -> Transaction m Int
+size prop = Transaction $ do
+  t <- S.get
+  let pid = mkPropID prop
+  withMasterLock (transHandle t) $ \m -> return $
+    case Map.lookup (toInt pid) (bckIdx m) of
+      Nothing -> 0
+      Just ds -> sum $ Set.size . snd <$> Map.toList ds
 
 
 ------------------------------------------------------------------------------
@@ -612,15 +627,15 @@ writeLogTRec h t =
 tRecSize :: DocRecord -> Int
 tRecSize r = 7 + 2 * length (docRefs r)
 
-mkPropID :: Typeable a => Proxy a -> String -> PropID
-mkPropID proxy p = fromIntegral $ hash (show $ typeRep proxy, p)
+mkPropID :: forall a. Typeable a => Property a -> PropID
+mkPropID p = fromIntegral $ hash (show $ typeRep (Proxy :: Proxy a), show p)
 
 getRefsConv :: forall a. Document a => a -> [Reference]
 getRefsConv a = concat docRs ++ concat extRs
   where docRs = (\(DocRefList p rs) -> mkDRef p <$> rs) <$> getDocRefs a
         extRs = (\(ExtRefList p rs) -> mkERef p <$> rs) <$> getExtRefs a
-        mkDRef p (DocID k) = Reference (mkPropID (Proxy :: Proxy a) p) k
-        mkERef p (ExtID k) = Reference (mkPropID (Proxy :: Proxy a) p) k
+        mkDRef p (DocID k) = Reference (mkPropID p) k
+        mkERef p (ExtID k) = Reference (mkPropID p) k
 
 dataError :: MonadIO m => IO.Handle -> String -> m a
 dataError h err = do

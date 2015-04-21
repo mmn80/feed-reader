@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveGeneric         #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings     #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -24,7 +25,6 @@ module FeedReader.Types
   , Tag
   , Content (..)
   , Image (..)
-  , StatsMaster (..)
   , ToFeed (..)
   , ToPerson (..)
   , ToItem (..)
@@ -43,8 +43,8 @@ import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
 import           Data.Time.Format      (defaultTimeLocale, iso8601DateFormat,
                                         parseTimeM, rfc822DateFormat)
-import           FeedReader.DocDB      (DocID, ExtID, DocRefList (..), Document (..),
-                                        ExtRefList (..), utcTime2ExtID)
+import           FeedReader.DocDB      (DocID, DocRefList (..), Document (..),
+                                        ExtID, ExtRefList (..), utcTime2ExtID)
 import           GHC.Generics          (Generic)
 
 type URL      = String
@@ -169,10 +169,3 @@ imageFromURL u = Image
   , imageWidth       = 0
   , imageHeight      = 0
   }
-
-data StatsMaster = StatsMaster
-  { countCats    :: Int
-  , countFeeds   :: Int
-  , countPersons :: Int
-  , countItems   :: Int
-  } deriving (Show)
