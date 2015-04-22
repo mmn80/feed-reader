@@ -3,8 +3,8 @@
 module FeedReader.DB
   ( module FeedReader.Types
   , module FeedReader.DocDB
-  , runPageExt
-  , runPageDoc
+  , runRange
+  , runFilter
   , runLookup
   , runInsert
   , getStats
@@ -14,37 +14,31 @@ module FeedReader.DB
   ) where
 
 import           Control.Monad.Trans (MonadIO (liftIO))
-import           Data.Maybe          (fromJust)
+import           Data.Maybe          (fromJust, fromMaybe)
 import           Data.Time.Clock     (getCurrentTime)
 import           FeedReader.DocDB
 import           FeedReader.Types
-import           Prelude             hiding (lookup)
+import           Prelude             hiding (lookup, filter)
 
-runLookup :: (Document a, MonadIO m) => Handle -> ExtID a -> m (Maybe (DocID a, a))
+runLookup :: (Document a, MonadIO m) => Handle -> IntVal -> m (Maybe (DocID a, a))
 runLookup h k = do
   mbb <- runTransaction h $
     lookup k
-  case mbb of
-    Nothing  -> return Nothing
-    Just mba -> return mba
+  return $ fromMaybe Nothing mbb
 
-runPageExt :: (Document a, MonadIO m) => Handle -> Maybe (ExtID a) ->
-           Property a -> Int -> m [(DocID a, a)]
-runPageExt h s prop pg = do
+runRange :: (Document a, MonadIO m) => Handle -> Maybe IntVal ->
+            IntProperty a -> Int -> m [(DocID a, a)]
+runRange h s prop pg = do
   mb <- runTransaction h $
-    pageExt s prop pg
-  case mb of
-    Nothing -> return []
-    Just ps -> return ps
+    range s Nothing prop pg
+  return $ fromMaybe [] mb
 
-runPageDoc :: (Document a, MonadIO m) => Handle -> ExtID b -> Maybe (ExtID a) ->
-           Property a -> Int -> m [(DocID a, a)]
-runPageDoc h k s prop pg = do
+runFilter :: (Document a, MonadIO m) => Handle -> IntVal -> Maybe IntVal ->
+             RefProperty a b -> Int -> m [(DocID a, a)]
+runFilter h k s prop pg = do
   mb <- runTransaction h $
-    pageDoc k s prop pg
-  case mb of
-    Nothing -> return []
-    Just ps -> return ps
+    filter k s prop pg
+  return $ fromMaybe [] mb
 
 runInsert :: (Document a, MonadIO m) => Handle -> a -> m (Maybe (DocID a))
 runInsert h a = runTransaction h $ insert a
@@ -59,13 +53,11 @@ data DBStats = DBStats
 getStats :: MonadIO m => Handle -> m DBStats
 getStats h = do
   mb <- runTransaction h $ DBStats
-    <$> size ("ID"      :: Property Cat)
-    <*> size ("Updated" :: Property Feed)
-    <*> size ("ID"      :: Property Person)
-    <*> size ("Updated" :: Property Item)
-  case mb of
-    Nothing -> return $ DBStats 0 0 0 0
-    Just s  -> return s
+    <$> size ("Hash"    :: IntProperty Cat)
+    <*> size ("Updated" :: IntProperty Feed)
+    <*> size ("Hash"    :: IntProperty Person)
+    <*> size ("Updated" :: IntProperty Item)
+  return $ fromMaybe (DBStats 0 0 0 0) mb
 
 clean :: [Maybe a] -> [a]
 clean as = [ fromJust x | x <- as, not $ null x ]

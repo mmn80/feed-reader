@@ -8,21 +8,35 @@ Instead of functions and lists we will have `Data.IntMap`, `Data.IntSet`, etc.
 A `newtype` based `Handle` wraps a `DBState` ADT that contains `master :: MVar MasterState`, `dataHandle` and `jobs`.
 The handle is created by an `open` IO action, used for running transaction monad actions, and closed by a `close` IO action.
 
+`intIdx` indexes columns that hold Int-convertible values, like Date/Time.
+It is used for range queries.
+
+`refIdx` indexes document reference columns.
+`[DID]` is sorted on the `PropID` in the pair.
+There can be multiple copies for the same main `PropID`, but sorted on different columns.
+Used for filter+range queries (filter of first prop, then range on second).
+
 ### Master State
 
 ```haskell
-transLog  :: TID -> [(DID, Addr, Size, Del, [(PropID, DID)])]
-gaps      :: Size -> [Addr]
-fwdIdx    :: DID -> [(TID, Addr, Size, [(PropID, DID)])]
-bckIdx    :: PropID -> DID -> [DID]
 logHandle :: Handle
+transLog  :: TID -> [(DID, Addr, Size, Del, [(PropID, [DID])])]
+gaps      :: Size -> [Addr]
+mainIdx   :: DID -> [(TID, Addr, Size, [(PropID, [DID])])]
+intIdx    :: PropID -> IntVal -> [DID]
+refIdx    :: PropID -> [(PropID, DID -> [DID])]
 ```
 
 ### Data State
 
 ```haskell
 dataHandle :: MVar Handle
-jobs       :: MVar [(TID, [(DID, ByteString, Addr, Size)])]
+```
+
+### Update Manager State
+
+```haskell
+jobs :: MVar [(TID, [(DID, ByteString, Addr, Size)])]
 ```
 
 Data Files Format
@@ -43,7 +57,7 @@ Any ordered subset of a valid log is a valid log.
 logPos :: Addr
 recs   :: [TRec]
 
-TRec = Pending TID DID Addr Size Del RefCount [(PropID, DID)]
+TRec = Pending TID DID Addr Size Del ValCount [(PropID, IntVal)] RefCount [(PropID, DID)]
      | Completed TID
 ```
 
@@ -88,7 +102,7 @@ update :: DID a -> a -> Trans ()
 delete :: DID a -> Trans ()
 ```
 
-Also range/page queries, and queries on the `bckIdx`.
+Also range/page queries, and queries on the `intIdx`.
 
 ### Running Transactions
 
@@ -132,6 +146,13 @@ end:
 Update Manager
 --------------
 
+We use an **ACId** with *'eventual durability'* model.
+If the program dies before the Update Manager (asynchronously) finished its `jobs`,
+the `logPos` will never be updated (last operation, see below).
+Next time the program starts the incomplete transaction will simply be ignored.
+Since `gaps` are always rebuild from valid log data,
+the previously allocated slots will become available again.
+
 ```
 repeat:
   with jobs lock:
@@ -140,7 +161,7 @@ repeat:
     increase file size if needed
     write updates
   with master lock:
-    update transLog, fwdIdx, bckIdx
+    update transLog, mainIdx, intIdx
     add "Completed: TID" to the transaction log
     update logPos in the transaction log
 ```

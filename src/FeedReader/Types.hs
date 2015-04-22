@@ -44,7 +44,7 @@ import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
 import           Data.Time.Format      (defaultTimeLocale, iso8601DateFormat,
                                         parseTimeM, rfc822DateFormat)
 import           FeedReader.DocDB      (DocID, DocRefList (..), Document (..),
-                                        ExtID, ExtRefList (..), utcTime2ExtID)
+                                        IntValList (..), utcTime2ExtID)
 import           GHC.Generics          (Generic)
 
 type URL      = String
@@ -63,7 +63,7 @@ data Cat = Cat
 instance Serialize Cat
 
 instance Document Cat where
-  getExtRefs a = [ ExtRefList "Hash" [ fromIntegral $ hash $ catName a ] ]
+  getIntVals a = [ IntValList "Hash" [ fromIntegral $ hash $ catName a ] ]
   getDocRefs _ = []
 
 data Person = Person
@@ -75,7 +75,7 @@ data Person = Person
 instance Serialize Person
 
 instance Document Person where
-  getExtRefs a = [ ExtRefList "Hash" [ fromIntegral $ hash $ personName a ] ]
+  getIntVals a = [ IntValList "Hash" [ fromIntegral $ hash $ personName a ] ]
   getDocRefs _ = []
 
 data Image = Image
@@ -105,9 +105,10 @@ data Feed = Feed
 instance Serialize Feed
 
 instance Document Feed where
-  getExtRefs a = [ ExtRefList "Updated" [ utcTime2ExtID $ feedUpdated a ] ]
-  getDocRefs a = [ DocRefList "CatID" [ feedCatID a ]
-                 , DocRefList "Authors" $ feedAuthors a
+  getIntVals a = [ IntValList "Updated" [ utcTime2ExtID $ feedUpdated a ] ]
+
+  getDocRefs a = [ DocRefList "CatID"        [ feedCatID a ]
+                 , DocRefList "Authors"      $ feedAuthors a
                  , DocRefList "Contributors" $ feedContributors a
                  ]
 
@@ -132,11 +133,11 @@ instance Serialize UTCTime where
 instance Serialize Item
 
 instance Document Item where
-  getExtRefs a = [ ExtRefList "Published" [ utcTime2ExtID $ itemPublished a ]
-                 , ExtRefList "Updated"   [ utcTime2ExtID $ itemUpdated a ]
+  getIntVals a = [ IntValList "Published" [ utcTime2ExtID $ itemPublished a ]
+                 , IntValList "Updated"   [ utcTime2ExtID $ itemUpdated a ]
                  ]
-  getDocRefs a = [ DocRefList "FeedID" [ itemFeedID a ]
-                 , DocRefList "Authors" $ itemAuthors a
+  getDocRefs a = [ DocRefList "FeedID"       [ itemFeedID a ]
+                 , DocRefList "Authors"      $ itemAuthors a
                  , DocRefList "Contributors" $ itemContributors a
                  ]
 
