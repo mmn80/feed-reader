@@ -63,7 +63,7 @@ data Cat = Cat
 instance Serialize Cat
 
 instance Document Cat where
-  getExtRefs a = [ ExtRefList "ID" [ fromIntegral $ hash $ catName a ] ]
+  getExtRefs a = [ ExtRefList "Hash" [ fromIntegral $ hash $ catName a ] ]
   getDocRefs _ = []
 
 data Person = Person
@@ -75,7 +75,7 @@ data Person = Person
 instance Serialize Person
 
 instance Document Person where
-  getExtRefs a = [ ExtRefList "ID" [ fromIntegral $ hash $ personName a ] ]
+  getExtRefs a = [ ExtRefList "Hash" [ fromIntegral $ hash $ personName a ] ]
   getDocRefs _ = []
 
 data Image = Image

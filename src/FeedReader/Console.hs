@@ -5,7 +5,7 @@
 module Main (main) where
 
 import           Control.Monad         (forM, forM_, replicateM, unless)
-import           Data.List             (intercalate)
+import           Data.List             (intercalate, isPrefixOf)
 import           Data.Maybe            (fromJust)
 import qualified Data.Sequence         as S
 import           Data.Time.Clock       (getCurrentTime)
@@ -18,6 +18,7 @@ import qualified Pipes.Prelude         as P
 import           Pipes.Safe
 import           System.Random         (getStdGen, randomRIO, randomRs)
 import           Data.Serialize        (Serialize (..), decode, encode)
+import           Data.String           (IsString (..))
 
 introMessage = do
   yield "Welcome to the Jungle!"
@@ -26,15 +27,19 @@ introMessage = do
 
 helpMessage = do
   yield "Commands (use _ instead of space inside arguments):"
-  yield "  help      : prints this helpful message"
-  yield "  stats     : prints general stats"
-  yield "  get t k   : prints the item with ID == k"
-  yield "            : t is the table, one of 'cat', 'feed', 'person' or 'item'"
-  yield "  page t p k: prints the next p entries with ID > k (t as above)"
-  yield "  add t n   : inserts n random records into the DB (t as above)"
-  yield "  gc        : performs GC"
-  yield "  debug     : prints a debug message"
-  yield "  quit      : quits the program"
+  yield "  help        : prints this helpful message"
+  yield "  stats       : prints general stats"
+  yield "  get t k     : prints the item with ID == k"
+  yield "              : t is the table, one of 'cat', 'feed', 'person' or 'item'"
+  yield "  page t c s k: prints the next s entries with Key > k"
+  yield "              : t: the table, as above"
+  yield "              : c: index column, * will use a default column"
+  yield "              : k: for date columns, start with D: and replace space with _"
+  yield "              : k: use * to start at the top"
+  yield "  add t n     : inserts n random records into the DB (t as above)"
+  yield "  gc          : performs GC"
+  yield "  debug       : prints a debug message"
+  yield "  quit        : quits the program"
 
 processCommand h = do
   args <- words <$> await
@@ -42,7 +47,7 @@ processCommand h = do
     "help"    -> helpMessage
     "stats"   -> checkArgs 0 args h cmdStats
     "get"     -> checkArgs 2 args h cmdGet
-    "page"    -> checkArgs 3 args h cmdPage
+    "page"    -> checkArgs 4 args h cmdPage
     "add"     -> checkArgs 2 args h cmdAdd
     "gc"      -> checkArgs 0 args h cmdGC
     "debug"   -> checkArgs 0 args h cmdDebug
@@ -138,11 +143,16 @@ cmdGet h args = timed $ do
                   >>= out . fmap (show . snd)
     _        -> yield $ t ++ " is not a valid table name."
 
+extk k now
+  | "D:" `isPrefixOf` k = Just $ DB.utcTime2ExtID $ text2UTCTime (drop 2 k) now
+  | k == "*"            = Nothing
+  | otherwise           = Just $ fromIntegral (read k :: Int)
+
 cmdPage h args = timed $ do
   let t = args !! 1
-  let p = (read $ args !! 2) :: Int
-  let k = (read $ args !! 3) :: Int
-  let extk k = if k == 0 then Nothing else Just $ fromIntegral k
+  let c = args !! 2
+  let s = (read $ args !! 3) :: Int
+  let k = args !! 4
   let format i = i ++ replicate (12 - length i) ' '
   let sCat (iid, i) = format (show iid) ++ show (catName i)
   let sFeed (iid, i) = format (show iid) ++
@@ -152,21 +162,23 @@ cmdPage h args = timed $ do
   let sItem (iid, i) = format (show iid) ++
                        format (show $ itemFeedID i) ++
                        show (itemUpdated i)
+  now <- liftBase getCurrentTime
+  let cdf df = if c == "*" then df else c
   case t of
     "cat"    -> do
-      as <- liftBase (DB.runPage h (extk k) "ID" p)
+      as <- liftBase (DB.runPage h (extk k now) (fromString $ cdf "Hash") s)
       yield $ format "ID" ++ "Name"
       each $ sCat <$> as
     "feed"   -> do
-      as <- liftBase (DB.runPage h (extk k) "Updated" p)
+      as <- liftBase (DB.runPage h (extk k now) (fromString $ cdf "Updated") s)
       yield $ format "ID" ++ format "CatID" ++ "Updated"
       each $ sFeed <$> as
     "person" -> do
-      as <- liftBase (DB.runPage h (extk k) "ID" p)
+      as <- liftBase (DB.runPage h (extk k now) (fromString $ cdf "Hash") s)
       yield $ format "ID" ++ "Name"
       each $ sPerson <$> as
     "item"   -> do
-      as <- liftBase (DB.runPage h (extk k) "Updated" p)
+      as <- liftBase (DB.runPage h (extk k now) (fromString $ cdf "Updated") s)
       yield $ format "ID" ++ format "FeedID" ++ "Updated"
       each $ sItem <$> as
     _        -> yield $ t ++ " is not a valid table name."
@@ -215,7 +227,7 @@ cmdAdd h args = timed $ do
 
 cmdGC h _ = timed $ do
   liftBase $ DB.performGC h
-  yield "Checkpoint created."
+  yield "Garbage collected."
 
 cmdDebug h _ = timed $ do
   msg <- liftBase $ DB.debug h
