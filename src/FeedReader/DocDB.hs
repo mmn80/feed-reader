@@ -49,7 +49,7 @@ import           Control.Monad.Trans   (MonadIO (liftIO))
 import qualified Data.ByteString       as B
 import           Data.Function         (on)
 import           Data.Hashable         (hash)
-import qualified Data.IntMap           as Map
+import qualified Data.IntMap.Strict    as Map
 import qualified Data.IntSet           as Set
 import           Data.List             (find, foldl', nubBy, sortOn)
 import           Data.Maybe            (fromJust, fromMaybe)
@@ -84,17 +84,17 @@ type Size = DBWord
 type PropID = DBWord
 
 data Reference = Reference
-  { propID :: PropID
-  , refDID :: DID
+  { propID :: !PropID
+  , refDID :: !DID
   } deriving (Show)
 
 data DocRecord = DocRecord
-  { docID   :: DID
-  , docTID  :: TID
-  , docRefs :: [Reference]
-  , docAddr :: Addr
-  , docSize :: Size
-  , docDel  :: Bool
+  { docID   :: !DID
+  , docTID  :: !TID
+  , docRefs :: ![Reference]
+  , docAddr :: !Addr
+  , docSize :: !Size
+  , docDel  :: !Bool
   } deriving (Show)
 
 data MasterState = MasterState
@@ -102,10 +102,10 @@ data MasterState = MasterState
   , logPos    :: Addr
   , logSize   :: Size
   , newTID    :: TID
-  , gaps      :: Map.IntMap [Addr]
-  , transLog  :: Map.IntMap [DocRecord]
-  , fwdIdx    :: Map.IntMap [DocRecord]
-  , bckIdx    :: Map.IntMap (Map.IntMap Set.IntSet)
+  , gaps      :: !(Map.IntMap [Addr])
+  , transLog  :: !(Map.IntMap [DocRecord])
+  , fwdIdx    :: !(Map.IntMap [DocRecord])
+  , bckIdx    :: !(Map.IntMap (Map.IntMap Set.IntSet))
   }
 
 type Job = (TID, [(DocRecord, B.ByteString)])
@@ -275,8 +275,7 @@ runTransaction h (Transaction t) = do
       forM_ ts $ \(t, _) ->
         writeLogTRec (logHandle m) $ Pending t
 
-lookup :: forall a m. (Document a, MonadIO m) => ExtID a ->
-                      Transaction m (Maybe (DocID a, a))
+lookup :: (Document a, MonadIO m) => ExtID a -> Transaction m (Maybe (DocID a, a))
 lookup (ExtID did) = Transaction $ do
   t <- S.get
   mbr <- withMasterLock (transHandle t) $ \m ->
@@ -288,7 +287,7 @@ lookup (ExtID did) = Transaction $ do
   S.put t { transReadList = did : transReadList t }
   return mba
 
-update :: forall a m. (Document a, MonadIO m) => DocID a -> a -> Transaction m ()
+update :: (Document a, MonadIO m) => DocID a -> a -> Transaction m ()
 update did a = Transaction $ do
   t <- S.get
   let bs = encode a
@@ -301,14 +300,14 @@ update did a = Transaction $ do
                     }
   S.put t { transUpdateList = (r, bs) : transUpdateList t }
 
-insert :: forall a m. (Document a, MonadIO m) => a -> Transaction m (DocID a)
+insert :: (Document a, MonadIO m) => a -> Transaction m (DocID a)
 insert a = Transaction $ do
   t <- S.get
   tid <- mkNewTID $ transHandle t
   unTransaction $ update (DocID tid) a
   return $ DocID tid
 
-delete :: forall a m. (Document a, MonadIO m) => DocID a -> Transaction m ()
+delete :: (Document a, MonadIO m) => DocID a -> Transaction m ()
 delete (DocID did) = Transaction $ do
   t <- S.get
   (addr, sz) <- withMasterLock (transHandle t) $ \m -> return $
@@ -354,7 +353,7 @@ pageDoc (ExtID k) = page f
                        Nothing  -> []
                        Just ids -> getPage2 st pg ids
 
-size :: forall a m. (Document a, MonadIO m) => Property a -> Transaction m Int
+size :: (Document a, MonadIO m) => Property a -> Transaction m Int
 size prop = Transaction $ do
   t <- S.get
   let pid = mkPropID prop
@@ -363,7 +362,7 @@ size prop = Transaction $ do
       Nothing -> 0
       Just ds -> sum $ Set.size . snd <$> Map.toList ds
 
-debug :: (MonadIO m) => Handle -> m String
+debug :: MonadIO m => Handle -> m String
 debug h = do
   mbb <- runTransaction h $ Transaction $ do
     t <- S.get
@@ -642,14 +641,14 @@ tRecSize r = case r of
 mkPropID :: forall a. Typeable a => Property a -> PropID
 mkPropID p = fromIntegral $ hash (show $ typeRep (Proxy :: Proxy a), show p)
 
-getRefsConv :: forall a. Document a => a -> [Reference]
+getRefsConv :: Document a => a -> [Reference]
 getRefsConv a = concat docRs ++ concat extRs
   where docRs = (\(DocRefList p rs) -> mkDRef p <$> rs) <$> getDocRefs a
         extRs = (\(ExtRefList p rs) -> mkERef p <$> rs) <$> getExtRefs a
         mkDRef p (DocID k) = Reference (mkPropID p) k
         mkERef p (ExtID k) = Reference (mkPropID p) k
 
-readDocument :: forall a m. (Serialize a, MonadIO m) => Handle -> DocRecord -> m a
+readDocument :: (Serialize a, MonadIO m) => Handle -> DocRecord -> m a
 readDocument h r = do
   bs <- withDataLock h $ \hnd -> do
     liftIO $ IO.hSeek hnd IO.AbsoluteSeek $ fromIntegral $ docAddr r
