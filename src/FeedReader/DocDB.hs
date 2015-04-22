@@ -33,7 +33,8 @@ module FeedReader.DocDB
   , insert
   , update
   , delete
-  , page
+  , pageExt
+  , pageDoc
   , size
   , debug
   ) where
@@ -323,16 +324,16 @@ delete (DocID did) = Transaction $ do
                     }
   S.put t { transUpdateList = (r, B.empty) : transUpdateList t }
 
-page :: forall a m. (Document a, MonadIO m) => Maybe (ExtID a) ->
-                    Property a -> Int -> Transaction m [(DocID a, a)]
-page mdid prop pg = Transaction $ do
+page :: (Document a, MonadIO m) => (Int -> Int -> Map.IntMap Set.IntSet -> [Int]) ->
+         Maybe (ExtID a) -> Property a -> Int -> Transaction m [(DocID a, a)]
+page f mdid prop pg = Transaction $ do
   t <- S.get
   let pid = mkPropID prop
+  let st = toInt $ unExtID $ fromMaybe maxBound mdid
   dds <- withMasterLock (transHandle t) $ \m -> do
            let ds = case Map.lookup (toInt pid) (bckIdx m) of
                       Nothing -> []
-                      Just ds -> concat $ Set.toDescList <$> getPage st pg ds
-                        where st = toInt $ unExtID $ fromMaybe maxBound mdid
+                      Just ds -> reverse $ f st pg ds
            let mbds = findFirstDoc (fwdIdx m) (transTID t) . fromIntegral <$> ds
            return [ fromJust mb | mb <- mbds, not (null mb) ]
   dds' <- forM dds $ \d -> do
@@ -340,6 +341,18 @@ page mdid prop pg = Transaction $ do
     return (DocID $ docID d, a)
   S.put t { transReadList = (unDocID . fst <$> dds') ++ transReadList t }
   return dds'
+
+pageExt :: (Document a, MonadIO m) => Maybe (ExtID a) ->
+        Property a -> Int -> Transaction m [(DocID a, a)]
+pageExt = page f
+  where f st pg ds = concat $ Set.toDescList <$> getPage st pg ds
+
+pageDoc :: (Document a, MonadIO m) => ExtID b -> Maybe (ExtID a) ->
+         Property a -> Int -> Transaction m [(DocID a, a)]
+pageDoc (ExtID k) = page f
+  where f st pg ds = case Map.lookup (toInt k) ds of
+                       Nothing  -> []
+                       Just ids -> getPage2 st pg ids
 
 size :: forall a m. (Document a, MonadIO m) => Property a -> Transaction m Int
 size prop = Transaction $ do
@@ -659,6 +672,14 @@ getPage st p idx = go st p idx []
           else case Map.lookupLT st idx of
                  Nothing     -> acc
                  Just (n, a) -> go n (p - 1) idx (a:acc)
+
+getPage2 :: Int -> Int -> Set.IntSet -> [Int]
+getPage2 st p idx = go st p idx []
+  where go st p idx acc =
+          if p == 0 then acc
+          else case Set.lookupLT st idx of
+                 Nothing -> acc
+                 Just a  -> go a (p - 1) idx (a:acc)
 
 updateManThread :: Handle -> Bool -> IO ()
 updateManThread h w = do

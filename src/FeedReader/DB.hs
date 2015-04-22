@@ -3,7 +3,8 @@
 module FeedReader.DB
   ( module FeedReader.Types
   , module FeedReader.DocDB
-  , runPage
+  , runPageExt
+  , runPageDoc
   , runLookup
   , runInsert
   , getStats
@@ -27,11 +28,20 @@ runLookup h k = do
     Nothing  -> return Nothing
     Just mba -> return mba
 
-runPage :: (Document a, MonadIO m) => Handle -> Maybe (ExtID a) ->
+runPageExt :: (Document a, MonadIO m) => Handle -> Maybe (ExtID a) ->
            Property a -> Int -> m [(DocID a, a)]
-runPage h k prop pg = do
+runPageExt h s prop pg = do
   mb <- runTransaction h $
-    page k prop pg
+    pageExt s prop pg
+  case mb of
+    Nothing -> return []
+    Just ps -> return ps
+
+runPageDoc :: (Document a, MonadIO m) => Handle -> ExtID b -> Maybe (ExtID a) ->
+           Property a -> Int -> m [(DocID a, a)]
+runPageDoc h k s prop pg = do
+  mb <- runTransaction h $
+    pageDoc k s prop pg
   case mb of
     Nothing -> return []
     Just ps -> return ps

@@ -27,19 +27,21 @@ introMessage = do
 
 helpMessage = do
   yield "Commands (use _ instead of space inside arguments):"
-  yield "  help        : prints this helpful message"
-  yield "  stats       : prints general stats"
-  yield "  get t k     : prints the item with ID == k"
-  yield "              : t is the table, one of 'cat', 'feed', 'person' or 'item'"
-  yield "  page t c s k: prints the next s entries with Key > k"
-  yield "              : t: the table, as above"
-  yield "              : c: index column, * will use a default column"
-  yield "              : k: for date columns, start with D: and replace space with _"
-  yield "              : k: use * to start at the top"
-  yield "  add t n     : inserts n random records into the DB (t as above)"
-  yield "  gc          : performs GC"
-  yield "  debug       : prints a debug message"
-  yield "  quit        : quits the program"
+  yield "  help    : prints this helpful message"
+  yield "  stats   : prints general stats"
+  yield "  get t k : SELECT * FROM t WHERE ID = k"
+  yield "          : t: 'cat', 'feed', 'person' or 'item'"
+  yield "  pageExt t c p s"
+  yield "          : SELECT TOP p * FROM t WHERE c > s ORDER BY c DESC"
+  yield "          : c: * will use a default column"
+  yield "          : s: for date columns, start with D: and replace space with _"
+  yield "          : s: use * to start at the top"
+  yield "  pageDoc t c k p s"
+  yield "          : SELECT TOP p * FROM t WHERE c = k AND ID > s ORDER BY ID ASC"
+  yield "  add t n : inserts n random records into the DB (t as above)"
+  yield "  gc      : performs GC"
+  yield "  debug   : prints a debug message"
+  yield "  quit    : quits the program"
 
 processCommand h = do
   args <- words <$> await
@@ -47,7 +49,8 @@ processCommand h = do
     "help"    -> helpMessage
     "stats"   -> checkArgs 0 args h cmdStats
     "get"     -> checkArgs 2 args h cmdGet
-    "page"    -> checkArgs 4 args h cmdPage
+    "pageExt" -> checkArgs 4 args h cmdPageExt
+    "pageDoc" -> checkArgs 5 args h cmdPageDoc
     "add"     -> checkArgs 2 args h cmdAdd
     "gc"      -> checkArgs 0 args h cmdGC
     "debug"   -> checkArgs 0 args h cmdDebug
@@ -143,16 +146,16 @@ cmdGet h args = timed $ do
                   >>= out . fmap (show . snd)
     _        -> yield $ t ++ " is not a valid table name."
 
-extk k now
-  | "D:" `isPrefixOf` k = Just $ DB.utcTime2ExtID $ text2UTCTime (drop 2 k) now
-  | k == "*"            = Nothing
-  | otherwise           = Just $ fromIntegral (read k :: Int)
+page h c p s k now df = liftBase $
+  if k == 0
+  then DB.runPageExt h ext prop p
+  else DB.runPageDoc h (fromIntegral k) ext prop p
+  where ext | "D:" `isPrefixOf` s = Just $ DB.utcTime2ExtID $ text2UTCTime (drop 2 s) now
+            | s == "*"            = Nothing
+            | otherwise           = Just $ fromIntegral (read s :: Int)
+        prop = fromString $ if c == "*" then df else c
 
-cmdPage h args = timed $ do
-  let t = args !! 1
-  let c = args !! 2
-  let s = (read $ args !! 3) :: Int
-  let k = args !! 4
+cmdPage h t c p s k = do
   let format i = i ++ replicate (12 - length i) ' '
   let sCat (iid, i) = format (show iid) ++ show (catName i)
   let sFeed (iid, i) = format (show iid) ++
@@ -163,25 +166,39 @@ cmdPage h args = timed $ do
                        format (show $ itemFeedID i) ++
                        show (itemUpdated i)
   now <- liftBase getCurrentTime
-  let cdf df = if c == "*" then df else c
   case t of
     "cat"    -> do
-      as <- liftBase (DB.runPage h (extk k now) (fromString $ cdf "Hash") s)
+      as <- page h c p s k now "Hash"
       yield $ format "ID" ++ "Name"
       each $ sCat <$> as
     "feed"   -> do
-      as <- liftBase (DB.runPage h (extk k now) (fromString $ cdf "Updated") s)
+      as <- page h c p s k now "Updated"
       yield $ format "ID" ++ format "CatID" ++ "Updated"
       each $ sFeed <$> as
     "person" -> do
-      as <- liftBase (DB.runPage h (extk k now) (fromString $ cdf "Hash") s)
+      as <- page h c p s k now "Hash"
       yield $ format "ID" ++ "Name"
       each $ sPerson <$> as
     "item"   -> do
-      as <- liftBase (DB.runPage h (extk k now) (fromString $ cdf "Updated") s)
+      as <- page h c p s k now "Updated"
       yield $ format "ID" ++ format "FeedID" ++ "Updated"
       each $ sItem <$> as
     _        -> yield $ t ++ " is not a valid table name."
+
+cmdPageExt h args = timed $ do
+  let t = args !! 1
+  let c = args !! 2
+  let p = (read $ args !! 3) :: Int
+  let s = args !! 4
+  cmdPage h t c p s (0 :: Int)
+
+cmdPageDoc h args = timed $ do
+  let t = args !! 1
+  let c = args !! 2
+  let k = (read $ args !! 3) :: Int
+  let p = (read $ args !! 4) :: Int
+  let s = args !! 5
+  cmdPage h t c p s k
 
 cmdAdd h args = timed $ do
   let t = args !! 1
@@ -207,7 +224,7 @@ cmdAdd h args = timed $ do
          liftBase $ DB.runInsert h a
        showIDs $ show <$> clean ps
     "feed" -> do
-      cs' <- liftBase $ DB.runPage h Nothing "ID" 100
+      cs' <- liftBase $ DB.runPageExt h Nothing "ID" 100
       let cs = S.fromList cs'
       let rs = take n $ randomRs (0, S.length cs - 1) g
       fs <- forM rs $ \r -> do
@@ -215,7 +232,7 @@ cmdAdd h args = timed $ do
         liftBase $ DB.runInsert h f
       showIDs $ show <$> clean fs
     "item" -> do
-      fs' <- liftBase $ DB.runPage h Nothing "Updated" 1000
+      fs' <- liftBase $ DB.runPageExt h Nothing "Updated" 1000
       let fs = S.fromList fs'
       let rfids = (fst . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
       is <- forM rfids $ liftBase . randomItem
