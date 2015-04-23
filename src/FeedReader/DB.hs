@@ -23,7 +23,7 @@ import           Prelude             hiding (lookup, filter)
 runLookup :: (Document a, MonadIO m) => Handle -> IntVal -> m (Maybe (DocID a, a))
 runLookup h k = do
   mbb <- runTransaction h $
-    lookup k
+    lookupUnsafe k
   return $ fromMaybe Nothing mbb
 
 runRange :: (Document a, MonadIO m) => Handle -> Maybe IntVal ->
@@ -37,7 +37,7 @@ runFilter :: (Document a, MonadIO m) => Handle -> IntVal -> Maybe IntVal ->
              Property a -> Property a -> Int -> m [(DocID a, a)]
 runFilter h k s fprop sprop pg = do
   mb <- runTransaction h $
-    filter k s fprop sprop pg
+    filterUnsafe k s Nothing fprop sprop pg
   return $ fromMaybe [] mb
 
 runInsert :: (Document a, MonadIO m) => Handle -> a -> m (Maybe (DocID a))

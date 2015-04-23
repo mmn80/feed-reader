@@ -30,11 +30,14 @@ module FeedReader.DocDB
   , IntValList (..)
   , Document (..)
   , lookup
+  , lookupUnsafe
   , insert
   , update
   , delete
   , range
+  , rangeUnsafe
   , filter
+  , filterUnsafe
   , size
   , debug
   ) where
@@ -309,8 +312,11 @@ runTransaction h (Transaction t) = do
       forM_ ts $ \(t, _) ->
         writeLogTRec (logHandle m) $ Pending t
 
-lookup :: (Document a, MonadIO m) => IntVal -> Transaction m (Maybe (DocID a, a))
-lookup (IntVal did) = Transaction $ do
+lookup :: (Document a, MonadIO m) => DocID a -> Transaction m (Maybe (DocID a, a))
+lookup = lookupUnsafe . IntVal . unDocID
+
+lookupUnsafe :: (Document a, MonadIO m) => IntVal -> Transaction m (Maybe (DocID a, a))
+lookupUnsafe (IntVal did) = Transaction $ do
   t <- S.get
   mbr <- withMasterLock (transHandle t) $ \m ->
            return $ findFirstDoc (mainIdx m) (transTID t) did
@@ -372,32 +378,41 @@ page_ f mdid = Transaction $ do
            let ds = f st m
            let mbds = findFirstDoc (mainIdx m) (transTID t) . fromIntegral <$> ds
            return [ fromJust mb | mb <- mbds, not (null mb) ]
-  dds' <- forM dds $ \d -> do
+  dds' <- forM (reverse dds) $ \d -> do
     a <- readDocument (transHandle t) d
     return (DocID $ docID d, a)
   S.put t { transReadList = (unDocID . fst <$> dds') ++ transReadList t }
   return dds'
 
-range :: (Document a, MonadIO m) => Maybe IntVal -> Maybe IntVal ->
+range :: (Document a, MonadIO m) => Maybe IntVal -> Maybe (DocID a) ->
          Property a -> Int -> Transaction m [(DocID a, a)]
-range mval mdid prop pg = page_ f mval
+range mst msti = rangeUnsafe mst (IntVal . unDocID <$> msti)
+
+rangeUnsafe :: (Document a, MonadIO m) => Maybe IntVal -> Maybe IntVal ->
+         Property a -> Int -> Transaction m [(DocID a, a)]
+rangeUnsafe mst msti prop pg = page_ f mst
   where f st m = fromMaybe [] $ do
                    ds <- Map.lookup pid (intIdx m)
                    return $ getPage st sti pg ds
-        sti = toInt $ unIntVal $ fromMaybe maxBound mdid
+        sti = toInt $ unIntVal $ fromMaybe maxBound msti
         pid = toInt $ checkIntProp prop
 
-filter :: (Document a, MonadIO m) => IntVal -> Maybe IntVal ->
+filter :: (Document a, MonadIO m) => DocID a -> Maybe IntVal -> Maybe (DocID a) ->
           Property a -> Property a -> Int -> Transaction m [(DocID a, a)]
-filter (IntVal k) mdid fprop sprop pg = page_ f mdid
-  where f st m = fromMaybe [] $ do
+filter (DocID k) mst msti = filterUnsafe (IntVal k) mst (IntVal . unDocID <$> msti)
+
+filterUnsafe :: (Document a, MonadIO m) => IntVal -> Maybe IntVal -> Maybe IntVal ->
+          Property a -> Property a -> Int -> Transaction m [(DocID a, a)]
+filterUnsafe (IntVal k) mst msti fprop sprop pg = page_ f mst
+  where f _ m = fromMaybe [] $ do
                    rs <- Map.lookup fpid (refIdx m)
                    ss <- Map.lookup (toInt k) rs
                    ds <- Map.lookup spid ss
                    return $ getPage st sti pg ds
         fpid = toInt $ checkRefProp fprop
         spid = toInt $ checkIntProp sprop
-        sti = toInt $ unIntVal $ fromMaybe maxBound mdid
+        st  = toInt $ unIntVal $ fromMaybe maxBound mst
+        sti = toInt $ unIntVal $ fromMaybe maxBound msti
 
 size :: (Document a, MonadIO m) => Property a -> Transaction m Int
 size prop = Transaction $ do
