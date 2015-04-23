@@ -34,6 +34,7 @@ module FeedReader.DocDB
   , insert
   , update
   , delete
+  , deleteUnsafe
   , range
   , rangeUnsafe
   , filter
@@ -353,7 +354,10 @@ insert a = Transaction $ do
   return $ DocID tid
 
 delete :: (Document a, MonadIO m) => DocID a -> Transaction m ()
-delete (DocID did) = Transaction $ do
+delete = deleteUnsafe . IntVal . unDocID
+
+deleteUnsafe :: (MonadIO m) => IntVal -> Transaction m ()
+deleteUnsafe (IntVal did) = Transaction $ do
   t <- S.get
   (addr, sz, irs, drs) <- withMasterLock (transHandle t) $ \m -> return $
     case findFirstDoc (mainIdx m) (transTID t) did of

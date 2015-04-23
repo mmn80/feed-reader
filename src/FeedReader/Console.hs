@@ -39,6 +39,7 @@ helpMessage = do
   yield "  filter p t c k o s"
   yield "          : SELECT TOP p * FROM t WHERE c = k AND o < s ORDER BY o DESC"
   yield "  add t n : inserts n random records into the DB (t as above)"
+  yield "  del k   : deletes document with ID = k"
   yield "  gc      : performs GC"
   yield "  debug   : shows all internal state, including indexes"
   yield "  quit    : quits the program"
@@ -52,6 +53,7 @@ processCommand h = do
     "range"  -> checkArgs 4 args h cmdRange
     "filter" -> checkArgs 6 args h cmdFilter
     "add"    -> checkArgs 2 args h cmdAdd
+    "del"    -> checkArgs 1 args h cmdDel
     "gc"     -> checkArgs 0 args h cmdGC
     "debug"  -> checkArgs 0 args h cmdDebug
     _        -> yield $ "Command '" ++ head args ++ "' not understood."
@@ -160,7 +162,8 @@ cmdPage h args s k o = do
   let p = (read $ args !! 1) :: Int
   let t = args !! 2
   let c = args !! 3
-  let format i = i ++ replicate (12 - length i) ' '
+  let formatK k i = i ++ replicate (k - length i) ' '
+  let format = formatK 12
   let sCat (iid, i) = format (show iid) ++ show (catName i)
   let sFeed (iid, i) = format (show iid) ++
                        format (show $ feedCatID i) ++
@@ -168,7 +171,8 @@ cmdPage h args s k o = do
   let sPerson (iid, i) = format (show iid) ++ show (personName i)
   let sItem (iid, i) = format (show iid) ++
                        format (show $ itemFeedID i) ++
-                       show (itemUpdated i)
+                       formatK 25 (show $ itemUpdated i) ++
+                       show (itemPublished i)
   now <- liftBase getCurrentTime
   case t of
     "cat"    -> do
@@ -185,7 +189,7 @@ cmdPage h args s k o = do
       each $ sPerson <$> as
     "item"   -> do
       as <- page h c p s k o now "Updated"
-      yield $ format "ID" ++ format "FeedID" ++ "Updated"
+      yield $ format "ID" ++ format "FeedID" ++ formatK 25 "Updated" ++ "Published"
       each $ sItem <$> as
     _        -> yield $ t ++ " is not a valid table name."
 
@@ -240,6 +244,10 @@ cmdAdd h args = timed $ do
       return ()
     _      -> yield $ t ++ " is not a valid table name."
 
+cmdDel h args = timed $ do
+  let k = (read $ args !! 1) :: Int
+  liftBase $ DB.runDelete h $ fromIntegral k
+  yield "Record deleted."
 
 cmdGC h _ = timed $ do
   liftBase $ DB.performGC h

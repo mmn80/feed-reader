@@ -7,6 +7,7 @@ module FeedReader.DB
   , runFilter
   , runLookup
   , runInsert
+  , runDelete
   , getStats
   , DBStats (..)
   , addItemConv
@@ -42,6 +43,11 @@ runFilter h k s fprop sprop pg = do
 
 runInsert :: (Document a, MonadIO m) => Handle -> a -> m (Maybe (DocID a))
 runInsert h a = runTransaction h $ insert a
+
+runDelete :: (MonadIO m) => Handle -> IntVal -> m ()
+runDelete h did = do
+  runTransaction h $ deleteUnsafe did
+  return ()
 
 data DBStats = DBStats
   { countCats    :: Int
