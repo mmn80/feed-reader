@@ -388,14 +388,15 @@ range mval mdid prop pg = page_ f mval
         pid = toInt $ checkIntProp prop
 
 filter :: (Document a, MonadIO m) => IntVal -> Maybe IntVal ->
-          Property a -> Int -> Transaction m [(DocID a, a)]
-filter (IntVal k) mdid prop pg = page_ f mdid
+          Property a -> Property a -> Int -> Transaction m [(DocID a, a)]
+filter (IntVal k) mdid fprop sprop pg = page_ f mdid
   where f st m = fromMaybe [] $ do
-                   rs <- Map.lookup pid (refIdx m)
+                   rs <- Map.lookup fpid (refIdx m)
                    ss <- Map.lookup (toInt k) rs
-                   ds <- Map.lookup pid ss
+                   ds <- Map.lookup spid ss
                    return $ getPage st sti pg ds
-        pid = toInt $ checkRefProp prop
+        fpid = toInt $ checkRefProp fprop
+        spid = toInt $ checkIntProp sprop
         sti = toInt $ unIntVal $ fromMaybe maxBound mdid
 
 size :: (Document a, MonadIO m) => Property a -> Transaction m Int
@@ -716,14 +717,14 @@ tRecSize r = case r of
   Completed _ -> 2
 
 checkIntProp :: forall a. (Document a) => Property a -> PropID
-checkIntProp p@(Property (pid, prop)) =
-  if pid `notElem` (fst . unProperty <$> (getIntProps :: [Property a]))
+checkIntProp p@(Property (pid, _)) =
+  if p `notElem` (getIntProps :: [Property a])
   then error $ "Invalid int property name: " ++ show p
   else pid
 
 checkRefProp :: forall a. (Document a) => Property a -> PropID
-checkRefProp p@(Property (pid, prop)) =
-  if pid `notElem` (fst . unProperty <$> (getRefProps :: [Property a]))
+checkRefProp p@(Property (pid, _)) =
+  if p `notElem` (getRefProps :: [Property a])
   then error $ "Invalid ref property name: " ++ show p
   else pid
 

@@ -34,10 +34,10 @@ runRange h s prop pg = do
   return $ fromMaybe [] mb
 
 runFilter :: (Document a, MonadIO m) => Handle -> IntVal -> Maybe IntVal ->
-             Property a -> Int -> m [(DocID a, a)]
-runFilter h k s prop pg = do
+             Property a -> Property a -> Int -> m [(DocID a, a)]
+runFilter h k s fprop sprop pg = do
   mb <- runTransaction h $
-    filter k s prop pg
+    filter k s fprop sprop pg
   return $ fromMaybe [] mb
 
 runInsert :: (Document a, MonadIO m) => Handle -> a -> m (Maybe (DocID a))

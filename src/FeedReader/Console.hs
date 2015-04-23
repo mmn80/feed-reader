@@ -31,13 +31,13 @@ helpMessage = do
   yield "  stats   : shows general stats"
   yield "  get t k : SELECT * FROM t WHERE ID = k"
   yield "          : t: 'cat', 'feed', 'person' or 'item'"
-  yield "  range t c p s"
+  yield "  range p t c s"
   yield "          : SELECT TOP p * FROM t WHERE c < s ORDER BY c DESC"
   yield "          : c: '*' will use a default column"
   yield "          : s: for date columns, start with 'D:' and replace ' ' with '_'"
   yield "          : s: use '*' to start at the top"
-  yield "  filter t c k p s"
-  yield "          : SELECT TOP p * FROM t WHERE c = k AND ID < s ORDER BY ID DESC"
+  yield "  filter p t c k o s"
+  yield "          : SELECT TOP p * FROM t WHERE c = k AND o < s ORDER BY o DESC"
   yield "  add t n : inserts n random records into the DB (t as above)"
   yield "  gc      : performs GC"
   yield "  debug   : shows all internal state, including indexes"
@@ -50,7 +50,7 @@ processCommand h = do
     "stats"  -> checkArgs 0 args h cmdStats
     "get"    -> checkArgs 2 args h cmdGet
     "range"  -> checkArgs 4 args h cmdRange
-    "filter" -> checkArgs 5 args h cmdFilter
+    "filter" -> checkArgs 6 args h cmdFilter
     "add"    -> checkArgs 2 args h cmdAdd
     "gc"     -> checkArgs 0 args h cmdGC
     "debug"  -> checkArgs 0 args h cmdDebug
@@ -146,16 +146,20 @@ cmdGet h args = timed $ do
                   >>= out . fmap (show . snd)
     _        -> yield $ t ++ " is not a valid table name."
 
-page h c p s k now df = liftBase $
+page h c p s k o now df = liftBase $
   if k == 0
-  then DB.runRange h ext (fromString prop) p
-  else DB.runFilter h (fromIntegral k) ext (fromString prop) p
+  then DB.runRange h ext (fromString fprop) p
+  else DB.runFilter h (fromIntegral k) ext (fromString fprop) (fromString oprop) p
   where ext | "D:" `isPrefixOf` s = Just $ DB.utcTime2ExtID $ text2UTCTime (drop 2 s) now
             | s == "*"            = Nothing
             | otherwise           = Just $ fromIntegral (read s :: Int)
-        prop = if c == "*" then df else c
+        fprop = if c == "*" then df else c
+        oprop = if o == "*" then df else o
 
-cmdPage h t c p s k = do
+cmdPage h args s k o = do
+  let p = (read $ args !! 1) :: Int
+  let t = args !! 2
+  let c = args !! 3
   let format i = i ++ replicate (12 - length i) ' '
   let sCat (iid, i) = format (show iid) ++ show (catName i)
   let sFeed (iid, i) = format (show iid) ++
@@ -168,37 +172,32 @@ cmdPage h t c p s k = do
   now <- liftBase getCurrentTime
   case t of
     "cat"    -> do
-      as <- page h c p s k now "Hash"
+      as <- page h c p s k o now "Hash"
       yield $ format "ID" ++ "Name"
       each $ sCat <$> as
     "feed"   -> do
-      as <- page h c p s k now "Updated"
+      as <- page h c p s k o now "Updated"
       yield $ format "ID" ++ format "CatID" ++ "Updated"
       each $ sFeed <$> as
     "person" -> do
-      as <- page h c p s k now "Hash"
+      as <- page h c p s k o now "Hash"
       yield $ format "ID" ++ "Name"
       each $ sPerson <$> as
     "item"   -> do
-      as <- page h c p s k now "Updated"
+      as <- page h c p s k o now "Updated"
       yield $ format "ID" ++ format "FeedID" ++ "Updated"
       each $ sItem <$> as
     _        -> yield $ t ++ " is not a valid table name."
 
 cmdRange h args = timed $ do
-  let t = args !! 1
-  let c = args !! 2
-  let p = (read $ args !! 3) :: Int
   let s = args !! 4
-  cmdPage h t c p s (0 :: Int)
+  cmdPage h args s (0 :: Int) ""
 
 cmdFilter h args = timed $ do
-  let t = args !! 1
-  let c = args !! 2
-  let k = (read $ args !! 3) :: Int
-  let p = (read $ args !! 4) :: Int
-  let s = args !! 5
-  cmdPage h t c p s k
+  let k = (read $ args !! 4) :: Int
+  let o = args !! 5
+  let s = args !! 6
+  cmdPage h args s k o
 
 cmdAdd h args = timed $ do
   let t = args !! 1
