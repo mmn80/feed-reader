@@ -59,9 +59,9 @@ data DBStats = DBStats
 getStats :: MonadIO m => Handle -> m DBStats
 getStats h = do
   mb <- runTransaction h $ DBStats
-    <$> size ("Hash"    :: Property Cat)
+    <$> size ("Name"    :: Property Cat)
     <*> size ("Updated" :: Property Feed)
-    <*> size ("Hash"    :: Property Person)
+    <*> size ("Name"    :: Property Person)
     <*> size ("Updated" :: Property Item)
   return $ fromMaybe (DBStats 0 0 0 0) mb
 

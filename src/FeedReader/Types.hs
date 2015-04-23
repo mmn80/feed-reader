@@ -1,6 +1,5 @@
-{-# LANGUAGE DeriveGeneric         #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE DeriveGeneric     #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -35,7 +34,6 @@ module FeedReader.Types
 
 import           Control.Applicative   ((<|>))
 import           Control.Monad         (liftM)
-import           Data.Hashable         (hash)
 import           Data.Maybe            (fromMaybe)
 import           Data.Serialize        (Get (..), Serialize (..))
 import           Data.Time.Clock       (UTCTime, diffUTCTime)
@@ -44,7 +42,8 @@ import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
 import           Data.Time.Format      (defaultTimeLocale, iso8601DateFormat,
                                         parseTimeM, rfc822DateFormat)
 import           FeedReader.DocDB      (DocID, DocRefList (..), Document (..),
-                                        IntValList (..), utcTime2ExtID)
+                                        IntValList (..), string2IntVal,
+                                        utcTime2IntVal)
 import           GHC.Generics          (Generic)
 
 type URL      = String
@@ -56,6 +55,10 @@ data Content  = Text String | HTML String | XHTML String
 
 instance Serialize Content
 
+getContentText (Text s) = s
+getContentText (HTML s) = s
+getContentText (XHTML s) = s
+
 data Cat = Cat
   { catName :: String
   } deriving (Show, Generic)
@@ -63,8 +66,8 @@ data Cat = Cat
 instance Serialize Cat
 
 instance Document Cat where
-  getIntProps = [ "Hash" ]
-  getIntVals a = [ IntValList "Hash" [ fromIntegral $ hash $ catName a ] ]
+  getIntProps = [ "Name" ]
+  getIntVals a = [ IntValList "Name" [ string2IntVal $ catName a ] ]
 
 data Person = Person
   { personName  :: String
@@ -75,8 +78,8 @@ data Person = Person
 instance Serialize Person
 
 instance Document Person where
-  getIntProps = [ "Hash" ]
-  getIntVals a = [ IntValList "Hash" [ fromIntegral $ hash $ personName a ] ]
+  getIntProps = [ "Name" ]
+  getIntVals a = [ IntValList "Name" [ string2IntVal $ personName a ] ]
 
 data Image = Image
   { imageURL         :: URL
@@ -105,8 +108,10 @@ data Feed = Feed
 instance Serialize Feed
 
 instance Document Feed where
-  getIntProps = [ "Updated" ]
-  getIntVals a = [ IntValList "Updated" [ utcTime2ExtID $ feedUpdated a ] ]
+  getIntProps = [ "Updated", "Title" ]
+  getIntVals a = [ IntValList "Updated" [ utcTime2IntVal $ feedUpdated a ]
+                 , IntValList "Title" [ string2IntVal $ getContentText $ feedTitle a ]
+                 ]
   getRefProps = [ "CatID", "Authors", "Contributors" ]
   getDocRefs a = [ DocRefList "CatID"        [ feedCatID a ]
                  , DocRefList "Authors"      $ feedAuthors a
@@ -135,8 +140,8 @@ instance Serialize Item
 
 instance Document Item where
   getIntProps = [ "Updated", "Published" ]
-  getIntVals a = [ IntValList "Published" [ utcTime2ExtID $ itemPublished a ]
-                 , IntValList "Updated"   [ utcTime2ExtID $ itemUpdated a ]
+  getIntVals a = [ IntValList "Published" [ utcTime2IntVal $ itemPublished a ]
+                 , IntValList "Updated"   [ utcTime2IntVal $ itemUpdated a ]
                  ]
   getRefProps = [ "FeedID", "Authors", "Contributors" ]
   getDocRefs a = [ DocRefList "FeedID"       [ itemFeedID a ]

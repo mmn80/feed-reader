@@ -25,7 +25,8 @@ module FeedReader.DocDB
   , DocID
   , IntVal
   , Property
-  , utcTime2ExtID
+  , utcTime2IntVal
+  , string2IntVal
   , DocRefList (..)
   , IntValList (..)
   , Document (..)
@@ -65,7 +66,7 @@ import           Data.String           (IsString (..))
 import           Data.Time.Clock       (UTCTime)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import           Data.Typeable         (Proxy (..), Typeable, typeRep)
-import           Data.Word             (Word32)
+import           Data.Word             (Word32, Word8)
 import           Numeric               (showHex)
 import           Prelude               hiding (filter, lookup)
 import           System.FilePath       ((</>))
@@ -207,8 +208,13 @@ class (Typeable a, Serialize a) => Document a where
   getIntVals  :: a -> [IntValList a]
   getIntVals _ = []
 
-utcTime2ExtID :: UTCTime -> IntVal
-utcTime2ExtID = fromInteger . round . utcTimeToPOSIXSeconds
+utcTime2IntVal :: UTCTime -> IntVal
+utcTime2IntVal = fromInteger . round . utcTimeToPOSIXSeconds
+
+string2IntVal :: String -> IntVal
+string2IntVal s = IntVal $ snd $ foldl' f (wordSize - 1, 0) bytes
+  where bytes = (fromIntegral . fromEnum <$> take wordSize s) :: [Word8]
+        f (n, v) b = (n - 1, if n >= 0 then v + fromIntegral b * 2 ^ (8 * n) else v)
 
 open :: MonadIO m => Maybe FilePath -> Maybe FilePath -> m Handle
 open lf df = do

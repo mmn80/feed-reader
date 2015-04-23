@@ -35,6 +35,7 @@ helpMessage = do
   yield "          : SELECT TOP p * FROM t WHERE c < s ORDER BY c DESC"
   yield "          : c: '*' will use a default column"
   yield "          : s: for date columns, start with 'D:' and replace ' ' with '_'"
+  yield "          : s: for string columns, start with 'S:' (only first 4 chars matter)"
   yield "          : s: use '*' to start at the top"
   yield "  filter p t c k o s"
   yield "          : SELECT TOP p * FROM t WHERE c = k AND o < s ORDER BY o DESC"
@@ -133,10 +134,11 @@ type LookupRet a = IO (Maybe (DB.DocID a, a))
 
 cmdGet h args = timed $ do
   let t = args !! 1
-  let k = (read $ args !! 2) :: Int
+  let kstr = args !! 2
+  let k = read kstr :: Int
   let out = \case
               Just s -> each $ lines s
-              _      -> yield $ "No record found with ID == " ++ show k
+              _      -> yield $ "No record found with ID = " ++ kstr
   case t of
     "cat"    -> liftBase (DB.runLookup h (fromIntegral k) :: LookupRet Cat)
                   >>= out . fmap (show . snd)
@@ -152,7 +154,8 @@ page h c p s k o now df = liftBase $
   if k == 0
   then DB.runRange h ext (fromString fprop) p
   else DB.runFilter h (fromIntegral k) ext (fromString fprop) (fromString oprop) p
-  where ext | "D:" `isPrefixOf` s = Just $ DB.utcTime2ExtID $ text2UTCTime (drop 2 s) now
+  where ext | "D:" `isPrefixOf` s = Just $ DB.utcTime2IntVal $ text2UTCTime (drop 2 s) now
+            | "S:" `isPrefixOf` s = Just $ DB.string2IntVal (drop 2 s)
             | s == "*"            = Nothing
             | otherwise           = Just $ fromIntegral (read s :: Int)
         fprop = if c == "*" then df else c
@@ -176,7 +179,7 @@ cmdPage h args s k o = do
   now <- liftBase getCurrentTime
   case t of
     "cat"    -> do
-      as <- page h c p s k o now "Hash"
+      as <- page h c p s k o now "Name"
       yield $ format "ID" ++ "Name"
       each $ sCat <$> as
     "feed"   -> do
@@ -184,7 +187,7 @@ cmdPage h args s k o = do
       yield $ format "ID" ++ format "CatID" ++ "Updated"
       each $ sFeed <$> as
     "person" -> do
-      as <- page h c p s k o now "Hash"
+      as <- page h c p s k o now "Name"
       yield $ format "ID" ++ "Name"
       each $ sPerson <$> as
     "item"   -> do
@@ -227,7 +230,7 @@ cmdAdd h args = timed $ do
          liftBase $ DB.runInsert h a
        showIDs $ show <$> clean ps
     "feed" -> do
-      cs' <- liftBase $ DB.runRange h Nothing "Hash" 100
+      cs' <- liftBase $ DB.runRange h Nothing "Name" 100
       let cs = S.fromList cs'
       let rs = take n $ randomRs (0, S.length cs - 1) g
       fs <- forM rs $ \r -> do
