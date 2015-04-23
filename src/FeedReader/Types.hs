@@ -63,8 +63,8 @@ data Cat = Cat
 instance Serialize Cat
 
 instance Document Cat where
+  getIntProps = [ "Hash" ]
   getIntVals a = [ IntValList "Hash" [ fromIntegral $ hash $ catName a ] ]
-  getDocRefs _ = []
 
 data Person = Person
   { personName  :: String
@@ -75,8 +75,8 @@ data Person = Person
 instance Serialize Person
 
 instance Document Person where
+  getIntProps = [ "Hash" ]
   getIntVals a = [ IntValList "Hash" [ fromIntegral $ hash $ personName a ] ]
-  getDocRefs _ = []
 
 data Image = Image
   { imageURL         :: URL
@@ -105,8 +105,9 @@ data Feed = Feed
 instance Serialize Feed
 
 instance Document Feed where
+  getIntProps = [ "Updated" ]
   getIntVals a = [ IntValList "Updated" [ utcTime2ExtID $ feedUpdated a ] ]
-
+  getRefProps = [ "CatID", "Authors", "Contributors" ]
   getDocRefs a = [ DocRefList "CatID"        [ feedCatID a ]
                  , DocRefList "Authors"      $ feedAuthors a
                  , DocRefList "Contributors" $ feedContributors a
@@ -133,9 +134,11 @@ instance Serialize UTCTime where
 instance Serialize Item
 
 instance Document Item where
+  getIntProps = [ "Updated", "Published" ]
   getIntVals a = [ IntValList "Published" [ utcTime2ExtID $ itemPublished a ]
                  , IntValList "Updated"   [ utcTime2ExtID $ itemUpdated a ]
                  ]
+  getRefProps = [ "FeedID", "Authors", "Contributors" ]
   getDocRefs a = [ DocRefList "FeedID"       [ itemFeedID a ]
                  , DocRefList "Authors"      $ itemAuthors a
                  , DocRefList "Contributors" $ itemContributors a

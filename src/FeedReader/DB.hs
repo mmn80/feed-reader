@@ -27,14 +27,14 @@ runLookup h k = do
   return $ fromMaybe Nothing mbb
 
 runRange :: (Document a, MonadIO m) => Handle -> Maybe IntVal ->
-            IntProperty a -> Int -> m [(DocID a, a)]
+            Property a -> Int -> m [(DocID a, a)]
 runRange h s prop pg = do
   mb <- runTransaction h $
     range s Nothing prop pg
   return $ fromMaybe [] mb
 
 runFilter :: (Document a, MonadIO m) => Handle -> IntVal -> Maybe IntVal ->
-             RefProperty a b -> Int -> m [(DocID a, a)]
+             Property a -> Int -> m [(DocID a, a)]
 runFilter h k s prop pg = do
   mb <- runTransaction h $
     filter k s prop pg
@@ -53,10 +53,10 @@ data DBStats = DBStats
 getStats :: MonadIO m => Handle -> m DBStats
 getStats h = do
   mb <- runTransaction h $ DBStats
-    <$> size ("Hash"    :: IntProperty Cat)
-    <*> size ("Updated" :: IntProperty Feed)
-    <*> size ("Hash"    :: IntProperty Person)
-    <*> size ("Updated" :: IntProperty Item)
+    <$> size ("Hash"    :: Property Cat)
+    <*> size ("Updated" :: Property Feed)
+    <*> size ("Hash"    :: Property Person)
+    <*> size ("Updated" :: Property Item)
   return $ fromMaybe (DBStats 0 0 0 0) mb
 
 clean :: [Maybe a] -> [a]

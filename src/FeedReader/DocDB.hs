@@ -24,8 +24,7 @@ module FeedReader.DocDB
   , runTransaction
   , DocID
   , IntVal
-  , IntProperty
-  , RefProperty
+  , Property
   , utcTime2ExtID
   , DocRefList (..)
   , IntValList (..)
@@ -64,7 +63,7 @@ import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import           Data.Typeable         (Proxy (..), Typeable, typeRep)
 import           Data.Word             (Word32)
 import           Numeric               (showHex)
-import           Prelude               hiding (lookup, filter)
+import           Prelude               hiding (filter, lookup)
 import           System.FilePath       ((</>))
 import qualified System.IO             as IO
 
@@ -96,13 +95,13 @@ data IntReference = IntReference
   } deriving (Show)
 
 data DocRecord = DocRecord
-  { docID   :: !DID
-  , docTID  :: !TID
+  { docID    :: !DID
+  , docTID   :: !TID
   , docIRefs :: ![IntReference]
   , docDRefs :: ![DocReference]
-  , docAddr :: !Addr
-  , docSize :: !Size
-  , docDel  :: !Bool
+  , docAddr  :: !Addr
+  , docSize  :: !Size
+  , docDel   :: !Bool
   } deriving (Show)
 
 type SortIndex = Map.IntMap (Map.IntMap Set.IntSet)
@@ -111,9 +110,9 @@ type FilterIndex = Map.IntMap (Map.IntMap SortIndex)
 
 data MasterState = MasterState
   { logHandle :: IO.Handle
-  , logPos    :: Addr
-  , logSize   :: Size
-  , newTID    :: TID
+  , logPos    :: !Addr
+  , logSize   :: !Size
+  , newTID    :: !TID
   , gaps      :: !(Map.IntMap [Addr])
   , transLog  :: !(Map.IntMap [DocRecord])
   , mainIdx   :: !(Map.IntMap [DocRecord])
@@ -160,39 +159,49 @@ newtype Transaction m a = Transaction { unTransaction :: S.StateT TransactionSta
 instance MonadIO m => MonadIO (Transaction m) where
   liftIO = Transaction . liftIO
 
--- Int Properties --------------------------------------------------------------
+-- Properties ------------------------------------------------------------------
 
-newtype IntProperty a = IntProperty { unIntProperty :: String }
-  deriving (Eq, Show, IsString)
+newtype Property a = Property { unProperty :: (PropID, String) }
+
+instance Eq (Property a) where
+  Property (pid, _) == Property (pid', _) = pid == pid'
+
+instance Show (Property a) where
+  show (Property (pid, s)) = s ++ "[" ++ show pid ++ "]"
+
+instance Typeable a => IsString (Property a) where
+  fromString s = Property (pid, s)
+    where pid = fromIntegral $ hash (show $ typeRep (Proxy :: Proxy a), s)
+
+-- Values ----------------------------------------------------------------------
 
 newtype IntVal = IntVal { unIntVal :: DID }
   deriving (Eq, Ord, Bounded, Num)
 
 instance Show (IntVal) where show (IntVal k) =  "0x" ++ showHex k ""
 
-data IntValList a = forall b. IntValList { intPropName :: IntProperty a
-                                         , intPropVals :: [IntVal]
-                                         }
-
--- Reference Properties --------------------------------------------------------
-
-newtype RefProperty a b = RefProperty { unRefProperty :: String }
-  deriving (Eq, Show, IsString)
+data IntValList a = forall b. IntValList { intPropName :: Property a
+                                         , intPropVals :: [IntVal] }
 
 newtype DocID a = DocID { unDocID :: DID }
   deriving (Eq, Ord, Bounded, Serialize)
 
 instance Show (DocID a) where show (DocID k) = "0x" ++ showHex k ""
 
-data DocRefList a = forall b. DocRefList { docPropName     :: RefProperty a b
-                                         , docPropVals     :: [DocID b]
-                                         }
+data DocRefList a = forall b. DocRefList { docPropName :: Property a
+                                         , docPropVals :: [DocID b] }
 
--- Document Typeclass ----------------------------------------------------------
+-- Records ---------------------------------------------------------------------
 
 class (Typeable a, Serialize a) => Document a where
-  getDocRefs :: a -> [DocRefList a]
-  getIntVals :: a -> [IntValList a]
+  getRefProps :: [Property a]
+  getRefProps = []
+  getDocRefs  :: a -> [DocRefList a]
+  getDocRefs _ = []
+  getIntProps :: [Property a]
+  getIntProps = []
+  getIntVals  :: a -> [IntValList a]
+  getIntVals _ = []
 
 utcTime2ExtID :: UTCTime -> IntVal
 utcTime2ExtID = fromInteger . round . utcTimeToPOSIXSeconds
@@ -326,8 +335,8 @@ update did a = Transaction $ do
                     }
   S.put t { transUpdateList = (r, bs) : transUpdateList t }
   where
-    getDRefs (DocRefList p rs) = (\(DocID k)  -> DocReference (mkRefPropID p) k) <$> rs
-    getIRefs (IntValList p rs) = (\(IntVal k) -> IntReference (mkIntPropID p) k) <$> rs
+    getDRefs (DocRefList p rs) = (\(DocID k)  -> DocReference (checkRefProp p) k) <$> rs
+    getIRefs (IntValList p rs) = (\(IntVal k) -> IntReference (checkIntProp p) k) <$> rs
 
 
 insert :: (Document a, MonadIO m) => a -> Transaction m (DocID a)
@@ -370,31 +379,30 @@ page_ f mdid = Transaction $ do
   return dds'
 
 range :: (Document a, MonadIO m) => Maybe IntVal -> Maybe IntVal ->
-         IntProperty a -> Int -> Transaction m [(DocID a, a)]
+         Property a -> Int -> Transaction m [(DocID a, a)]
 range mval mdid prop pg = page_ f mval
   where f st m = fromMaybe [] $ do
                    ds <- Map.lookup pid (intIdx m)
                    return $ getPage st sti pg ds
-        pid = toInt $ mkIntPropID prop
         sti = toInt $ unIntVal $ fromMaybe maxBound mdid
+        pid = toInt $ checkIntProp prop
 
 filter :: (Document a, MonadIO m) => IntVal -> Maybe IntVal ->
-          RefProperty a b -> Int -> Transaction m [(DocID a, a)]
+          Property a -> Int -> Transaction m [(DocID a, a)]
 filter (IntVal k) mdid prop pg = page_ f mdid
   where f st m = fromMaybe [] $ do
                    rs <- Map.lookup pid (refIdx m)
                    ss <- Map.lookup (toInt k) rs
                    ds <- Map.lookup pid ss
                    return $ getPage st sti pg ds
-        pid = toInt $ mkRefPropID prop
+        pid = toInt $ checkRefProp prop
         sti = toInt $ unIntVal $ fromMaybe maxBound mdid
 
-size :: (Document a, MonadIO m) => IntProperty a -> Transaction m Int
+size :: (Document a, MonadIO m) => Property a -> Transaction m Int
 size prop = Transaction $ do
   t <- S.get
-  let pid = mkIntPropID prop
   withMasterLock (transHandle t) $ \m -> return $
-    case Map.lookup (toInt pid) (intIdx m) of
+    case Map.lookup (toInt $ checkIntProp prop) (intIdx m) of
       Nothing -> 0
       Just ds -> sum $ Set.size . snd <$> Map.toList ds
 
@@ -707,11 +715,17 @@ tRecSize r = case r of
   Pending dr  -> 8 + (2 * length (docIRefs dr)) + (2 * length (docDRefs dr))
   Completed _ -> 2
 
-mkIntPropID :: forall a. Typeable a => IntProperty a -> PropID
-mkIntPropID p = fromIntegral $ hash (show $ typeRep (Proxy :: Proxy a), show p)
+checkIntProp :: forall a. (Document a) => Property a -> PropID
+checkIntProp p@(Property (pid, prop)) =
+  if pid `notElem` (fst . unProperty <$> (getIntProps :: [Property a]))
+  then error $ "Invalid int property name: " ++ show p
+  else pid
 
-mkRefPropID :: forall a b. Typeable a => RefProperty a b -> PropID
-mkRefPropID p = fromIntegral $ hash (show $ typeRep (Proxy :: Proxy a), show p)
+checkRefProp :: forall a. (Document a) => Property a -> PropID
+checkRefProp p@(Property (pid, prop)) =
+  if pid `notElem` (fst . unProperty <$> (getRefProps :: [Property a]))
+  then error $ "Invalid ref property name: " ++ show p
+  else pid
 
 readDocument :: (Serialize a, MonadIO m) => Handle -> DocRecord -> m a
 readDocument h r = do
