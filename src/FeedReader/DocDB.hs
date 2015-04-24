@@ -56,7 +56,7 @@ import           Data.Function         (on)
 import           Data.Hashable         (hash)
 import qualified Data.IntMap.Strict    as Map
 import qualified Data.IntSet           as Set
-import           Data.List             (find, foldl', nubBy, sortOn)
+import qualified Data.List             as L
 import           Data.Maybe            (fromJust, fromMaybe)
 import qualified Data.Sequence         as Seq
 import           Data.Serialize        (Serialize (..), decode, encode)
@@ -69,6 +69,7 @@ import           Data.Typeable         (Proxy (..), Typeable, typeRep)
 import           Data.Word             (Word32, Word8)
 import           Numeric               (showHex)
 import           Prelude               hiding (filter, lookup)
+import           System.Directory      (renameFile)
 import           System.FilePath       ((</>))
 import qualified System.IO             as IO
 
@@ -118,8 +119,9 @@ data MasterState = MasterState
   , logPos    :: !Addr
   , logSize   :: !Size
   , newTID    :: !TID
+  , keepTrans :: !Bool
   , gaps      :: !(Map.IntMap [Addr])
-  , transLog  :: !(Map.IntMap [DocRecord])
+  , transLog  :: !(Map.IntMap (Bool, [DocRecord]))
   , mainIdx   :: !(Map.IntMap [DocRecord])
   , intIdx    :: !SortIndex
   , refIdx    :: !FilterIndex
@@ -212,7 +214,7 @@ utcTime2IntVal :: UTCTime -> IntVal
 utcTime2IntVal = fromInteger . round . utcTimeToPOSIXSeconds
 
 string2IntVal :: String -> IntVal
-string2IntVal s = IntVal $ snd $ foldl' f (wordSize - 1, 0) bytes
+string2IntVal s = IntVal $ snd $ L.foldl' f (wordSize - 1, 0) bytes
   where bytes = (fromIntegral . fromEnum <$> take wordSize s) :: [Word8]
         f (n, v) b = (n - 1, if n >= 0 then v + fromIntegral b * 2 ^ (8 * n) else v)
 
@@ -229,7 +231,8 @@ open lf df = do
                       , logPos    = pos
                       , logSize   = lsz
                       , newTID    = 1
-                      , gaps      = Map.singleton (toInt (maxBound :: Addr)) [0]
+                      , keepTrans = False
+                      , gaps      = emptyGaps
                       , transLog  = Map.empty
                       , mainIdx   = Map.empty
                       , intIdx    = Map.empty
@@ -276,12 +279,12 @@ runTransaction h (Transaction t) = do
       if checkValid tid (transLog m) q u then do
         let tsz = sum $ (tRecSize . Pending . fst) <$> u
         let pos = toInt (logPos m) + tsz
-        lsz <- checkLogSize m pos
-        let (ts, gs) = foldl' allocFold ([], gaps m) u
+        lsz <- checkLogSize (logHandle m) (toInt (logSize m)) pos
+        let (ts, gs) = L.foldl' allocFold ([], gaps m) u
         let m' = m { logPos   = fromIntegral pos
                    , logSize  = fromIntegral lsz
                    , gaps     = gs
-                   , transLog = Map.insert (toInt tid) (fst <$> ts) $ transLog m
+                   , transLog = Map.insert (toInt tid) (False, fst <$> ts) $ transLog m
                    }
         writeTransactions m ts
         writeLogPos (logHandle m) $ fromIntegral pos
@@ -298,7 +301,7 @@ runTransaction h (Transaction t) = do
           , transReadList   = []
           , transUpdateList = []
           }
-      let u' = nubBy ((==) `on` docID . fst) u
+      let u' = L.nubBy ((==) `on` docID . fst) u
       return (a, q, u')
 
     checkValid tid l q u = ck qs && ck us
@@ -306,7 +309,8 @@ runTransaction h (Transaction t) = do
         us = (\(d,_) -> (toInt (docID d), ())) <$> u
         qs = (\k -> (toInt k, ())) <$> q
         ck lst = Map.null $ Map.intersection newTs $ Map.fromList lst
-        (_, newTs) = Map.split (toInt tid) l
+        newTs = Map.filter (not . fst) $ snd $ Map.split (toInt tid) l
+-- TODO: should keep in log for longer
 
     allocFold (ts, gs) (r, bs) =
       if docDel r then ((r, bs):ts, gs)
@@ -539,7 +543,7 @@ mkNewTID :: MonadIO m => Handle -> m TID
 mkNewTID h = withMaster h $ \m -> return (m { newTID = newTID m + 1 }, newTID m)
 
 updateMainIdx :: Map.IntMap [DocRecord] -> [DocRecord] -> Map.IntMap [DocRecord]
-updateMainIdx = foldl' f
+updateMainIdx = L.foldl' f
   where f idx r = let did = toInt $ docID r in
                   let rs' = case Map.lookup did idx of
                               Nothing  -> [r]
@@ -547,8 +551,8 @@ updateMainIdx = foldl' f
                   Map.insert did rs' idx
 
 updateIntIdx :: SortIndex -> [DocRecord] -> SortIndex
-updateIntIdx = foldl' f
-  where f idx r = foldl' g idx (docIRefs r)
+updateIntIdx = L.foldl' f
+  where f idx r = L.foldl' g idx (docIRefs r)
           where
             did = toInt (docID r)
             del = docDel r
@@ -568,8 +572,8 @@ updateIntIdx = foldl' f
                                                 else Set.insert did ss
 
 updateRefIdx :: FilterIndex -> [DocRecord] -> FilterIndex
-updateRefIdx = foldl' f
-  where f idx r = foldl' g idx (docDRefs r)
+updateRefIdx = L.foldl' f
+  where f idx r = L.foldl' g idx (docDRefs r)
           where
             did = toInt (docID r)
             del = docDel r
@@ -593,7 +597,7 @@ addGap s addr gs = Map.insert sz (addr:as) gs
         sz = toInt s
 
 updateGaps :: MasterState -> Map.IntMap [Addr]
-updateGaps m = addTail $ foldl' f (Map.empty, 0) $ sortOn docAddr firstD
+updateGaps m = addTail $ L.foldl' f (Map.empty, 0) $ L.sortOn docAddr firstD
   where
     firstD = [ r | r:_ <- Map.elems (mainIdx m), not $ docDel r ]
     f (gs, addr) r = (gs', docAddr r + docSize r)
@@ -616,13 +620,12 @@ alloc gs s = let sz = toInt s in
 toInt :: DBWord -> Int
 toInt (DBWord d) = fromIntegral d
 
-checkLogSize :: MonadIO m => MasterState -> Int -> m Int
-checkLogSize m pos =
-  let osz = toInt (logSize m) in
+checkLogSize :: MonadIO m => IO.Handle -> Int -> Int -> m Int
+checkLogSize hnd osz pos =
   let bpos = wordSize * (pos + 1) in
   if bpos > osz then do
     let sz = max bpos $ osz + 4096
-    liftIO $ IO.hSetFileSize (logHandle m) $ fromIntegral sz
+    liftIO $ IO.hSetFileSize hnd $ fromIntegral sz
     return sz
   else return osz
 
@@ -642,19 +645,19 @@ readLog m pos = do
             let ntid = max (newTID m) (fromIntegral tid + 1) in
             case Map.lookup tid l of
               Nothing -> return m { newTID = ntid
-                                  , transLog = Map.insert tid [r] l }
-              Just rs -> return m { newTID = ntid
-                                  , transLog = Map.insert tid (r:rs) l }
+                                  , transLog = Map.insert tid (False, [r]) l }
+              Just (_, rs) -> return m { newTID = ntid
+                                       , transLog = Map.insert tid (False, r:rs) l }
           Completed tid ->
             case Map.lookup (toInt tid) l of
               Nothing -> logError h $ "Completed TID:" ++ show tid ++
                 " found but transaction did not previously occur."
-              Just rs -> return m { newTID   = max (newTID m) (tid + 1)
-                                  , transLog = Map.delete (toInt tid) l
-                                  , mainIdx  = updateMainIdx (mainIdx m) rs
-                                  , intIdx   = updateIntIdx (intIdx m) rs
-                                  , refIdx   = updateRefIdx (refIdx m) rs
-                                  }
+              Just (_, rs) -> return m { newTID   = max (newTID m) (tid + 1)
+                                       , transLog = Map.delete (toInt tid) l
+                                       , mainIdx  = updateMainIdx (mainIdx m) rs
+                                       , intIdx   = updateIntIdx (intIdx m) rs
+                                       , refIdx   = updateRefIdx (refIdx m) rs
+                                       }
   let pos' = pos + tRecSize ln
   if pos' >= (fromIntegral (logPos m) - 1) then return m'
   else readLog m' pos'
@@ -765,7 +768,7 @@ readDocument h r = do
 findFirstDoc :: Map.IntMap [DocRecord] -> TID -> DID -> Maybe DocRecord
 findFirstDoc idx tid did = do
   rs <- Map.lookup (toInt did) idx
-  r  <- find (\r -> docTID r <= tid) rs
+  r  <- L.find (\r -> docTID r <= tid) rs
   if docDel r then Nothing
   else Just r
 
@@ -813,14 +816,14 @@ updateManThread h w = do
           let rs' = fst <$> rs
           let trec = Completed tid
           let pos = fromIntegral (logPos m) + tRecSize trec
-          lsz <- checkLogSize m pos
+          lsz <- checkLogSize (logHandle m) (toInt (logSize m)) pos
           logSeek m
           let lh = logHandle m
           writeLogTRec lh trec
           writeLogPos lh $ fromIntegral pos
           let m' = m { logPos   = fromIntegral pos
                      , logSize  = fromIntegral lsz
-                     , transLog = Map.delete (toInt tid) $ transLog m
+                     , transLog = updateLog (toInt tid) (keepTrans m) (transLog m)
                      , mainIdx  = updateMainIdx (mainIdx m) rs'
                      , intIdx   = updateIntIdx (intIdx m) rs'
                      , refIdx   = updateRefIdx (refIdx m) rs'
@@ -829,13 +832,70 @@ updateManThread h w = do
       return wait
     return (kill, (kill, wait))
   unless kill $ updateManThread h wait
+  where updateLog tid keep idx =
+          let ors = snd $ fromMaybe (False, []) $ Map.lookup tid idx in
+          let dl = Map.delete tid idx in
+          if keep then Map.insert tid (True, ors) dl else dl
+
+emptyGaps :: Map.IntMap [Addr]
+emptyGaps = Map.singleton (toInt (maxBound :: Addr)) [0]
 
 gcThread :: Handle -> IO ()
 gcThread h = do
   sgn <- withGC h $ \sgn -> do
-    when (sgn == PerformGC) $
+    when (sgn == PerformGC) $ do
+      om <- withMaster h $ \m -> return (m { keepTrans = True }, m)
+      let rs = map head . L.filter (any docDel) $ Map.elems $ mainIdx om
+      let ts = concat $ toTRecs <$> L.groupBy ((==) `on` docTID) rs
+      let pos = sum $ tRecSize <$> ts
+      let logPath = logFilePath (unHandle h)
+      let path = logPath ++ ".new"
+      sz <- IO.withBinaryFile path IO.ReadWriteMode $ writeTrans 0 pos ts
+      let m = MasterState { logPos    = fromIntegral pos
+                          , logSize   = fromIntegral sz
+                          , transLog  = Map.empty
+                          , newTID    = newTID om
+                          , keepTrans = False
+                          , gaps      = emptyGaps
+                          , mainIdx   = updateMainIdx Map.empty rs
+                          , intIdx    = updateIntIdx Map.empty rs
+                          , refIdx    = updateRefIdx Map.empty rs
+                          }
+      withMaster h $ \nm -> do
+        let new = Map.elems $ snd $ Map.split (toInt $ newTID om) $ transLog nm
+        let ncrs = concat $ snd <$> L.filter fst new
+        let nprs = L.filter (not . fst) new
+        let ls2trans t = (toInt $ docTID $ head $ snd t, t)
+        (pos', sz') <- IO.withBinaryFile path IO.ReadWriteMode $ \hnd -> do
+          let newts = toTRecs ncrs
+          let pos' = pos + sum (tRecSize <$> newts)
+          sz' <- writeTrans sz pos' newts hnd
+          return (pos', sz')
+        IO.hClose $ logHandle nm
+        renameFile path logPath
+        hnd <- IO.openBinaryFile logPath IO.ReadWriteMode
+        IO.hSetBuffering hnd IO.NoBuffering
+        let m' = m { logHandle = hnd
+                   , logPos    = fromIntegral pos'
+                   , logSize   = fromIntegral sz'
+                   , newTID    = newTID nm
+                   , gaps      = gaps nm
+                   , transLog  = Map.fromList $ ls2trans <$> nprs
+                   , mainIdx   = updateMainIdx (mainIdx nm) ncrs
+                   , intIdx    = updateIntIdx (intIdx nm) ncrs
+                   , refIdx    = updateRefIdx (refIdx nm) ncrs
+                   }
+        return (m, ())
       return ()
     return (sgn, sgn)
   unless (sgn == KillGC) $ do
     threadDelay $ 1000 * 1000
     gcThread h
+  where
+    toTRecs rs = (Pending <$> rs) ++ [Completed $ docTID $ head rs]
+    writeTrans osz pos ts hnd = do
+      sz <- checkLogSize hnd osz pos
+      IO.hSeek hnd IO.AbsoluteSeek $ fromIntegral wordSize
+      forM_ ts $ writeLogTRec hnd
+      writeLogPos hnd $ fromIntegral pos
+      return sz

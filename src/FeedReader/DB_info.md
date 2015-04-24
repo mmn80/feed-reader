@@ -174,17 +174,14 @@ GC runs asynchronously, and can be executed at any time.
 ```
 with master lock:
   grab master ref
-  fix a TID
-collect garbage from master
-write new log (new file)
-with master lock:
-  grab master ref
-write new transactions to new log
+collect garbage from grabbed master
+write new log file
 with master lock:
   write new transactions to new log
-  update master (rebuild gaps)
-  rename log files
-  switch transaction log file handle to the fresh one
+  update master indexes
+  close old log file handle
+  rename new log to old name
+  update log file handle in master
 with dataHandle lock:
   truncate file if too big
 ```
