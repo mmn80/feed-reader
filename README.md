@@ -1,5 +1,5 @@
 counter-feeder
-=============
+==============
 
 Multi-platform, multi-node RSS/Atom feed reader
 

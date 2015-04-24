@@ -67,6 +67,7 @@ import           Data.Time.Clock       (UTCTime)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import           Data.Typeable         (Proxy (..), Typeable, typeRep)
 import           Data.Word             (Word32, Word8)
+import           Debug.Trace
 import           Numeric               (showHex)
 import           Prelude               hiding (filter, lookup)
 import           System.Directory      (renameFile)
@@ -845,28 +846,22 @@ gcThread h = do
   sgn <- withGC h $ \sgn -> do
     when (sgn == PerformGC) $ do
       om <- withMaster h $ \m -> return (m { keepTrans = True }, m)
-      let rs = map head . L.filter (any docDel) $ Map.elems $ mainIdx om
+      let rs = map head . L.filter (not . any docDel) $ Map.elems $ mainIdx om
       let ts = concat $ toTRecs <$> L.groupBy ((==) `on` docTID) rs
       let pos = sum $ tRecSize <$> ts
       let logPath = logFilePath (unHandle h)
       let path = logPath ++ ".new"
       sz <- IO.withBinaryFile path IO.ReadWriteMode $ writeTrans 0 pos ts
-      let m = MasterState { logPos    = fromIntegral pos
-                          , logSize   = fromIntegral sz
-                          , transLog  = Map.empty
-                          , newTID    = newTID om
-                          , keepTrans = False
-                          , gaps      = emptyGaps
-                          , mainIdx   = updateMainIdx Map.empty rs
-                          , intIdx    = updateIntIdx Map.empty rs
-                          , refIdx    = updateRefIdx Map.empty rs
-                          }
-      withMaster h $ \nm -> do
-        let new = Map.elems $ snd $ Map.split (toInt $ newTID om) $ transLog nm
+      let mIdx = updateMainIdx Map.empty rs
+      let iIdx = updateIntIdx Map.empty rs
+      let rIdx = updateRefIdx Map.empty rs
+      when (forceEval mIdx iIdx rIdx) $ withMaster h $ \nm -> do
+        let new = Map.elems . snd . Map.split (toInt $ newTID om) $ transLog nm
         let ncrs = concat $ snd <$> L.filter fst new
         let nprs = L.filter (not . fst) new
-        let ls2trans t = (toInt $ docTID $ head $ snd t, t)
-        (pos', sz') <- IO.withBinaryFile path IO.ReadWriteMode $ \hnd -> do
+        let ls2trans t = (toInt . docTID . head $ snd t, t)
+        (pos', sz') <- if null ncrs then return (pos, sz)
+                       else IO.withBinaryFile path IO.ReadWriteMode $ \hnd -> do
           let newts = toTRecs ncrs
           let pos' = pos + sum (tRecSize <$> newts)
           sz' <- writeTrans sz pos' newts hnd
@@ -875,27 +870,34 @@ gcThread h = do
         renameFile path logPath
         hnd <- IO.openBinaryFile logPath IO.ReadWriteMode
         IO.hSetBuffering hnd IO.NoBuffering
-        let m' = m { logHandle = hnd
-                   , logPos    = fromIntegral pos'
-                   , logSize   = fromIntegral sz'
-                   , newTID    = newTID nm
-                   , gaps      = gaps nm
-                   , transLog  = Map.fromList $ ls2trans <$> nprs
-                   , mainIdx   = updateMainIdx (mainIdx nm) ncrs
-                   , intIdx    = updateIntIdx (intIdx nm) ncrs
-                   , refIdx    = updateRefIdx (refIdx nm) ncrs
-                   }
+        let m = MasterState { logHandle = hnd
+                            , logPos    = fromIntegral pos'
+                            , logSize   = fromIntegral sz'
+                            , newTID    = newTID nm
+                            , keepTrans = False
+                            , gaps      = gaps nm
+                            , transLog  = Map.fromList (ls2trans <$> nprs)
+                            , mainIdx   = updateMainIdx mIdx ncrs
+                            , intIdx    = updateIntIdx  iIdx ncrs
+                            , refIdx    = updateRefIdx  rIdx ncrs
+                            }
         return (m, ())
       return ()
-    return (sgn, sgn)
+    let sgn' = if sgn == PerformGC then IdleGC else sgn
+    return (sgn', sgn')
   unless (sgn == KillGC) $ do
     threadDelay $ 1000 * 1000
     gcThread h
   where
-    toTRecs rs = (Pending <$> rs) ++ [Completed $ docTID $ head rs]
+    toTRecs rs = (Pending <$> rs) ++ [Completed . docTID $ head rs]
+
     writeTrans osz pos ts hnd = do
       sz <- checkLogSize hnd osz pos
       IO.hSeek hnd IO.AbsoluteSeek $ fromIntegral wordSize
       forM_ ts $ writeLogTRec hnd
       writeLogPos hnd $ fromIntegral pos
       return sz
+
+    forceEval mIdx iIdx rIdx = Map.notMember (-1) mIdx &&
+                               Map.size iIdx > (-1) &&
+                               Map.size rIdx > (-1)
