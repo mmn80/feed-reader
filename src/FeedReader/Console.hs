@@ -39,8 +39,11 @@ helpMessage = do
   yield "          : s: use '*' to start at the top"
   yield "  filter p t c k o s"
   yield "          : SELECT TOP p * FROM t WHERE c = k AND o < s ORDER BY o DESC"
-  yield "  add t n : inserts n random records into the DB (t as above)"
+  yield "  add n t : inserts n random records into the DB (t as above)"
   yield "  del k   : deletes document with ID = k"
+  yield "  range_del p t c s"
+  yield "          : deletes a range of documents starting at k"
+  yield "          : params as in 'range'"
   yield "  gc      : performs GC"
   yield "  debug   : shows all internal state, including indexes"
   yield "  quit    : quits the program"
@@ -48,16 +51,17 @@ helpMessage = do
 processCommand h = do
   args <- words <$> await
   case head args of
-    "help"   -> helpMessage
-    "stats"  -> checkArgs 0 args h cmdStats
-    "get"    -> checkArgs 2 args h cmdGet
-    "range"  -> checkArgs 4 args h cmdRange
-    "filter" -> checkArgs 6 args h cmdFilter
-    "add"    -> checkArgs 2 args h cmdAdd
-    "del"    -> checkArgs 1 args h cmdDel
-    "gc"     -> checkArgs 0 args h cmdGC
-    "debug"  -> checkArgs 0 args h cmdDebug
-    _        -> yield $ "Command '" ++ head args ++ "' not understood."
+    "help"      -> helpMessage
+    "stats"     -> checkArgs 0 args h cmdStats
+    "get"       -> checkArgs 2 args h cmdGet
+    "range"     -> checkArgs 4 args h cmdRange
+    "filter"    -> checkArgs 6 args h cmdFilter
+    "add"       -> checkArgs 2 args h cmdAdd
+    "del"       -> checkArgs 1 args h cmdDel
+    "range_del" -> checkArgs 4 args h cmdRangeDel
+    "gc"        -> checkArgs 0 args h cmdGC
+    "debug"     -> checkArgs 0 args h cmdDebug
+    _           -> yield $ "Command '" ++ head args ++ "' not understood."
   processCommand h
 
 checkArgs n args h f =
@@ -152,14 +156,17 @@ cmdGet h args = timed $ do
 
 page h c p s k o now df = liftBase $
   if k == 0
-  then DB.runRange h ext (fromString fprop) p
-  else DB.runFilter h (fromIntegral k) ext (fromString fprop) (fromString oprop) p
-  where ext | "D:" `isPrefixOf` s = Just $ DB.utcTime2IntVal $ text2UTCTime (drop 2 s) now
-            | "S:" `isPrefixOf` s = Just $ DB.string2IntVal (drop 2 s)
-            | s == "*"            = Nothing
-            | otherwise           = Just $ fromIntegral (read s :: Int)
-        fprop = if c == "*" then df else c
+  then DB.runRange h (parseVal s now) (fromString fprop) p
+  else DB.runFilter h (fromIntegral k) (parseVal s now)
+         (fromString fprop) (fromString oprop) p
+  where fprop = if c == "*" then df else c
         oprop = if o == "*" then df else o
+
+parseVal s now
+  | "D:" `isPrefixOf` s = Just $ DB.utcTime2IntVal $ text2UTCTime (drop 2 s) now
+  | "S:" `isPrefixOf` s = Just $ DB.string2IntVal (drop 2 s)
+  | s == "*"            = Nothing
+  | otherwise           = Just $ fromIntegral (read s :: Int)
 
 cmdPage h args s k o = do
   let p = (read $ args !! 1) :: Int
@@ -207,8 +214,8 @@ cmdFilter h args = timed $ do
   cmdPage h args s k o
 
 cmdAdd h args = timed $ do
-  let t = args !! 1
-  let n = (read $ args !! 2) :: Int
+  let n = (read $ args !! 1) :: Int
+  let t = args !! 2
   g <- liftBase getStdGen
   let showIDs ids = do
         let l = length ids
@@ -255,9 +262,32 @@ cmdDel h args = timed $ do
   liftBase $ DB.runDelete h $ fromIntegral k
   yield "Record deleted."
 
+df c d = fromString $ if c == "*" then d else c
+
+cmdRangeDel h args = timed $ do
+  let t = args !! 2
+  let p = (read $ args !! 1) :: Int
+  let c = args !! 3
+  let s = args !! 4
+  now <- liftBase getCurrentTime
+  let mb = parseVal s now
+  sz <- if null mb
+        then do
+          yield "Explicit value required."
+          return 0
+        else let k = fromJust mb in case t of
+          "cat"    -> DB.runDeleteRange h k (df c "Name" :: DB.Property Cat) p
+          "feed"   -> DB.runDeleteRange h k (df c "Updated" :: DB.Property Feed) p
+          "person" -> DB.runDeleteRange h k (df c "Name" :: DB.Property Person) p
+          "item"   -> DB.runDeleteRange h k (df c "Updated" :: DB.Property Item) p
+          _        -> do
+                        yield $ t ++ " is not a valid table name."
+                        return 0
+  yield $ show sz ++ " records deleted."
+
 cmdGC h _ = timed $ do
   liftBase $ DB.performGC h
-  yield "Garbage collected."
+  yield "Garbage collection job scheduled."
 
 cmdDebug h _ = timed $ do
   msg <- liftBase $ DB.debug h

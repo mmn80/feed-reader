@@ -8,18 +8,20 @@ module FeedReader.DB
   , runLookup
   , runInsert
   , runDelete
+  , runDeleteRange
   , getStats
   , DBStats (..)
   , addItemConv
   , addFeedConv
   ) where
 
+import           Control.Monad       (forM_)
 import           Control.Monad.Trans (MonadIO (liftIO))
 import           Data.Maybe          (fromJust, fromMaybe)
 import           Data.Time.Clock     (getCurrentTime)
 import           FeedReader.DocDB
 import           FeedReader.Types
-import           Prelude             hiding (lookup, filter)
+import           Prelude             hiding (filter, lookup)
 
 runLookup :: (Document a, MonadIO m) => Handle -> IntVal -> m (Maybe (DocID a, a))
 runLookup h k = do
@@ -48,6 +50,19 @@ runDelete :: (MonadIO m) => Handle -> IntVal -> m ()
 runDelete h did = do
   runTransaction h $ deleteUnsafe did
   return ()
+
+deleteRange :: (Document a, MonadIO m) => IntVal -> Property a -> Int ->
+               Transaction m Int
+deleteRange did prop pg = do
+  ks <- rangeKUnsafe (Just did) Nothing prop pg
+  forM_ ks $ \k -> delete k
+  return $ length ks
+
+runDeleteRange :: (Document a, MonadIO m) => Handle -> IntVal ->
+                  Property a -> Int -> m Int
+runDeleteRange h did prop pg = do
+  ms <- runTransaction h $ deleteRange did prop pg
+  return $ fromMaybe 0 ms
 
 data DBStats = DBStats
   { countCats    :: Int

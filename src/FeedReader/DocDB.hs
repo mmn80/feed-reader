@@ -38,6 +38,8 @@ module FeedReader.DocDB
   , deleteUnsafe
   , range
   , rangeUnsafe
+  , rangeK
+  , rangeKUnsafe
   , filter
   , filterUnsafe
   , size
@@ -428,6 +430,31 @@ filterUnsafe (IntVal k) mst msti fprop sprop pg = page_ f mst
         spid = toInt $ checkIntProp sprop
         st  = toInt $ unIntVal $ fromMaybe maxBound mst
         sti = toInt $ unIntVal $ fromMaybe maxBound msti
+
+pageK_ :: (MonadIO m) => (Int -> MasterState -> [Int]) ->
+         Maybe IntVal -> Transaction m [DocID a]
+pageK_ f mdid = Transaction $ do
+  t <- S.get
+  let st = toInt $ unIntVal $ fromMaybe maxBound mdid
+  dds <- withMasterLock (transHandle t) $ \m -> do
+           let ds = f st m
+           let mbds = findFirstDoc (mainIdx m) (transTID t) . fromIntegral <$> ds
+           return [ docID $ fromJust mb | mb <- mbds, not (null mb) ]
+  S.put t { transReadList = dds ++ transReadList t }
+  return (DocID <$> dds)
+
+rangeK :: (Document a, MonadIO m) => Maybe IntVal -> Maybe (DocID a) ->
+         Property a -> Int -> Transaction m [DocID a]
+rangeK mst msti = rangeKUnsafe mst (IntVal . unDocID <$> msti)
+
+rangeKUnsafe :: (Document a, MonadIO m) => Maybe IntVal -> Maybe IntVal ->
+         Property a -> Int -> Transaction m [DocID a]
+rangeKUnsafe mst msti prop pg = pageK_ f mst
+  where f st m = fromMaybe [] $ do
+                   dss <- Map.lookup pid (intIdx m)
+                   return $ getPage st sti pg dss
+        sti = toInt $ unIntVal $ fromMaybe maxBound msti
+        pid = toInt $ checkIntProp prop
 
 size :: (Document a, MonadIO m) => Property a -> Transaction m Int
 size prop = Transaction $ do
