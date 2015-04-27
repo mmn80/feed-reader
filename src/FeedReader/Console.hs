@@ -8,6 +8,8 @@ import           Control.Monad         (forM, forM_, replicateM, unless)
 import           Data.List             (intercalate, isPrefixOf)
 import           Data.Maybe            (fromJust)
 import qualified Data.Sequence         as S
+import           Data.Serialize        (Serialize (..), decode, encode)
+import           Data.String           (IsString (..))
 import           Data.Time.Clock       (getCurrentTime)
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
@@ -17,8 +19,6 @@ import           Pipes
 import qualified Pipes.Prelude         as P
 import           Pipes.Safe
 import           System.Random         (getStdGen, randomRIO, randomRs)
-import           Data.Serialize        (Serialize (..), decode, encode)
-import           Data.String           (IsString (..))
 
 introMessage = do
   yield "Welcome to the Jungle!"
@@ -233,17 +233,20 @@ cmdAdd h args = timed $ do
       cs' <- liftBase $ DB.runRange h Nothing "Name" 100
       let cs = S.fromList cs'
       let rs = take n $ randomRs (0, S.length cs - 1) g
-      fs <- forM rs $ \r -> do
-        f <- liftBase $ randomFeed $ fst $ S.index cs r
-        liftBase $ DB.runInsert h f
+      fs <- liftBase $ P.toListM $ for (each rs) $ \r -> do
+        f <- lift $ randomFeed $ fst $ S.index cs r
+        mid <- lift $ DB.runInsert h f
+        yield mid
       showIDs $ show <$> clean fs
     "item" -> do
       fs' <- liftBase $ DB.runRange h Nothing "Updated" 1000
       let fs = S.fromList fs'
       let rfids = (fst . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
-      is <- forM rfids $ liftBase . randomItem
-      is' <- liftBase $ forM is $ DB.runInsert h
-      showIDs $ show <$> clean is'
+      is <- liftBase $ P.toListM $ for (each rfids) $ \fid -> do
+        i <- lift $ randomItem fid
+        mid <- lift $ DB.runInsert h i
+        yield mid
+      showIDs $ show <$> clean is
       return ()
     _      -> yield $ t ++ " is not a valid table name."
 
