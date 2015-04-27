@@ -24,24 +24,18 @@ import           FeedReader.Types
 import           Prelude             hiding (filter, lookup)
 
 runLookup :: (Document a, MonadIO m) => Handle -> IntVal -> m (Maybe (DocID a, a))
-runLookup h k = do
-  mbb <- runTransaction h $
-    lookupUnsafe k
-  return $ fromMaybe Nothing mbb
+runLookup h k = fromMaybe Nothing <$>
+  runTransaction h (lookupUnsafe k)
 
 runRange :: (Document a, MonadIO m) => Handle -> Maybe IntVal ->
             Property a -> Int -> m [(DocID a, a)]
-runRange h s prop pg = do
-  mb <- runTransaction h $
-    range s Nothing prop pg
-  return $ fromMaybe [] mb
+runRange h s prop pg = fromMaybe [] <$>
+  runTransaction h (range s Nothing prop pg)
 
 runFilter :: (Document a, MonadIO m) => Handle -> IntVal -> Maybe IntVal ->
              Property a -> Property a -> Int -> m [(DocID a, a)]
-runFilter h k s fprop sprop pg = do
-  mb <- runTransaction h $
-    filterUnsafe k s Nothing fprop sprop pg
-  return $ fromMaybe [] mb
+runFilter h k s fprop sprop pg = fromMaybe [] <$>
+  runTransaction h (filterUnsafe k s Nothing fprop sprop pg)
 
 runInsert :: (Document a, MonadIO m) => Handle -> a -> m (Maybe (DocID a))
 runInsert h a = runTransaction h $ insert a
@@ -60,9 +54,8 @@ deleteRange did prop pg = do
 
 runDeleteRange :: (Document a, MonadIO m) => Handle -> IntVal ->
                   Property a -> Int -> m Int
-runDeleteRange h did prop pg = do
-  ms <- runTransaction h $ deleteRange did prop pg
-  return $ fromMaybe 0 ms
+runDeleteRange h did prop pg = fromMaybe 0 <$>
+  runTransaction h (deleteRange did prop pg)
 
 data DBStats = DBStats
   { countCats    :: Int
@@ -72,13 +65,12 @@ data DBStats = DBStats
   } deriving (Show)
 
 getStats :: MonadIO m => Handle -> m DBStats
-getStats h = do
-  mb <- runTransaction h $ DBStats
+getStats h = fromMaybe (DBStats 0 0 0 0) <$>
+  runTransaction h (DBStats
     <$> size ("Name"    :: Property Cat)
     <*> size ("Updated" :: Property Feed)
     <*> size ("Name"    :: Property Person)
-    <*> size ("Updated" :: Property Item)
-  return $ fromMaybe (DBStats 0 0 0 0) mb
+    <*> size ("Updated" :: Property Item))
 
 clean :: [Maybe a] -> [a]
 clean as = [ fromJust x | x <- as, not $ null x ]

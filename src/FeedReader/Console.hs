@@ -77,10 +77,12 @@ randomString l r = do
   ln <- randomRIO (l, r)
   replicateM ln $ randomRIO (' ', '~')
 
+time2Int str = fromInteger . round . utcTimeToPOSIXSeconds . DB.text2UTCTime str
+
 randomTime = do
   df <- getCurrentTime
-  let l = fromInteger . round . utcTimeToPOSIXSeconds $ DB.text2UTCTime "2000-01-01" df
-  let r = fromInteger . round . utcTimeToPOSIXSeconds $ DB.text2UTCTime "2020-01-01" df
+  let l = time2Int "2000-01-01" df
+  let r = time2Int "2020-01-01" df
   ti <- randomRIO (l, r)
   return . posixSecondsToUTCTime $ fromInteger ti
 
@@ -213,47 +215,47 @@ cmdFilter h args = timed $ do
   let s = args !! 6
   cmdPage h args s k o
 
+clean :: [Maybe (DB.DocID a)] -> [String]
+clean = map (show . fromJust) . filter (not . null)
+
+showIDs mbs = do
+  let ids = clean mbs
+  let l = length ids
+  let (prefix, suffix) = if l > 10
+                         then ("First 10 IDs: ", "...")
+                         else ("IDs: ", ".")
+  yield $ show l ++ " records generated."
+  yield $ prefix ++ intercalate ", " (take 10 ids) ++ suffix
+
 cmdAdd h args = timed $ do
   let n = (read $ args !! 1) :: Int
   let t = args !! 2
   g <- liftBase getStdGen
-  let showIDs ids = do
-        let l = length ids
-        let (prefix, suffix) = if l > 10
-                               then ("First 10 IDs: ", "...")
-                               else ("IDs: ", ".")
-        yield $ show l ++ " records generated."
-        yield $ prefix ++ intercalate ", " (take 10 ids) ++ suffix
-  let clean mbs = [ fromJust x | x <- mbs, not $ null x ]
   case t of
-    "cat"  -> do
-       cs <- replicateM n $ do
-         a <- liftBase randomCat
-         liftBase $ DB.runInsert h a
-       showIDs $ show <$> clean cs
-    "person"  -> do
-       ps <- replicateM n $ do
-         a <- liftBase randomPerson
-         liftBase $ DB.runInsert h a
-       showIDs $ show <$> clean ps
+    "cat"    -> liftBase (P.toListM $ P.replicateM n
+                  (randomCat >>= DB.runInsert h)) >>=
+                showIDs
+    "person" -> liftBase (P.toListM $ P.replicateM n
+                  (randomPerson >>= DB.runInsert h)) >>=
+                showIDs
     "feed" -> do
       cs' <- liftBase $ DB.runRange h Nothing "Name" 100
       let cs = S.fromList cs'
       let rs = take n $ randomRs (0, S.length cs - 1) g
-      fs <- liftBase . P.toListM . for (each rs) $ \r -> do
-        f <- lift . randomFeed . fst $ S.index cs r
-        mid <- lift $ DB.runInsert h f
-        yield mid
-      showIDs $ show <$> clean fs
+      fs <- liftBase . P.toListM . for (each rs) $ \r ->
+        (lift . randomFeed . fst . S.index cs) r >>=
+        lift . DB.runInsert h >>=
+        yield
+      showIDs fs
     "item" -> do
       fs' <- liftBase $ DB.runRange h Nothing "Updated" 1000
       let fs = S.fromList fs'
       let rfids = (fst . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
-      is <- liftBase . P.toListM . for (each rfids) $ \fid -> do
-        i <- lift $ randomItem fid
-        mid <- lift $ DB.runInsert h i
-        yield mid
-      showIDs $ show <$> clean is
+      is <- liftBase . P.toListM . for (each rfids) $ \fid ->
+        (lift . randomItem) fid >>=
+        lift . DB.runInsert h >>=
+        yield
+      showIDs is
       return ()
     _      -> yield $ t ++ " is not a valid table name."
 
@@ -276,10 +278,10 @@ cmdRangeDel h args = timed $ do
           yield "Explicit value required."
           return 0
         else let k = fromJust mb in case t of
-          "cat"    -> DB.runDeleteRange h k (df c "Name" :: DB.Property Cat) p
-          "feed"   -> DB.runDeleteRange h k (df c "Updated" :: DB.Property Feed) p
-          "person" -> DB.runDeleteRange h k (df c "Name" :: DB.Property Person) p
-          "item"   -> DB.runDeleteRange h k (df c "Updated" :: DB.Property Item) p
+          "cat"    -> DB.runDeleteRange h k (df c "Name"    :: DB.Property Cat   ) p
+          "feed"   -> DB.runDeleteRange h k (df c "Updated" :: DB.Property Feed  ) p
+          "person" -> DB.runDeleteRange h k (df c "Name"    :: DB.Property Person) p
+          "item"   -> DB.runDeleteRange h k (df c "Updated" :: DB.Property Item  ) p
           _        -> do
                         yield $ t ++ " is not a valid table name."
                         return 0
@@ -289,9 +291,7 @@ cmdGC h _ = timed $ do
   liftBase $ DB.performGC h
   yield "Garbage collection job scheduled."
 
-cmdDebug h _ = timed $ do
-  msg <- liftBase $ DB.debug h
-  each $ lines msg
+cmdDebug h _ = timed $ liftBase (DB.debug h) >>= each . lines
 
 pipeLine h =
       P.stdinLn

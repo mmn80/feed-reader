@@ -50,7 +50,8 @@ import           Control.Arrow         (first)
 import           Control.Concurrent    (MVar, ThreadId, forkIO, newMVar,
                                         putMVar, takeMVar, threadDelay)
 import           Control.Exception     (bracket, bracketOnError)
-import           Control.Monad         (forM, forM_, replicateM, unless, when)
+import           Control.Monad         (forM, forM_, liftM, replicateM, unless,
+                                        when)
 import qualified Control.Monad.State   as S
 import           Control.Monad.Trans   (MonadIO (liftIO))
 import qualified Data.ByteString       as B
@@ -394,9 +395,8 @@ page_ :: (Document a, MonadIO m) => (Int -> MasterState -> [Int]) ->
          Maybe IntVal -> Transaction m [(DocID a, a)]
 page_ f mdid = Transaction $ do
   t <- S.get
-  let st = toInt . unIntVal $ fromMaybe maxBound mdid
   dds <- withMasterLock (transHandle t) $ \m -> do
-           let ds = f st m
+           let ds = f (ival mdid) m
            let mbds = findFirstDoc (mainIdx m) (transTID t) . fromIntegral <$> ds
            return [ fromJust mb | mb <- mbds, not (null mb) ]
   dds' <- forM (reverse dds) $ \d -> do
@@ -411,12 +411,10 @@ range mst msti = rangeUnsafe mst (IntVal . unDocID <$> msti)
 
 rangeUnsafe :: (Document a, MonadIO m) => Maybe IntVal -> Maybe IntVal ->
          Property a -> Int -> Transaction m [(DocID a, a)]
-rangeUnsafe mst msti prop pg = page_ f mst
+rangeUnsafe mst msti p pg = page_ f mst
   where f st m = fromMaybe [] $ do
-                   ds <- Map.lookup pid (intIdx m)
-                   return $ getPage st sti pg ds
-        sti = toInt . unIntVal $ fromMaybe maxBound msti
-        pid = toInt $ checkIntProp prop
+                   ds <- Map.lookup (prop p) (intIdx m)
+                   return $ getPage st (ival msti) pg ds
 
 filter :: (Document a, MonadIO m) => DocID a -> Maybe IntVal -> Maybe (DocID a) ->
           Property a -> Property a -> Int -> Transaction m [(DocID a, a)]
@@ -425,23 +423,17 @@ filter (DocID k) mst msti = filterUnsafe (IntVal k) mst (IntVal . unDocID <$> ms
 filterUnsafe :: (Document a, MonadIO m) => IntVal -> Maybe IntVal -> Maybe IntVal ->
           Property a -> Property a -> Int -> Transaction m [(DocID a, a)]
 filterUnsafe (IntVal k) mst msti fprop sprop pg = page_ f mst
-  where f _ m = fromMaybe [] $ do
-                   rs <- Map.lookup fpid (refIdx m)
-                   ss <- Map.lookup (toInt k) rs
-                   ds <- Map.lookup spid ss
-                   return $ getPage st sti pg ds
-        fpid = toInt $ checkRefProp fprop
-        spid = toInt $ checkIntProp sprop
-        st  = toInt . unIntVal $ fromMaybe maxBound mst
-        sti = toInt . unIntVal $ fromMaybe maxBound msti
+  where f _ m = fromMaybe [] . liftM (getPage (ival mst) (ival msti) pg) $
+                  Map.lookup (prop fprop) (refIdx m) >>=
+                  Map.lookup (toInt k) >>=
+                  Map.lookup (prop sprop)
 
 pageK_ :: (MonadIO m) => (Int -> MasterState -> [Int]) ->
          Maybe IntVal -> Transaction m [DocID a]
 pageK_ f mdid = Transaction $ do
   t <- S.get
-  let st = toInt . unIntVal $ fromMaybe maxBound mdid
   dds <- withMasterLock (transHandle t) $ \m -> do
-           let ds = f st m
+           let ds = f (ival mdid) m
            let mbds = findFirstDoc (mainIdx m) (transTID t) . fromIntegral <$> ds
            return [ docID $ fromJust mb | mb <- mbds, not (null mb) ]
   S.put t { transReadList = dds ++ transReadList t }
@@ -453,20 +445,15 @@ rangeK mst msti = rangeKUnsafe mst (IntVal . unDocID <$> msti)
 
 rangeKUnsafe :: (Document a, MonadIO m) => Maybe IntVal -> Maybe IntVal ->
          Property a -> Int -> Transaction m [DocID a]
-rangeKUnsafe mst msti prop pg = pageK_ f mst
-  where f st m = fromMaybe [] $ do
-                   dss <- Map.lookup pid (intIdx m)
-                   return $ getPage st sti pg dss
-        sti = toInt . unIntVal $ fromMaybe maxBound msti
-        pid = toInt $ checkIntProp prop
+rangeKUnsafe mst msti p pg = pageK_ f mst
+  where f st m = fromMaybe [] $ getPage st (ival msti) pg <$>
+                                Map.lookup (prop p) (intIdx m)
 
 size :: (Document a, MonadIO m) => Property a -> Transaction m Int
-size prop = Transaction $ do
+size p = Transaction $ do
   t <- S.get
-  withMasterLock (transHandle t) $ \m -> return $
-    case Map.lookup (toInt $ checkIntProp prop) (intIdx m) of
-      Nothing -> 0
-      Just ds -> sum $ Set.size . snd <$> Map.toList ds
+  withMasterLock (transHandle t) $ \m -> return . fromMaybe 0 $
+    (sum . map (Set.size . snd) . Map.toList) <$> Map.lookup (prop p) (intIdx m)
 
 debug :: MonadIO m => Handle -> m String
 debug h = do
@@ -564,8 +551,7 @@ readLogPos h = do
 writeLogPos :: MonadIO m => IO.Handle -> Addr -> m ()
 writeLogPos h p = do
   liftIO $ IO.hSeek h IO.AbsoluteSeek 0
-  let bs = encode p
-  liftIO $ B.hPut h bs
+  liftIO $ B.hPut h $ encode p
 
 logError :: MonadIO m => IO.Handle -> String -> m a
 logError h err = do
@@ -577,7 +563,7 @@ mkNewTID h = withMaster h $ \m -> return (m { newTID = newTID m + 1 }, newTID m)
 
 updateMainIdx :: Map.IntMap [DocRecord] -> [DocRecord] -> Map.IntMap [DocRecord]
 updateMainIdx = L.foldl' f
-  where f idx r = let did = toInt $ docID r in
+  where f idx r = let did = toInt (docID r) in
                   let rs' = case Map.lookup did idx of
                               Nothing  -> [r]
                               Just ors -> r : ors in
@@ -777,6 +763,12 @@ tRecSize r = case r of
   Pending dr  -> 8 + (2 * length (docIRefs dr)) + (2 * length (docDRefs dr))
   Completed _ -> 2
 
+ival :: Maybe IntVal -> Int
+ival  = toInt . unIntVal . fromMaybe maxBound
+
+prop :: forall a. (Document a) => Property a -> Int
+prop = toInt . checkIntProp
+
 checkIntProp :: forall a. (Document a) => Property a -> PropID
 checkIntProp p@(Property (pid, _)) =
   if p `notElem` (getIntProps :: [Property a])
@@ -925,7 +917,7 @@ gcThread h = do
     threadDelay $ 1000 * 1000
     gcThread h
   where
-    splitNew om lg = Map.elems . snd $ Map.split (toInt $ newTID om) lg
+    splitNew m = Map.elems . snd . Map.split (toInt $ newTID m)
 
     ls2trans t = (toInt . docTID $ head t, t)
 
