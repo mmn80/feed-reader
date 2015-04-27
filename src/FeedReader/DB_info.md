@@ -8,6 +8,8 @@ Instead of functions and lists we will have `Data.IntMap`, `Data.IntSet`, etc.
 A `newtype` based `Handle` wraps a `DBState` ADT that contains `master :: MVar MasterState`, `dataHandle` and `jobs`.
 The handle is created by an `open` IO action, used for running transaction monad actions, and closed by a `close` IO action.
 
+### Master State
+
 `intIdx` indexes columns that hold Int-convertible values, like Date/Time.
 It is used for range queries.
 
@@ -16,11 +18,14 @@ It is used for range queries.
 There can be multiple copies for the same main `PropID`, but sorted on different columns.
 Used for filter+range queries (filter of first prop, then range on second).
 
-### Master State
+The flag `keepTrans` is set during GC, so as the Update Manager will no longer clear `logComp`.
+`logPend` and `logComp` contain pending and completed transactions.
 
 ```haskell
 logHandle :: Handle
-transLog  :: TID -> [(DID, Addr, Size, Del, [(PropID, [DID])])]
+keepTrans :: Bool
+logPend   :: TID -> [(DID, Addr, Size, Del, [(PropID, [DID])])]
+logComp   :: TID -> [(DID, Addr, Size, Del, [(PropID, [DID])])]
 gaps      :: Size -> [Addr]
 mainIdx   :: DID -> [(TID, Addr, Size, [(PropID, [DID])])]
 intIdx    :: PropID -> IntVal -> [DID]
@@ -86,7 +91,9 @@ Reads are executed live, while updates are just accumulated in the list.
 The transaction is written in the log at the end, and contains the updated DID list.
 Only this step is under lock.
 
-While the record data is asynchronously written by the Update Manager, other transactions can check the DID list of pending transactions and abort themselves in case of conflict.
+While the record data is asynchronously written by the Update Manager,
+other transactions can check the DID list of pending & completed transactions
+and abort themselves in case of conflict.
 
 Read queries target a specific version, `TID <= tid`, and are not blocked by writes.
 Nevertheless, actual file access is under lock.
@@ -127,13 +134,14 @@ middle (the part users write):
   collect updates to the update list
 end:
   with master lock:
-    check new transactions in master:
+    check new transactions in master (both pending and completed):
       if they contain updated/deleted DIDs that clash with read list, abort
       if they contain deleted DIDs that clash with update list, abort
       if they contain updated DIDs that clash with update list, abort or ignore
         based on policy
     allocate space and update gaps accordingly
-    update logPos, logSize, transLog
+    add new transaction based on the update list to logPend
+    update logPos, logSize
     logPos' := logPos + trans size
     write to transaction log:
       increase file size if < logPos'
@@ -161,7 +169,10 @@ repeat:
     increase file size if needed
     write updates
   with master lock:
-    update transLog, mainIdx, intIdx
+    remove transaction from logPend
+    if keepTrans or new pending transactions exist, add it to logComp
+    if logPend is empty and not keepTrans, empty logComp
+    update mainIdx, intIdx
     add "Completed: TID" to the transaction log
     update logPos in the transaction log
 ```
@@ -174,11 +185,13 @@ GC runs asynchronously, and can be executed at any time.
 ```
 with master lock:
   grab master ref
+  keepTrans = True
 collect garbage from grabbed master
 write new log file
 with master lock:
   write new transactions to new log
   update master indexes
+  keepTrans = False
   close old log file handle
   rename new log to old name
   update log file handle in master

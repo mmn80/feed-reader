@@ -124,7 +124,8 @@ data MasterState = MasterState
   , newTID    :: !TID
   , keepTrans :: !Bool
   , gaps      :: !(Map.IntMap [Addr])
-  , transLog  :: !(Map.IntMap (Bool, [DocRecord]))
+  , logPend   :: !(Map.IntMap [DocRecord])
+  , logComp   :: !(Map.IntMap [DocRecord])
   , mainIdx   :: !(Map.IntMap [DocRecord])
   , intIdx    :: !SortIndex
   , refIdx    :: !FilterIndex
@@ -236,7 +237,8 @@ open lf df = do
                       , newTID    = 1
                       , keepTrans = False
                       , gaps      = emptyGaps
-                      , transLog  = Map.empty
+                      , logPend   = Map.empty
+                      , logComp   = Map.empty
                       , mainIdx   = Map.empty
                       , intIdx    = Map.empty
                       , refIdx    = Map.empty
@@ -279,15 +281,15 @@ runTransaction h (Transaction t) = do
   if null u then return $ Just a
   else do
     (mba, ts) <- withMaster h $ \m ->
-      if checkValid tid (transLog m) q u then do
+      if checkValid tid (logPend m) (logComp m) q u then do
         let tsz = sum $ (tRecSize . Pending . fst) <$> u
         let pos = toInt (logPos m) + tsz
         lsz <- checkLogSize (logHandle m) (toInt (logSize m)) pos
         let (ts, gs) = L.foldl' allocFold ([], gaps m) u
-        let m' = m { logPos   = fromIntegral pos
-                   , logSize  = fromIntegral lsz
-                   , gaps     = gs
-                   , transLog = Map.insert (toInt tid) (False, fst <$> ts) $ transLog m
+        let m' = m { logPos  = fromIntegral pos
+                   , logSize = fromIntegral lsz
+                   , gaps    = gs
+                   , logPend = Map.insert (toInt tid) (fst <$> ts) $ logPend m
                    }
         writeTransactions m ts
         writeLogPos (logHandle m) $ fromIntegral pos
@@ -307,13 +309,15 @@ runTransaction h (Transaction t) = do
       let u' = L.nubBy ((==) `on` docID . fst) u
       return (a, q, u')
 
-    checkValid tid l q u = ck qs && ck us
+    checkValid tid logp logc q u = ck qs && ck us
       where
         us = (\(d,_) -> (toInt (docID d), ())) <$> u
         qs = (\k -> (toInt k, ())) <$> q
-        ck lst = Map.null $ Map.intersection newTs $ Map.fromList lst
-        newTs = Map.filter (not . fst) $ snd $ Map.split (toInt tid) l
--- TODO: should keep in log for longer
+        ck lst = Map.null (Map.intersection newPs ml) &&
+                 Map.null (Map.intersection newCs ml)
+          where ml = Map.fromList lst
+        newPs = snd $ Map.split (toInt tid) logp
+        newCs = snd $ Map.split (toInt tid) logc
 
     allocFold (ts, gs) (r, bs) =
       if docDel r then ((r, bs):ts, gs)
@@ -472,7 +476,8 @@ debug h = do
       "logPos  : "   ++ show (logPos m) ++
       "\nlogSize : " ++ show (logSize m) ++
       "\nnewTID  : " ++ show (newTID m) ++
-      "\ntransLog:\n  " ++ show (transLog m) ++
+      "\nlogPend :\n  " ++ show (logPend m) ++
+      "\nlogComp :\n  " ++ show (logComp m) ++
       "\ngaps    :\n  " ++ show (gaps m) ++
       "\nmainIdx :\n  " ++ show (mainIdx m) ++
       "\nintIdx  :\n  " ++ show (intIdx m) ++
@@ -665,27 +670,27 @@ logSeek m = liftIO $ IO.hSeek h IO.AbsoluteSeek p
 readLog :: MonadIO m => MasterState -> Int -> m MasterState
 readLog m pos = do
   let h = logHandle m
-  let l = transLog m
+  let l = logPend m
   ln <- readLogTRec h
   m' <- case ln of
           Pending r ->
             let tid = toInt $ docTID r in
             let ntid = max (newTID m) (fromIntegral tid + 1) in
             case Map.lookup tid l of
-              Nothing -> return m { newTID = ntid
-                                  , transLog = Map.insert tid (False, [r]) l }
-              Just (_, rs) -> return m { newTID = ntid
-                                       , transLog = Map.insert tid (False, r:rs) l }
+              Nothing -> return m { newTID  = ntid
+                                  , logPend = Map.insert tid [r] l }
+              Just rs -> return m { newTID  = ntid
+                                  , logPend = Map.insert tid (r:rs) l }
           Completed tid ->
             case Map.lookup (toInt tid) l of
               Nothing -> logError h $ "Completed TID:" ++ show tid ++
                 " found but transaction did not previously occur."
-              Just (_, rs) -> return m { newTID   = max (newTID m) (tid + 1)
-                                       , transLog = Map.delete (toInt tid) l
-                                       , mainIdx  = updateMainIdx (mainIdx m) rs
-                                       , intIdx   = updateIntIdx (intIdx m) rs
-                                       , refIdx   = updateRefIdx (refIdx m) rs
-                                       }
+              Just rs -> return m { newTID  = max (newTID m) (tid + 1)
+                                  , logPend = Map.delete (toInt tid) l
+                                  , mainIdx = updateMainIdx (mainIdx m) rs
+                                  , intIdx  = updateIntIdx (intIdx m) rs
+                                  , refIdx  = updateRefIdx (refIdx m) rs
+                                  }
   let pos' = pos + tRecSize ln
   if pos' >= (fromIntegral (logPos m) - 1) then return m'
   else readLog m' pos'
@@ -849,21 +854,26 @@ updateManThread h w = do
           let lh = logHandle m
           writeLogTRec lh trec
           writeLogPos lh $ fromIntegral pos
-          let m' = m { logPos   = fromIntegral pos
-                     , logSize  = fromIntegral lsz
-                     , transLog = updateLog (toInt tid) (keepTrans m) (transLog m)
-                     , mainIdx  = updateMainIdx (mainIdx m) rs'
-                     , intIdx   = updateIntIdx (intIdx m) rs'
-                     , refIdx   = updateRefIdx (refIdx m) rs'
+          let (lgp, lgc) = updateLog (toInt tid) (keepTrans m) (logPend m) (logComp m)
+          let m' = m { logPos  = fromIntegral pos
+                     , logSize = fromIntegral lsz
+                     , logPend = lgp
+                     , logComp = lgc
+                     , mainIdx = updateMainIdx (mainIdx m) rs'
+                     , intIdx  = updateIntIdx (intIdx m) rs'
+                     , refIdx  = updateRefIdx (refIdx m) rs'
                      }
           return (m', ())
       return wait
     return (kill, (kill, wait))
   unless kill $ updateManThread h wait
-  where updateLog tid keep idx =
-          let ors = snd $ fromMaybe (False, []) $ Map.lookup tid idx in
-          let dl = Map.delete tid idx in
-          if keep then Map.insert tid (True, ors) dl else dl
+  where updateLog tid keep lgp lgc = (lgp', lgc')
+          where ors  = fromMaybe [] $ Map.lookup tid lgp
+                lgp' = Map.delete tid lgp
+                lc   = if not keep && null lgp'
+                       then Map.empty else lgc
+                lgc' = if keep || not (null lgp')
+                       then Map.insert tid ors lc else lc
 
 emptyGaps :: Map.IntMap [Addr]
 emptyGaps = Map.singleton (toInt (maxBound :: Addr)) [0]
@@ -883,10 +893,10 @@ gcThread h = do
       let iIdx = updateIntIdx Map.empty rs
       let rIdx = updateRefIdx Map.empty rs
       when (forceEval mIdx iIdx rIdx) $ withMaster h $ \nm -> do
-        let new = Map.elems . snd . Map.split (toInt $ newTID om) $ transLog nm
-        let ncrs = concat $ snd <$> L.filter fst new
-        let nprs = L.filter (not . fst) new
-        let ls2trans t = (toInt . docTID . head $ snd t, t)
+        let splitNew lg = Map.elems . snd $ Map.split (toInt $ newTID om) lg
+        let nprs = splitNew $ logPend nm
+        let ncrs = concat <$> splitNew $ logComp nm
+        let ls2trans t = (toInt . docTID $ head t, t)
         (pos', sz') <- if null ncrs then return (pos, sz)
                        else IO.withBinaryFile path IO.ReadWriteMode $ \hnd -> do
           let newts = toTRecs ncrs
@@ -903,7 +913,8 @@ gcThread h = do
                             , newTID    = newTID nm
                             , keepTrans = False
                             , gaps      = gaps nm
-                            , transLog  = Map.fromList (ls2trans <$> nprs)
+                            , logPend   = Map.fromList (ls2trans <$> nprs)
+                            , logComp   = Map.empty
                             , mainIdx   = updateMainIdx mIdx ncrs
                             , intIdx    = updateIntIdx  iIdx ncrs
                             , refIdx    = updateRefIdx  rIdx ncrs
