@@ -110,7 +110,7 @@ instance Serialize Feed
 instance Document Feed where
   getIntProps = [ "Updated", "Title" ]
   getIntVals a = [ IntValList "Updated" [ utcTime2IntVal $ feedUpdated a ]
-                 , IntValList "Title" [ string2IntVal $ getContentText $ feedTitle a ]
+                 , IntValList "Title" [ string2IntVal . getContentText $ feedTitle a ]
                  ]
   getRefProps = [ "CatID", "Authors", "Contributors" ]
   getDocRefs a = [ DocRefList "CatID"        [ feedCatID a ]
@@ -133,7 +133,7 @@ data Item = Item
   } deriving (Show, Generic)
 
 instance Serialize UTCTime where
-  put t = put $ toRational $ utcTimeToPOSIXSeconds t
+  put t = put . toRational $ utcTimeToPOSIXSeconds t
   get = liftM (posixSecondsToUTCTime . fromRational) get
 
 instance Serialize Item
@@ -161,7 +161,7 @@ class ToItem i where
 text2UTCTime :: String -> UTCTime -> UTCTime
 text2UTCTime t df = fromMaybe df $ iso <|> iso' <|> rfc
   where
-    iso  = tryParse $ iso8601DateFormat $ Just "%H:%M:%S"
+    iso  = tryParse . iso8601DateFormat $ Just "%H:%M:%S"
     iso' = tryParse $ iso8601DateFormat Nothing
     rfc  = tryParse rfc822DateFormat
     tryParse f = parseTimeM True defaultTimeLocale f t

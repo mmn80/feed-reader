@@ -218,7 +218,7 @@ utcTime2IntVal :: UTCTime -> IntVal
 utcTime2IntVal = fromInteger . round . utcTimeToPOSIXSeconds
 
 string2IntVal :: String -> IntVal
-string2IntVal s = IntVal $ snd $ L.foldl' f (wordSize - 1, 0) bytes
+string2IntVal s = IntVal . snd $ L.foldl' f (wordSize - 1, 0) bytes
   where bytes = (fromIntegral . fromEnum <$> take wordSize s) :: [Word8]
         f (n, v) b = (n - 1, if n >= 0 then v + fromIntegral b * 2 ^ (8 * n) else v)
 
@@ -260,19 +260,19 @@ open lf df = do
                          , updateMan    = um
                          , gcState      = gc
                          }
-  liftIO $ forkIO $ updateManThread h True
-  liftIO $ forkIO $ gcThread h
+  liftIO . forkIO $ updateManThread h True
+  liftIO . forkIO $ gcThread h
   return h
 
 close :: MonadIO m => Handle -> m ()
 close h = do
-  withGC h $ const $ return (KillGC, ())
-  withUpdateMan h $ const $ return (True, ())
+  withGC h . const $ return (KillGC, ())
+  withUpdateMan h . const $ return (True, ())
   withMasterLock h $ \m -> IO.hClose (logHandle m)
   withDataLock   h $ \d -> IO.hClose d
 
 performGC :: MonadIO m => Handle -> m ()
-performGC h = withGC h $ const $ return (PerformGC, ())
+performGC h = withGC h . const $ return (PerformGC, ())
 
 runTransaction :: MonadIO m => Handle -> Transaction m a -> m (Maybe a)
 runTransaction h (Transaction t) = do
@@ -295,7 +295,7 @@ runTransaction h (Transaction t) = do
         writeLogPos (logHandle m) $ fromIntegral pos
         return (m', (Just a, ts))
       else return (m, (Nothing, []))
-    unless (null ts) $ withJobs h $ \js -> return ((tid, ts):js, ())
+    unless (null ts) . withJobs h $ \js -> return ((tid, ts):js, ())
     return mba
   where
     runUserCode tid = do
@@ -394,7 +394,7 @@ page_ :: (Document a, MonadIO m) => (Int -> MasterState -> [Int]) ->
          Maybe IntVal -> Transaction m [(DocID a, a)]
 page_ f mdid = Transaction $ do
   t <- S.get
-  let st = toInt $ unIntVal $ fromMaybe maxBound mdid
+  let st = toInt . unIntVal $ fromMaybe maxBound mdid
   dds <- withMasterLock (transHandle t) $ \m -> do
            let ds = f st m
            let mbds = findFirstDoc (mainIdx m) (transTID t) . fromIntegral <$> ds
@@ -415,7 +415,7 @@ rangeUnsafe mst msti prop pg = page_ f mst
   where f st m = fromMaybe [] $ do
                    ds <- Map.lookup pid (intIdx m)
                    return $ getPage st sti pg ds
-        sti = toInt $ unIntVal $ fromMaybe maxBound msti
+        sti = toInt . unIntVal $ fromMaybe maxBound msti
         pid = toInt $ checkIntProp prop
 
 filter :: (Document a, MonadIO m) => DocID a -> Maybe IntVal -> Maybe (DocID a) ->
@@ -432,14 +432,14 @@ filterUnsafe (IntVal k) mst msti fprop sprop pg = page_ f mst
                    return $ getPage st sti pg ds
         fpid = toInt $ checkRefProp fprop
         spid = toInt $ checkIntProp sprop
-        st  = toInt $ unIntVal $ fromMaybe maxBound mst
-        sti = toInt $ unIntVal $ fromMaybe maxBound msti
+        st  = toInt . unIntVal $ fromMaybe maxBound mst
+        sti = toInt . unIntVal $ fromMaybe maxBound msti
 
 pageK_ :: (MonadIO m) => (Int -> MasterState -> [Int]) ->
          Maybe IntVal -> Transaction m [DocID a]
 pageK_ f mdid = Transaction $ do
   t <- S.get
-  let st = toInt $ unIntVal $ fromMaybe maxBound mdid
+  let st = toInt . unIntVal $ fromMaybe maxBound mdid
   dds <- withMasterLock (transHandle t) $ \m -> do
            let ds = f st m
            let mbds = findFirstDoc (mainIdx m) (transTID t) . fromIntegral <$> ds
@@ -457,7 +457,7 @@ rangeKUnsafe mst msti prop pg = pageK_ f mst
   where f st m = fromMaybe [] $ do
                    dss <- Map.lookup pid (intIdx m)
                    return $ getPage st sti pg dss
-        sti = toInt $ unIntVal $ fromMaybe maxBound msti
+        sti = toInt . unIntVal $ fromMaybe maxBound msti
         pid = toInt $ checkIntProp prop
 
 size :: (Document a, MonadIO m) => Property a -> Transaction m Int
@@ -470,7 +470,7 @@ size prop = Transaction $ do
 
 debug :: MonadIO m => Handle -> m String
 debug h = do
-  mbb <- runTransaction h $ Transaction $ do
+  mbb <- runTransaction h . Transaction $ do
     t <- S.get
     ms <- withMasterLock (transHandle t) $ \m -> return $
       "logPos  : "   ++ show (logPos m) ++
@@ -497,12 +497,12 @@ wordSize = 4
 
 withMasterLock :: MonadIO m => Handle -> (MasterState -> IO a) -> m a
 withMasterLock h = liftIO . bracket
-  (takeMVar $ master $ unHandle h)
+  (takeMVar . master $ unHandle h)
   (putMVar (master $ unHandle h))
 
 withMaster :: MonadIO m => Handle -> (MasterState -> IO (MasterState, a)) -> m a
 withMaster h f = liftIO $ bracketOnError
-  (takeMVar $ master $ unHandle h)
+  (takeMVar . master $ unHandle h)
   (putMVar (master $ unHandle h))
   (\m -> do
     (m', a) <- f m
@@ -511,12 +511,12 @@ withMaster h f = liftIO $ bracketOnError
 
 withDataLock :: MonadIO m => Handle -> (IO.Handle -> IO a) -> m a
 withDataLock h = liftIO . bracket
-  (takeMVar $ dataHandle $ unHandle h)
+  (takeMVar . dataHandle $ unHandle h)
   (putMVar (dataHandle $ unHandle h))
 
 withJobs :: MonadIO m => Handle -> ([Job] -> IO ([Job], a)) -> m a
 withJobs h f = liftIO $ bracketOnError
-  (takeMVar $ jobs $ unHandle h)
+  (takeMVar . jobs $ unHandle h)
   (putMVar (jobs $ unHandle h))
   (\js -> do
     (js', a) <- f js
@@ -525,7 +525,7 @@ withJobs h f = liftIO $ bracketOnError
 
 withUpdateMan :: MonadIO m => Handle -> (Bool -> IO (Bool, a)) -> m a
 withUpdateMan h f = liftIO $ bracketOnError
-  (takeMVar $ updateMan $ unHandle h)
+  (takeMVar . updateMan $ unHandle h)
   (putMVar (updateMan $ unHandle h))
   (\kill -> do
     (kill', a) <- f kill
@@ -534,7 +534,7 @@ withUpdateMan h f = liftIO $ bracketOnError
 
 withGC :: MonadIO m => Handle -> (GCState -> IO (GCState, a)) -> m a
 withGC h f = liftIO $ bracketOnError
-  (takeMVar $ gcState $ unHandle h)
+  (takeMVar . gcState $ unHandle h)
   (putMVar (gcState $ unHandle h))
   (\s -> do
     (s', a) <- f s
@@ -549,7 +549,7 @@ readWord h = do
     Left err -> logError h err
 
 writeWord :: MonadIO m => IO.Handle -> DBWord -> m ()
-writeWord h w = liftIO $ B.hPut h $ encode w
+writeWord h w = liftIO . B.hPut h $ encode w
 
 readLogPos :: MonadIO m => IO.Handle -> m (Addr, Size)
 readLogPos h = do
@@ -570,7 +570,7 @@ writeLogPos h p = do
 logError :: MonadIO m => IO.Handle -> String -> m a
 logError h err = do
   pos <- liftIO $ IO.hTell h
-  liftIO $ ioError $ userError $ "Corrupted log. " ++ err ++ " Position: " ++ show pos
+  liftIO . ioError . userError $ "Corrupted log. " ++ err ++ " Position: " ++ show pos
 
 mkNewTID :: MonadIO m => Handle -> m TID
 mkNewTID h = withMaster h $ \m -> return (m { newTID = newTID m + 1 }, newTID m)
@@ -630,7 +630,7 @@ addGap s addr gs = Map.insert sz (addr:as) gs
         sz = toInt s
 
 updateGaps :: MasterState -> Map.IntMap [Addr]
-updateGaps m = addTail $ L.foldl' f (Map.empty, 0) $ L.sortOn docAddr firstD
+updateGaps m = addTail . L.foldl' f (Map.empty, 0) $ L.sortOn docAddr firstD
   where
     firstD = [ r | r:_ <- Map.elems (mainIdx m), not $ docDel r ]
     f (gs, addr) r = (gs', docAddr r + docSize r)
@@ -658,7 +658,7 @@ checkLogSize hnd osz pos =
   let bpos = wordSize * (pos + 1) in
   if bpos > osz then do
     let sz = max bpos $ osz + 4096
-    liftIO $ IO.hSetFileSize hnd $ fromIntegral sz
+    liftIO . IO.hSetFileSize hnd $ fromIntegral sz
     return sz
   else return osz
 
@@ -759,12 +759,12 @@ writeLogTRec h t =
       writeWord h $ docID doc
       writeWord h $ docAddr doc
       writeWord h $ docSize doc
-      writeWord h $ fromIntegral $ if docDel doc then truTag else flsTag
-      writeWord h $ fromIntegral $ length $ docIRefs doc
+      writeWord h . fromIntegral $ if docDel doc then truTag else flsTag
+      writeWord h . fromIntegral . length $ docIRefs doc
       forM_ (docIRefs doc) $ \r -> do
          writeWord h $ irefPID r
          writeWord h $ irefVal r
-      writeWord h $ fromIntegral $ length $ docDRefs doc
+      writeWord h . fromIntegral . length $ docDRefs doc
       forM_ (docDRefs doc) $ \r -> do
          writeWord h $ drefPID r
          writeWord h $ drefDID r
@@ -792,11 +792,11 @@ checkRefProp p@(Property (pid, _)) =
 readDocument :: (Serialize a, MonadIO m) => Handle -> DocRecord -> m a
 readDocument h r = do
   bs <- withDataLock h $ \hnd -> do
-    liftIO $ IO.hSeek hnd IO.AbsoluteSeek $ fromIntegral $ docAddr r
-    liftIO $ B.hGet hnd $ fromIntegral $ docSize r
+    liftIO . IO.hSeek hnd IO.AbsoluteSeek . fromIntegral $ docAddr r
+    liftIO . B.hGet hnd . fromIntegral $ docSize r
   case decode bs of
     Right x  -> return x
-    Left err -> liftIO $ ioError $ userError $ "Deserialization error: " ++ err
+    Left err -> liftIO . ioError . userError $ "Deserialization error: " ++ err
 
 findFirstDoc :: Map.IntMap [DocRecord] -> TID -> DID -> Maybe DocRecord
 findFirstDoc idx tid did = do
@@ -828,7 +828,7 @@ updateManThread :: Handle -> Bool -> IO ()
 updateManThread h w = do
   (kill, wait) <- withUpdateMan h $ \kill -> do
     wait <- if kill then return True else do
-      when w $ threadDelay $ 100 * 1000
+      when w . threadDelay $ 100 * 1000
       (mbj, wait) <- withJobs h $ \js ->
         case js of
           []    -> return (js, (Nothing, True))
@@ -836,14 +836,14 @@ updateManThread h w = do
       unless (null mbj) $ do
         let (tid, rs) = fromJust mbj
         withDataLock h $ \hnd -> do
-          let maxAddr = toInteger $ maximum $ (\r -> docAddr r + docSize r) . fst <$> rs
+          let maxAddr = toInteger . maximum $ (\r -> docAddr r + docSize r) . fst <$> rs
           sz <- IO.hFileSize hnd
           when (sz < maxAddr + 1) $ do
             let nsz = max (maxAddr + 1) $ sz + 4096
             IO.hSetFileSize hnd nsz
           forM_ rs $ \(r, bs) ->
             unless (docDel r) $ do
-              IO.hSeek hnd IO.AbsoluteSeek $ fromIntegral $ docAddr r
+              IO.hSeek hnd IO.AbsoluteSeek . fromIntegral $ docAddr r
               B.hPut hnd bs
         withMaster h $ \m -> do
           let rs' = fst <$> rs
@@ -883,7 +883,7 @@ gcThread h = do
   sgn <- withGC h $ \sgn -> do
     when (sgn == PerformGC) $ do
       om <- withMaster h $ \m -> return (m { keepTrans = True }, m)
-      let rs = map head . L.filter (not . any docDel) $ Map.elems $ mainIdx om
+      let rs = map head . L.filter (not . any docDel) . Map.elems $ mainIdx om
       let ts = concat $ toTRecs <$> L.groupBy ((==) `on` docTID) rs
       let pos = sum $ tRecSize <$> ts
       let logPath = logFilePath (unHandle h)
@@ -892,11 +892,9 @@ gcThread h = do
       let mIdx = updateMainIdx Map.empty rs
       let iIdx = updateIntIdx Map.empty rs
       let rIdx = updateRefIdx Map.empty rs
-      when (forceEval mIdx iIdx rIdx) $ withMaster h $ \nm -> do
-        let splitNew lg = Map.elems . snd $ Map.split (toInt $ newTID om) lg
-        let nprs = splitNew $ logPend nm
-        let ncrs = concat <$> splitNew $ logComp nm
-        let ls2trans t = (toInt . docTID $ head t, t)
+      when (forceEval mIdx iIdx rIdx) . withMaster h $ \nm -> do
+        let nprs = splitNew om $ logPend nm
+        let ncrs = concat <$> splitNew om $ logComp nm
         (pos', sz') <- if null ncrs then return (pos, sz)
                        else IO.withBinaryFile path IO.ReadWriteMode $ \hnd -> do
           let newts = toTRecs ncrs
@@ -927,6 +925,10 @@ gcThread h = do
     threadDelay $ 1000 * 1000
     gcThread h
   where
+    splitNew om lg = Map.elems . snd $ Map.split (toInt $ newTID om) lg
+
+    ls2trans t = (toInt . docTID $ head t, t)
+
     toTRecs rs = (Pending <$> rs) ++ [Completed . docTID $ head rs]
 
     writeTrans osz pos ts hnd = do

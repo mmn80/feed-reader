@@ -67,7 +67,7 @@ processCommand h = do
 checkArgs n args h f =
   if n == length args - 1 then f h args
   else yield $ "Command '" ++ head args ++ "' requires " ++ show n ++ " arguments\
-               \ but " ++ show (length args) ++ " were supplied."
+               \ but " ++ show (length args - 1) ++ " were supplied."
 
 ------------------------------------------------------------------------------
 -- Random Utilities
@@ -79,10 +79,10 @@ randomString l r = do
 
 randomTime = do
   df <- getCurrentTime
-  let l = fromInteger $ round $ utcTimeToPOSIXSeconds $ DB.text2UTCTime "2000-01-01" df
-  let r = fromInteger $ round $ utcTimeToPOSIXSeconds $ DB.text2UTCTime "2020-01-01" df
+  let l = fromInteger . round . utcTimeToPOSIXSeconds $ DB.text2UTCTime "2000-01-01" df
+  let r = fromInteger . round . utcTimeToPOSIXSeconds $ DB.text2UTCTime "2020-01-01" df
   ti <- randomRIO (l, r)
-  return $ posixSecondsToUTCTime $ fromInteger ti
+  return . posixSecondsToUTCTime $ fromInteger ti
 
 randomCat =
   DB.Cat <$> randomString 10 30
@@ -163,7 +163,7 @@ page h c p s k o now df = liftBase $
         oprop = if o == "*" then df else o
 
 parseVal s now
-  | "D:" `isPrefixOf` s = Just $ DB.utcTime2IntVal $ text2UTCTime (drop 2 s) now
+  | "D:" `isPrefixOf` s = Just . DB.utcTime2IntVal $ text2UTCTime (drop 2 s) now
   | "S:" `isPrefixOf` s = Just $ DB.string2IntVal (drop 2 s)
   | s == "*"            = Nothing
   | otherwise           = Just $ fromIntegral (read s :: Int)
@@ -240,8 +240,8 @@ cmdAdd h args = timed $ do
       cs' <- liftBase $ DB.runRange h Nothing "Name" 100
       let cs = S.fromList cs'
       let rs = take n $ randomRs (0, S.length cs - 1) g
-      fs <- liftBase $ P.toListM $ for (each rs) $ \r -> do
-        f <- lift $ randomFeed $ fst $ S.index cs r
+      fs <- liftBase . P.toListM . for (each rs) $ \r -> do
+        f <- lift . randomFeed . fst $ S.index cs r
         mid <- lift $ DB.runInsert h f
         yield mid
       showIDs $ show <$> clean fs
@@ -249,7 +249,7 @@ cmdAdd h args = timed $ do
       fs' <- liftBase $ DB.runRange h Nothing "Updated" 1000
       let fs = S.fromList fs'
       let rfids = (fst . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
-      is <- liftBase $ P.toListM $ for (each rfids) $ \fid -> do
+      is <- liftBase . P.toListM . for (each rfids) $ \fid -> do
         i <- lift $ randomItem fid
         mid <- lift $ DB.runInsert h i
         yield mid
@@ -259,7 +259,7 @@ cmdAdd h args = timed $ do
 
 cmdDel h args = timed $ do
   let k = (read $ args !! 1) :: Int
-  liftBase $ DB.runDelete h $ fromIntegral k
+  liftBase . DB.runDelete h $ fromIntegral k
   yield "Record deleted."
 
 df c d = fromString $ if c == "*" then d else c
@@ -302,7 +302,7 @@ pipeLine h =
   >-> P.stdoutLn
 
 main :: IO ()
-main = runSafeT $ runEffect $ bracket
+main = runSafeT . runEffect $ bracket
     (do t0 <- getCurrentTime
         putStrLn "  Opening DB..."
         h <- DB.open (Just "feeds.log") (Just "feeds.dat")
