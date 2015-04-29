@@ -1,6 +1,18 @@
+Invariants
+----------
+
+- All locks last at most **O(log n)**.
+This includes "big" procedures, like GC, that never "stop the world".
+- All meta data (incl. indexes) reside in memory in a `MasterState` structure.
+- All meta data is built incrementally, in **O(log n)** steps,
+from the transaction log (no backtracking).
+- No meta data resides in the data file, just serialized user "records".
+- No serialized user data is saved in the transaction log file, just keys, addresses and sizes.
+- All primitive transactions in the user facing API are **O(log n)**.
+- Index management is fully automatic, online (*O(log n)* with no rebuild steps), and hidden.
+
 Memory Data Structures
 ----------------------
-All meta data and indexes reside in memory in a `MasterState` structure.
 
 The following "Haskell" is just pseudocode.
 Instead of functions and lists we will have `Data.IntMap`, `Data.IntSet`, etc.
@@ -195,6 +207,16 @@ with master lock:
   close old log file handle
   rename new log to old name
   update log file handle in master
+```
+
+The data compaction routine below will reallocate all records.
+If done after GC, GC should be run one more time to clean the transaction log.
+
+```
+with master lock:
+  get list of all DIDs
+for each DID:
+  run empty update transaction (this will reallocate)
 with dataHandle lock:
   truncate file if too big
 ```

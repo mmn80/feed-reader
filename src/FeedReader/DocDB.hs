@@ -68,7 +68,7 @@ import           Data.Serialize.Put    (putWord32be)
 import           Data.String           (IsString (..))
 import           Data.Time.Clock       (UTCTime)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import           Data.Typeable         (Proxy (..), Typeable, typeRep)
+import           Data.Typeable         (Typeable, Proxy (..), typeRep)
 import           Data.Word             (Word32, Word8)
 import           Debug.Trace
 import           Numeric               (showHex)
@@ -338,7 +338,7 @@ lookupUnsafe :: (Document a, MonadIO m) => IntVal -> Transaction m (Maybe (DocID
 lookupUnsafe (IntVal did) = Transaction $ do
   t <- S.get
   mbr <- withMasterLock (transHandle t) $ \m ->
-           return $ findFirstDoc (mainIdx m) (transTID t) did
+           return $ findFirstDoc m t did
   mba <- if null mbr then return Nothing
          else do
            a <- readDocument (transHandle t) (fromJust mbr)
@@ -363,7 +363,6 @@ update did a = Transaction $ do
     getDRefs (DocRefList p rs) = (\(DocID k)  -> DocReference (checkRefProp p) k) <$> rs
     getIRefs (IntValList p rs) = (\(IntVal k) -> IntReference (checkIntProp p) k) <$> rs
 
-
 insert :: (Document a, MonadIO m) => a -> Transaction m (DocID a)
 insert a = Transaction $ do
   t <- S.get
@@ -378,7 +377,7 @@ deleteUnsafe :: (MonadIO m) => IntVal -> Transaction m ()
 deleteUnsafe (IntVal did) = Transaction $ do
   t <- S.get
   (addr, sz, irs, drs) <- withMasterLock (transHandle t) $ \m -> return $
-    case findFirstDoc (mainIdx m) (transTID t) did of
+    case findFirstDoc m t did of
       Nothing -> (0, 0, [], [])
       Just r  -> (docAddr r, docSize r, docIRefs r, docDRefs r)
   let r = DocRecord { docID    = did
@@ -397,7 +396,7 @@ page_ f mdid = Transaction $ do
   t <- S.get
   dds <- withMasterLock (transHandle t) $ \m -> do
            let ds = f (ival mdid) m
-           let mbds = findFirstDoc (mainIdx m) (transTID t) . fromIntegral <$> ds
+           let mbds = findFirstDoc m t . fromIntegral <$> ds
            return [ fromJust mb | mb <- mbds, not (null mb) ]
   dds' <- forM (reverse dds) $ \d -> do
     a <- readDocument (transHandle t) d
@@ -434,7 +433,7 @@ pageK_ f mdid = Transaction $ do
   t <- S.get
   dds <- withMasterLock (transHandle t) $ \m -> do
            let ds = f (ival mdid) m
-           let mbds = findFirstDoc (mainIdx m) (transTID t) . fromIntegral <$> ds
+           let mbds = findFirstDoc m t . fromIntegral <$> ds
            return [ docID $ fromJust mb | mb <- mbds, not (null mb) ]
   S.put t { transReadList = dds ++ transReadList t }
   return (DocID <$> dds)
@@ -465,10 +464,10 @@ debug h = do
       "\nnewTID  : " ++ show (newTID m) ++
       "\nlogPend :\n  " ++ show (logPend m) ++
       "\nlogComp :\n  " ++ show (logComp m) ++
-      "\ngaps    :\n  " ++ show (gaps m) ++
       "\nmainIdx :\n  " ++ show (mainIdx m) ++
       "\nintIdx  :\n  " ++ show (intIdx m) ++
-      "\nrefIdx  :\n  " ++ show (refIdx m)
+      "\nrefIdx  :\n  " ++ show (refIdx m) ++
+      "\ngaps    :\n  " ++ show (gaps m)
     js <- withJobs (transHandle t) $ \js -> return (js, show js)
     return $ ms ++ "\njobs    :\n  " ++ js
   case mbb of
@@ -783,15 +782,20 @@ checkRefProp p@(Property (pid, _)) =
 
 readDocument :: (Serialize a, MonadIO m) => Handle -> DocRecord -> m a
 readDocument h r = do
-  bs <- withDataLock h $ \hnd -> do
-    liftIO . IO.hSeek hnd IO.AbsoluteSeek . fromIntegral $ docAddr r
-    liftIO . B.hGet hnd . fromIntegral $ docSize r
+  bs <- readDocumentData h r
   case decode bs of
     Right x  -> return x
     Left err -> liftIO . ioError . userError $ "Deserialization error: " ++ err
 
-findFirstDoc :: Map.IntMap [DocRecord] -> TID -> DID -> Maybe DocRecord
-findFirstDoc idx tid did = do
+readDocumentData :: (MonadIO m) => Handle -> DocRecord -> m B.ByteString
+readDocumentData h r = withDataLock h $ \hnd -> do
+  liftIO . IO.hSeek hnd IO.AbsoluteSeek . fromIntegral $ docAddr r
+  liftIO . B.hGet hnd . fromIntegral $ docSize r
+
+findFirstDoc :: MasterState -> TransactionState -> DID -> Maybe DocRecord
+findFirstDoc m t did = do
+  let idx = mainIdx m
+  let tid = transTID t
   rs <- Map.lookup (toInt did) idx
   r  <- L.find (\r -> docTID r <= tid) rs
   if docDel r then Nothing
@@ -874,6 +878,7 @@ gcThread :: Handle -> IO ()
 gcThread h = do
   sgn <- withGC h $ \sgn -> do
     when (sgn == PerformGC) $ do
+      compact h
       om <- withMaster h $ \m -> return (m { keepTrans = True }, m)
       let rs = map head . L.filter (not . any docDel) . Map.elems $ mainIdx om
       let ts = concat $ toTRecs <$> L.groupBy ((==) `on` docTID) rs
@@ -910,7 +915,7 @@ gcThread h = do
                             , refIdx    = updateRefIdx  rIdx ncrs
                             }
         return (m, ())
-      return ()
+      truncateDataFile
     let sgn' = if sgn == PerformGC then IdleGC else sgn
     return (sgn', sgn')
   unless (sgn == KillGC) $ do
@@ -933,3 +938,28 @@ gcThread h = do
     forceEval mIdx iIdx rIdx = Map.notMember (-1) mIdx &&
                                Map.size iIdx > (-1) &&
                                Map.size rIdx > (-1)
+
+    truncateDataFile = do
+      rs <- withMasterLock h $
+        return . L.filter (not . docDel) . concat . Map.elems . mainIdx
+      let maxAddr = fromIntegral . maximum $ (\r -> docAddr r + docSize r) <$> rs
+      withDataLock h $ \hnd -> do
+        sz <- IO.hFileSize hnd
+        when (maxAddr < sz) $ IO.hSetFileSize hnd maxAddr
+
+move :: MonadIO m => DID -> Transaction m ()
+move did = Transaction $ do
+  t <- S.get
+  mbr <- withMasterLock (transHandle t) $ \m -> return $ findFirstDoc m t did
+  unless (null mbr) $ do
+    let r = fromJust mbr
+    bs <- readDocumentData (transHandle t) r
+    let r' = r { docTID   = transTID t
+               , docAddr  = 0
+               }
+    S.put t { transUpdateList = (r', bs) : transUpdateList t }
+
+compact :: MonadIO m => Handle -> m ()
+compact h = do
+  idx <- withMasterLock h $ return . mainIdx
+  forM_ (Map.keys idx) $ runTransaction h . move . fromIntegral
