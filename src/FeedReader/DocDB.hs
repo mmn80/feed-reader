@@ -132,13 +132,16 @@ data MasterState = MasterState
   , refIdx    :: !FilterIndex
   }
 
+data DataState = DataState
+  { dataHandle :: IO.Handle }
+
 data GCState = IdleGC | PerformGC | KillGC deriving (Eq)
 
 data DBState = DBState
   { logFilePath  :: FilePath
   , dataFilePath :: FilePath
-  , master       :: MVar MasterState
-  , dataHandle   :: MVar IO.Handle
+  , masterState  :: MVar MasterState
+  , dataState    :: MVar DataState
   , updateMan    :: MVar Bool
   , gcState      :: MVar GCState
   }
@@ -234,7 +237,7 @@ open lf df = do
                       , logSize   = lsz
                       , newTID    = 1
                       , keepTrans = False
-                      , gaps      = emptyGaps
+                      , gaps      = emptyGaps 0
                       , logPend   = Map.empty
                       , logComp   = Map.empty
                       , mainIdx   = Map.empty
@@ -246,13 +249,13 @@ open lf df = do
         else return m
   let m'' = m' { gaps = updateGaps m' }
   mv <- liftIO $ newMVar m''
-  dv <- liftIO $ newMVar dfh
+  dv <- liftIO . newMVar $ DataState dfh
   um <- liftIO $ newMVar False
   gc <- liftIO $ newMVar IdleGC
   let h = Handle DBState { logFilePath  = logPath
                          , dataFilePath = datPath
-                         , master       = mv
-                         , dataHandle   = dv
+                         , masterState  = mv
+                         , dataState    = dv
                          , updateMan    = um
                          , gcState      = gc
                          }
@@ -265,7 +268,7 @@ close h = do
   withGC h . const $ return (KillGC, ())
   withUpdateMan h . const $ return (True, ())
   withMasterLock h $ \m -> IO.hClose (logHandle m)
-  withDataLock   h $ \d -> IO.hClose d
+  withDataLock   h $ \(DataState d) -> IO.hClose d
 
 performGC :: MonadIO m => Handle -> m ()
 performGC h = withGC h . const $ return (PerformGC, ())
@@ -365,7 +368,7 @@ insert a = Transaction $ do
 delete :: (Document a, MonadIO m) => DocID a -> Transaction m ()
 delete = deleteUnsafe . IntVal . unDocID
 
-deleteUnsafe :: (MonadIO m) => IntVal -> Transaction m ()
+deleteUnsafe :: MonadIO m => IntVal -> Transaction m ()
 deleteUnsafe (IntVal did) = Transaction $ do
   t <- S.get
   (addr, sz, irs, drs) <- withMasterLock (transHandle t) $ \m -> return $
@@ -419,7 +422,7 @@ filterUnsafe (IntVal k) mst msti fprop sprop pg = page_ f mst
                   Map.lookup (toInt k) >>=
                   Map.lookup (prop sprop)
 
-pageK_ :: (MonadIO m) => (Int -> MasterState -> [Int]) ->
+pageK_ :: MonadIO m => (Int -> MasterState -> [Int]) ->
          Maybe IntVal -> Transaction m [DocID a]
 pageK_ f mdid = Transaction $ do
   t <- S.get
@@ -473,22 +476,31 @@ wordSize = 4
 
 withMasterLock :: MonadIO m => Handle -> (MasterState -> IO a) -> m a
 withMasterLock h = liftIO . bracket
-  (takeMVar . master $ unHandle h)
-  (putMVar (master $ unHandle h))
+  (takeMVar . masterState $ unHandle h)
+  (putMVar (masterState $ unHandle h))
 
 withMaster :: MonadIO m => Handle -> (MasterState -> IO (MasterState, a)) -> m a
 withMaster h f = liftIO $ bracketOnError
-  (takeMVar . master $ unHandle h)
-  (putMVar (master $ unHandle h))
+  (takeMVar . masterState $ unHandle h)
+  (putMVar (masterState $ unHandle h))
   (\m -> do
     (m', a) <- f m
-    putMVar (master $ unHandle h) m'
+    putMVar (masterState $ unHandle h) m'
     return a)
 
-withDataLock :: MonadIO m => Handle -> (IO.Handle -> IO a) -> m a
+withDataLock :: MonadIO m => Handle -> (DataState -> IO a) -> m a
 withDataLock h = liftIO . bracket
-  (takeMVar . dataHandle $ unHandle h)
-  (putMVar (dataHandle $ unHandle h))
+  (takeMVar . dataState $ unHandle h)
+  (putMVar (dataState $ unHandle h))
+
+withData :: MonadIO m => Handle -> (DataState -> IO (DataState, a)) -> m a
+withData h f = liftIO $ bracketOnError
+  (takeMVar . dataState $ unHandle h)
+  (putMVar (dataState $ unHandle h))
+  (\d -> do
+    (d', a) <- f d
+    putMVar (dataState $ unHandle h) d'
+    return a)
 
 withUpdateMan :: MonadIO m => Handle -> (Bool -> IO (Bool, a)) -> m a
 withUpdateMan h f = liftIO $ bracketOnError
@@ -589,6 +601,9 @@ updateRefIdx = L.foldl' f
                                              else Map.insert rval sng is
                                   Just ss -> Map.insert rval ss' is
                                     where ss' = updateIntIdx ss [r]
+
+emptyGaps :: Addr -> Map.IntMap [Addr]
+emptyGaps sz = Map.singleton (toInt $ maxBound - sz) [sz]
 
 addGap :: Size -> Addr -> Map.IntMap [Addr] -> Map.IntMap [Addr]
 addGap s addr gs = Map.insert sz (addr:as) gs
@@ -747,16 +762,16 @@ tRecSize r = case r of
 ival :: Maybe IntVal -> Int
 ival  = toInt . unIntVal . fromMaybe maxBound
 
-prop :: forall a. (Document a) => Property a -> Int
+prop :: forall a. Document a => Property a -> Int
 prop = toInt . checkIntProp
 
-checkIntProp :: forall a. (Document a) => Property a -> PropID
+checkIntProp :: forall a. Document a => Property a -> PropID
 checkIntProp p@(Property (pid, _)) =
   if p `notElem` (getIntProps :: [Property a])
   then error $ "Invalid int property name: " ++ show p
   else pid
 
-checkRefProp :: forall a. (Document a) => Property a -> PropID
+checkRefProp :: forall a. Document a => Property a -> PropID
 checkRefProp p@(Property (pid, _)) =
   if p `notElem` (getRefProps :: [Property a])
   then error $ "Invalid ref property name: " ++ show p
@@ -769,10 +784,15 @@ readDocument h r = do
     Right x  -> return x
     Left err -> liftIO . ioError . userError $ "Deserialization error: " ++ err
 
-readDocumentData :: (MonadIO m) => Handle -> DocRecord -> m B.ByteString
-readDocumentData h r = withDataLock h $ \hnd -> do
+readDocumentData :: MonadIO m => Handle -> DocRecord -> m B.ByteString
+readDocumentData h r = withDataLock h $ \(DataState hnd) -> do
   liftIO . IO.hSeek hnd IO.AbsoluteSeek . fromIntegral $ docAddr r
   liftIO . B.hGet hnd . fromIntegral $ docSize r
+
+writeDocument :: MonadIO m => DocRecord -> B.ByteString -> IO.Handle -> m ()
+writeDocument r bs hnd = unless (docDel r) $ do
+  liftIO . IO.hSeek hnd IO.AbsoluteSeek . fromIntegral $ docAddr r
+  liftIO $ B.hPut hnd bs
 
 findFirstDoc :: MasterState -> TransactionState -> DID -> Maybe DocRecord
 findFirstDoc m t did = do
@@ -814,16 +834,13 @@ updateManThread h w = do
       if null mbj then return True
       else do
         let (tid, rs) = fromJust mbj
-        withDataLock h $ \hnd -> do
+        withDataLock h $ \(DataState hnd) -> do
           let maxAddr = toInteger . maximum $ (\r -> docAddr r + docSize r) . fst <$> rs
           sz <- IO.hFileSize hnd
           when (sz < maxAddr + 1) $ do
             let nsz = max (maxAddr + 1) $ sz + 4096
             IO.hSetFileSize hnd nsz
-          forM_ rs $ \(r, bs) ->
-            unless (docDel r) $ do
-              IO.hSeek hnd IO.AbsoluteSeek . fromIntegral $ docAddr r
-              B.hPut hnd bs
+          forM_ rs $ \(r, bs) -> writeDocument r bs hnd
         withMaster h $ \m -> do
           let rs' = fst <$> rs
           let trec = Completed $ fromIntegral tid
@@ -853,51 +870,62 @@ updateManThread h w = do
                 lgc' = if keep || not (null lgp')
                        then Map.insert tid ors lc else lc
 
-emptyGaps :: Map.IntMap [Addr]
-emptyGaps = Map.singleton (toInt (maxBound :: Addr)) [0]
-
 gcThread :: Handle -> IO ()
 gcThread h = do
   sgn <- withGC h $ \sgn -> do
     when (sgn == PerformGC) $ do
-      compact h
       om <- withMaster h $ \m -> return (m { keepTrans = True }, m)
       let rs = map head . L.filter (not . any docDel) . Map.elems $ mainIdx om
-      let ts = concat $ toTRecs <$> L.groupBy ((==) `on` docTID) rs
+      let (rs', dpos) = realloc 0 rs
+      let ts = concat $ toTRecs <$> L.groupBy ((==) `on` docTID) (fst <$> rs')
       let pos = sum $ tRecSize <$> ts
       let logPath = logFilePath (unHandle h)
-      let path = logPath ++ ".new"
-      sz <- IO.withBinaryFile path IO.ReadWriteMode $ writeTrans 0 pos ts
+      let logPathNew = logPath ++ ".new"
+      sz <- IO.withBinaryFile logPathNew IO.ReadWriteMode $ writeTrans 0 pos ts
+      let dataPath = dataFilePath (unHandle h)
+      let dataPathNew = dataPath ++ ".new"
+      IO.withBinaryFile dataPathNew IO.ReadWriteMode $ writeData rs' dpos h
       let mIdx = updateMainIdx Map.empty rs
       let iIdx = updateIntIdx Map.empty rs
       let rIdx = updateRefIdx Map.empty rs
-      when (forceEval mIdx iIdx rIdx) . withMaster h $ \nm -> do
-        let nprs = splitNew om $ logPend nm
-        let ncrs = concat <$> splitNew om $ logComp nm
-        (pos', sz') <- if null ncrs then return (pos, sz)
-                       else IO.withBinaryFile path IO.ReadWriteMode $ \hnd -> do
-          let newts = toTRecs ncrs
-          let pos' = pos + sum (tRecSize <$> newts)
-          sz' <- writeTrans sz pos' newts hnd
-          return (pos', sz')
-        IO.hClose $ logHandle nm
-        renameFile path logPath
-        hnd <- IO.openBinaryFile logPath IO.ReadWriteMode
-        IO.hSetBuffering hnd IO.NoBuffering
-        let m = MasterState { logHandle = hnd
-                            , logPos    = fromIntegral pos'
-                            , logSize   = fromIntegral sz'
-                            , newTID    = newTID nm
-                            , keepTrans = False
-                            , gaps      = gaps nm
-                            , logPend   = Map.fromList (ls2trans <$> nprs)
-                            , logComp   = Map.empty
-                            , mainIdx   = updateMainIdx mIdx ncrs
-                            , intIdx    = updateIntIdx  iIdx ncrs
-                            , refIdx    = updateRefIdx  rIdx ncrs
-                            }
-        return (m, ())
-      truncateDataFile
+      when (forceEval mIdx iIdx rIdx) $ withUpdateMan h $ \kill -> do
+        withMaster h $ \nm -> do
+          let (ncrs', dpos') = realloc dpos $ concat <$> splitNew om $ logComp nm
+          let (logp', dpos'') = realloc' dpos' $ logPend nm
+          let ncrs = fst <$> ncrs'
+          (pos', sz') <- if null ncrs then return (pos, sz)
+                         else IO.withBinaryFile logPathNew IO.ReadWriteMode $ \hnd -> do
+                                let newts = toTRecs ncrs
+                                let pos' = pos + sum (tRecSize <$> newts)
+                                sz' <- writeTrans sz pos' newts hnd
+                                return (pos', sz')
+          IO.hClose $ logHandle nm
+          renameFile logPathNew logPath
+          hnd <- IO.openBinaryFile logPath IO.ReadWriteMode
+          IO.hSetBuffering hnd IO.NoBuffering
+          IO.withBinaryFile dataPathNew IO.ReadWriteMode $ writeData ncrs' dpos'' h
+          let gs = buildGaps dpos'' . L.filter docDel $
+                     ncrs ++ (map fst . concat $ Map.elems logp')
+          let m = MasterState { logHandle = hnd
+                              , logPos    = fromIntegral pos'
+                              , logSize   = fromIntegral sz'
+                              , newTID    = newTID nm
+                              , keepTrans = False
+                              , gaps      = gs
+                              , logPend   = logp'
+                              , logComp   = Map.empty
+                              , mainIdx   = updateMainIdx mIdx ncrs
+                              , intIdx    = updateIntIdx  iIdx ncrs
+                              , refIdx    = updateRefIdx  rIdx ncrs
+                              }
+          return (m, ())
+        withData h $ \(DataState hnd) -> do
+          IO.hClose hnd
+          renameFile dataPathNew dataPath
+          hnd' <- IO.openBinaryFile dataPath IO.ReadWriteMode
+          IO.hSetBuffering hnd' IO.NoBuffering
+          return (DataState hnd', ())
+        return (kill, ())
     let sgn' = if sgn == PerformGC then IdleGC else sgn
     return (sgn', sgn')
   unless (sgn == KillGC) $ do
@@ -905,8 +933,6 @@ gcThread h = do
     gcThread h
   where
     splitNew m = Map.elems . snd . Map.split (toInt $ newTID m)
-
-    ls2trans t = (toInt . docTID . fst $ head t, t)
 
     toTRecs rs = (Pending <$> rs) ++ [Completed . docTID $ head rs]
 
@@ -917,31 +943,26 @@ gcThread h = do
       writeLogPos hnd $ fromIntegral pos
       return sz
 
+    writeData rs sz h hnd = do
+      IO.hSetFileSize hnd $ fromIntegral sz
+      forM_ rs $ \(r, oldr) -> do
+        bs <- readDocumentData h oldr
+        writeDocument r bs hnd
+
+    realloc st = L.foldl' f ([], st)
+      where f (nrs, pos) r =
+              if docDel r then ((r, r) : nrs, pos)
+              else ((r { docAddr = pos }, r) : nrs, pos + docSize r)
+
+    realloc' st idx = (Map.fromList l, pos)
+      where (l, pos) = L.foldl' f ([], st) $ Map.toList idx
+            f (lst, pos) (tid, rs) = ((tid, rs') : lst, pos')
+              where (rss', pos') = realloc pos $ fst <$> rs
+                    rs' = (fst <$> rss') `zip` (snd <$> rs)
+
+    buildGaps pos = L.foldl' f (emptyGaps pos)
+      where f gs r = addGap (docSize r) (docAddr r) gs
+
     forceEval mIdx iIdx rIdx = Map.notMember (-1) mIdx &&
                                Map.size iIdx > (-1) &&
                                Map.size rIdx > (-1)
-
-    truncateDataFile = do
-      rs <- withMasterLock h $
-        return . L.filter (not . docDel) . concat . Map.elems . mainIdx
-      let maxAddr = fromIntegral . maximum $ (\r -> docAddr r + docSize r) <$> rs
-      withDataLock h $ \hnd -> do
-        sz <- IO.hFileSize hnd
-        when (maxAddr < sz) $ IO.hSetFileSize hnd maxAddr
-
-move :: MonadIO m => DID -> Transaction m ()
-move did = Transaction $ do
-  t <- S.get
-  mbr <- withMasterLock (transHandle t) $ \m -> return $ findFirstDoc m t did
-  unless (null mbr) $ do
-    let r = fromJust mbr
-    bs <- readDocumentData (transHandle t) r
-    let r' = r { docTID   = transTID t
-               , docAddr  = 0
-               }
-    S.put t { transUpdateList = (r', bs) : transUpdateList t }
-
-compact :: MonadIO m => Handle -> m ()
-compact h = do
-  idx <- withMasterLock h $ return . mainIdx
-  forM_ (Map.keys idx) $ runTransaction h . move . fromIntegral

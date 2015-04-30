@@ -17,7 +17,8 @@ Memory Data Structures
 The following "Haskell" is just pseudocode.
 Instead of functions and lists we will have `Data.IntMap`, `Data.IntSet`, etc.
 
-A `newtype` based `Handle` wraps a `DBState` ADT that contains `master :: MVar MasterState` and `dataHandle`.
+A `newtype` based `Handle` wraps a `DBState` ADT that contains
+`masterState :: MVar MasterState` and `dataState :: MVar DataState`.
 The handle is created by an `open` IO action, used for running transaction monad actions, and closed by a `close` IO action.
 
 ### Master State
@@ -30,7 +31,7 @@ It is used for range queries.
 There can be multiple copies for the same main `PropID`, but sorted on different columns.
 Used for filter+range queries (filter of first prop, then range on second).
 
-The flag `keepTrans` is set during GC, so as the Update Manager will no longer clear `logComp`.
+The flag `keepTrans` is set during GC, so as to notify Update Manager to abort.
 `logPend` and `logComp` contain pending and completed transactions.
 
 ```haskell
@@ -47,7 +48,7 @@ refIdx    :: PropID -> [(PropID, DID -> [DID])]
 ### Data State
 
 ```haskell
-dataHandle :: MVar Handle
+dataHandle :: Handle
 ```
 
 Data Files Format
@@ -83,10 +84,10 @@ recs :: [(ByteString, Gap)]
 Initialization
 --------------
 
-All meta data resides in `master`, which is built incrementally from the transaction log.
-Each `DBWord` in the log leads to an *O(log(n))* `master` update operation.
+All meta data resides in `masterState`, which is built incrementally from the transaction log.
+Each `DBWord` in the log leads to an *O(log(n))* `masterState` update operation.
 No "wrapping up" needs to be performed at the end.
-`master` remains consistent at every step.
+`masterState` remains consistent at every step.
 
 Transaction Monad
 -----------------
@@ -140,7 +141,7 @@ middle (the part users write):
   collect updates to the update list
 end:
   with master lock:
-    check new transactions in master (both pending and completed):
+    check new transactions in masterState (both pending and completed):
       if they contain updated/deleted DIDs that clash with read list, abort
       if they contain deleted DIDs that clash with update list, abort
       if they contain updated DIDs that clash with update list, abort or ignore
@@ -167,18 +168,19 @@ the previously allocated slots will become available again.
 
 ```
 repeat:
-  with master lock:
-    get first (by TID) job from logPend
-  with dataHandle lock:
-    increase file size if needed
-    write updates
-  with master lock:
-    remove transaction from logPend
-    if keepTrans or new pending transactions exist, add it to logComp
-    if logPend is empty and not keepTrans, empty logComp
-    update mainIdx, intIdx
-    add "Completed: TID" to the transaction log
-    update logPos in the transaction log
+  with UM lock:
+    with master lock:
+      get first (by TID) job from logPend
+    with data lock:
+      increase file size if needed
+      write updates
+    with master lock:
+      remove transaction from logPend
+      if keepTrans or new pending transactions exist, add it to logComp
+      if logPend is empty and not keepTrans, empty logComp
+      update mainIdx, intIdx, refIdx
+      add "Completed: TID" to the transaction log
+      update logPos in the transaction log
 ```
 
 Garbage Collector
@@ -188,20 +190,21 @@ GC runs asynchronously, and can be executed at any time.
 
 ```
 with master lock:
-  grab master ref
+  grab masterState ref
   keepTrans = True
-collect garbage from grabbed master
+collect garbage from grabbed masterState
 reallocate records contiguously (empty gaps)
 rebuild mainIdx, intIdx, refIdx
 write new log file
 write new data file
-with master lock:
-  write new transactions to new log, update the new empty gaps index
-  update mainIdx, intIdx, refIdx from new logComp
-  keepTrans = False
-  close old log file handle
-  rename new log to old name
-  update log file handle in master
+with UM lock:
+  with master lock:
+    update old logComp and logPend (reallocate)
+    update new (empty) gaps from logComp and logPend
+    write new transactions to new log & new data file
+    update new mainIdx, intIdx, refIdx from logComp
+    swap log files (close old handle; rename file; open new handle)
+    keepTrans = False
   with data lock:
-    similarly rename & switch the data file
+    swap data files
 ```
