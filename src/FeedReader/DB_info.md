@@ -17,7 +17,7 @@ Memory Data Structures
 The following "Haskell" is just pseudocode.
 Instead of functions and lists we will have `Data.IntMap`, `Data.IntSet`, etc.
 
-A `newtype` based `Handle` wraps a `DBState` ADT that contains `master :: MVar MasterState`, `dataHandle` and `jobs`.
+A `newtype` based `Handle` wraps a `DBState` ADT that contains `master :: MVar MasterState` and `dataHandle`.
 The handle is created by an `open` IO action, used for running transaction monad actions, and closed by a `close` IO action.
 
 ### Master State
@@ -48,12 +48,6 @@ refIdx    :: PropID -> [(PropID, DID -> [DID])]
 
 ```haskell
 dataHandle :: MVar Handle
-```
-
-### Update Manager State
-
-```haskell
-jobs :: MVar [(TID, [(DID, ByteString, Addr, Size)])]
 ```
 
 Data Files Format
@@ -159,24 +153,22 @@ end:
       increase file size if < logPos'
       write records
       logPos := logPos'
-  with jobs lock:
-    add update list and new TID as job
 ```
 
 Update Manager
 --------------
 
 We use an **ACId** with *'eventual durability'* model.
-If the program dies before the Update Manager (asynchronously) finished its `jobs`,
-the `logPos` will never be updated (last operation, see below).
+If the program dies before the Update Manager (asynchronously) finished
+processing `logPend`, the `logPos` will never be updated (last operation, see below).
 Next time the program starts the incomplete transaction will simply be ignored.
 Since `gaps` are always rebuild from valid log data,
 the previously allocated slots will become available again.
 
 ```
 repeat:
-  with jobs lock:
-    get job from list
+  with master lock:
+    get first (by TID) job from logPend
   with dataHandle lock:
     increase file size if needed
     write updates
@@ -199,24 +191,17 @@ with master lock:
   grab master ref
   keepTrans = True
 collect garbage from grabbed master
+reallocate records contiguously (empty gaps)
+rebuild mainIdx, intIdx, refIdx
 write new log file
+write new data file
 with master lock:
-  write new transactions to new log
-  update master indexes
+  write new transactions to new log, update the new empty gaps index
+  update mainIdx, intIdx, refIdx from new logComp
   keepTrans = False
   close old log file handle
   rename new log to old name
   update log file handle in master
-```
-
-The data compaction routine below will reallocate all records.
-If done after GC, GC should be run one more time to clean the transaction log.
-
-```
-with master lock:
-  get list of all DIDs
-for each DID:
-  run empty update transaction (this will reallocate)
-with dataHandle lock:
-  truncate file if too big
+  with data lock:
+    similarly rename & switch the data file
 ```

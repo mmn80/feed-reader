@@ -125,14 +125,12 @@ data MasterState = MasterState
   , newTID    :: !TID
   , keepTrans :: !Bool
   , gaps      :: !(Map.IntMap [Addr])
-  , logPend   :: !(Map.IntMap [DocRecord])
+  , logPend   :: !(Map.IntMap [(DocRecord, B.ByteString)])
   , logComp   :: !(Map.IntMap [DocRecord])
   , mainIdx   :: !(Map.IntMap [DocRecord])
   , intIdx    :: !SortIndex
   , refIdx    :: !FilterIndex
   }
-
-type Job = (TID, [(DocRecord, B.ByteString)])
 
 data GCState = IdleGC | PerformGC | KillGC deriving (Eq)
 
@@ -141,7 +139,6 @@ data DBState = DBState
   , dataFilePath :: FilePath
   , master       :: MVar MasterState
   , dataHandle   :: MVar IO.Handle
-  , jobs         :: MVar [Job]
   , updateMan    :: MVar Bool
   , gcState      :: MVar GCState
   }
@@ -250,14 +247,12 @@ open lf df = do
   let m'' = m' { gaps = updateGaps m' }
   mv <- liftIO $ newMVar m''
   dv <- liftIO $ newMVar dfh
-  jv <- liftIO $ newMVar []
   um <- liftIO $ newMVar False
   gc <- liftIO $ newMVar IdleGC
   let h = Handle DBState { logFilePath  = logPath
                          , dataFilePath = datPath
                          , master       = mv
                          , dataHandle   = dv
-                         , jobs         = jv
                          , updateMan    = um
                          , gcState      = gc
                          }
@@ -280,24 +275,21 @@ runTransaction h (Transaction t) = do
   tid <- mkNewTID h
   (a, q, u) <- runUserCode tid
   if null u then return $ Just a
-  else do
-    (mba, ts) <- withMaster h $ \m ->
-      if checkValid tid (logPend m) (logComp m) q u then do
-        let tsz = sum $ (tRecSize . Pending . fst) <$> u
-        let pos = toInt (logPos m) + tsz
-        lsz <- checkLogSize (logHandle m) (toInt (logSize m)) pos
-        let (ts, gs) = L.foldl' allocFold ([], gaps m) u
-        let m' = m { logPos  = fromIntegral pos
-                   , logSize = fromIntegral lsz
-                   , gaps    = gs
-                   , logPend = Map.insert (toInt tid) (fst <$> ts) $ logPend m
-                   }
-        writeTransactions m ts
-        writeLogPos (logHandle m) $ fromIntegral pos
-        return (m', (Just a, ts))
-      else return (m, (Nothing, []))
-    unless (null ts) . withJobs h $ \js -> return ((tid, ts):js, ())
-    return mba
+  else withMaster h $ \m ->
+    if checkValid tid (logPend m) (logComp m) q u then do
+      let tsz = sum $ (tRecSize . Pending . fst) <$> u
+      let pos = toInt (logPos m) + tsz
+      lsz <- checkLogSize (logHandle m) (toInt (logSize m)) pos
+      let (ts, gs) = L.foldl' allocFold ([], gaps m) u
+      let m' = m { logPos  = fromIntegral pos
+                 , logSize = fromIntegral lsz
+                 , gaps    = gs
+                 , logPend = Map.insert (toInt tid) ts $ logPend m
+                 }
+      writeTransactions m ts
+      writeLogPos (logHandle m) $ fromIntegral pos
+      return (m', Just a)
+    else return (m, Nothing)
   where
     runUserCode tid = do
       (a, TransactionState _ _ q u) <- S.runStateT t
@@ -458,7 +450,7 @@ debug :: MonadIO m => Handle -> m String
 debug h = do
   mbb <- runTransaction h . Transaction $ do
     t <- S.get
-    ms <- withMasterLock (transHandle t) $ \m -> return $
+    withMasterLock (transHandle t) $ \m -> return $
       "logPos  : "   ++ show (logPos m) ++
       "\nlogSize : " ++ show (logSize m) ++
       "\nnewTID  : " ++ show (newTID m) ++
@@ -468,8 +460,6 @@ debug h = do
       "\nintIdx  :\n  " ++ show (intIdx m) ++
       "\nrefIdx  :\n  " ++ show (refIdx m) ++
       "\ngaps    :\n  " ++ show (gaps m)
-    js <- withJobs (transHandle t) $ \js -> return (js, show js)
-    return $ ms ++ "\njobs    :\n  " ++ js
   case mbb of
     Nothing  -> return "Nothing"
     Just mba -> return mba
@@ -499,15 +489,6 @@ withDataLock :: MonadIO m => Handle -> (IO.Handle -> IO a) -> m a
 withDataLock h = liftIO . bracket
   (takeMVar . dataHandle $ unHandle h)
   (putMVar (dataHandle $ unHandle h))
-
-withJobs :: MonadIO m => Handle -> ([Job] -> IO ([Job], a)) -> m a
-withJobs h f = liftIO $ bracketOnError
-  (takeMVar . jobs $ unHandle h)
-  (putMVar (jobs $ unHandle h))
-  (\js -> do
-    (js', a) <- f js
-    putMVar (jobs $ unHandle h) js'
-    return a)
 
 withUpdateMan :: MonadIO m => Handle -> (Bool -> IO (Bool, a)) -> m a
 withUpdateMan h f = liftIO $ bracketOnError
@@ -663,19 +644,20 @@ readLog m pos = do
             let ntid = max (newTID m) (fromIntegral tid + 1) in
             case Map.lookup tid l of
               Nothing -> return m { newTID  = ntid
-                                  , logPend = Map.insert tid [r] l }
+                                  , logPend = Map.insert tid [(r, B.empty)] l }
               Just rs -> return m { newTID  = ntid
-                                  , logPend = Map.insert tid (r:rs) l }
+                                  , logPend = Map.insert tid ((r, B.empty):rs) l }
           Completed tid ->
             case Map.lookup (toInt tid) l of
               Nothing -> logError h $ "Completed TID:" ++ show tid ++
                 " found but transaction did not previously occur."
-              Just rs -> return m { newTID  = max (newTID m) (tid + 1)
-                                  , logPend = Map.delete (toInt tid) l
-                                  , mainIdx = updateMainIdx (mainIdx m) rs
-                                  , intIdx  = updateIntIdx (intIdx m) rs
-                                  , refIdx  = updateRefIdx (refIdx m) rs
-                                  }
+              Just rps -> let rs = fst <$> rps in
+                          return m { newTID  = max (newTID m) (tid + 1)
+                                   , logPend = Map.delete (toInt tid) l
+                                   , mainIdx = updateMainIdx (mainIdx m) rs
+                                   , intIdx  = updateIntIdx (intIdx m) rs
+                                   , refIdx  = updateRefIdx (refIdx m) rs
+                                   }
   let pos' = pos + tRecSize ln
   if pos' >= (fromIntegral (logPos m) - 1) then return m'
   else readLog m' pos'
@@ -825,11 +807,12 @@ updateManThread h w = do
   (kill, wait) <- withUpdateMan h $ \kill -> do
     wait <- if kill then return True else do
       when w . threadDelay $ 100 * 1000
-      (mbj, wait) <- withJobs h $ \js ->
-        case js of
-          []    -> return (js, (Nothing, True))
-          j:js' -> return (js', (Just j, null js'))
-      unless (null mbj) $ do
+      mbj <- withMasterLock h $ \m ->
+        let lgp = logPend m in
+        if null lgp then return Nothing
+        else return . Just $ Map.findMin lgp
+      if null mbj then return True
+      else do
         let (tid, rs) = fromJust mbj
         withDataLock h $ \hnd -> do
           let maxAddr = toInteger . maximum $ (\r -> docAddr r + docSize r) . fst <$> rs
@@ -843,14 +826,14 @@ updateManThread h w = do
               B.hPut hnd bs
         withMaster h $ \m -> do
           let rs' = fst <$> rs
-          let trec = Completed tid
+          let trec = Completed $ fromIntegral tid
           let pos = fromIntegral (logPos m) + tRecSize trec
           lsz <- checkLogSize (logHandle m) (toInt (logSize m)) pos
           logSeek m
           let lh = logHandle m
           writeLogTRec lh trec
           writeLogPos lh $ fromIntegral pos
-          let (lgp, lgc) = updateLog (toInt tid) (keepTrans m) (logPend m) (logComp m)
+          let (lgp, lgc) = updateLog tid (keepTrans m) (logPend m) (logComp m)
           let m' = m { logPos  = fromIntegral pos
                      , logSize = fromIntegral lsz
                      , logPend = lgp
@@ -859,12 +842,11 @@ updateManThread h w = do
                      , intIdx  = updateIntIdx (intIdx m) rs'
                      , refIdx  = updateRefIdx (refIdx m) rs'
                      }
-          return (m', ())
-      return wait
+          return (m', null lgp)
     return (kill, (kill, wait))
   unless kill $ updateManThread h wait
   where updateLog tid keep lgp lgc = (lgp', lgc')
-          where ors  = fromMaybe [] $ Map.lookup tid lgp
+          where ors  = map fst . fromMaybe [] $ Map.lookup tid lgp
                 lgp' = Map.delete tid lgp
                 lc   = if not keep && null lgp'
                        then Map.empty else lgc
@@ -924,7 +906,7 @@ gcThread h = do
   where
     splitNew m = Map.elems . snd . Map.split (toInt $ newTID m)
 
-    ls2trans t = (toInt . docTID $ head t, t)
+    ls2trans t = (toInt . docTID . fst $ head t, t)
 
     toTRecs rs = (Pending <$> rs) ++ [Completed . docTID $ head rs]
 
