@@ -876,18 +876,19 @@ gcThread h = do
     when (sgn == PerformGC) $ do
       om <- withMaster h $ \m -> return (m { keepTrans = True }, m)
       let rs = map head . L.filter (not . any docDel) . Map.elems $ mainIdx om
-      let (rs', dpos) = realloc 0 rs
-      let ts = concat $ toTRecs <$> L.groupBy ((==) `on` docTID) (fst <$> rs')
+      let (rs2, dpos) = realloc 0 rs
+      let rs' = fst <$> rs2
+      let ts = concat $ toTRecs <$> L.groupBy ((==) `on` docTID) rs'
       let pos = sum $ tRecSize <$> ts
       let logPath = logFilePath (unHandle h)
       let logPathNew = logPath ++ ".new"
       sz <- IO.withBinaryFile logPathNew IO.ReadWriteMode $ writeTrans 0 pos ts
       let dataPath = dataFilePath (unHandle h)
       let dataPathNew = dataPath ++ ".new"
-      IO.withBinaryFile dataPathNew IO.ReadWriteMode $ writeData rs' dpos h
-      let mIdx = updateMainIdx Map.empty rs
-      let iIdx = updateIntIdx Map.empty rs
-      let rIdx = updateRefIdx Map.empty rs
+      IO.withBinaryFile dataPathNew IO.ReadWriteMode $ writeData rs2 dpos h
+      let mIdx = updateMainIdx Map.empty rs'
+      let iIdx = updateIntIdx Map.empty rs'
+      let rIdx = updateRefIdx Map.empty rs'
       when (forceEval mIdx iIdx rIdx) $ withUpdateMan h $ \kill -> do
         withMaster h $ \nm -> do
           let (ncrs', dpos') = realloc dpos $ concat <$> splitNew om $ logComp nm
