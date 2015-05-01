@@ -407,7 +407,7 @@ rangeUnsafe :: (Document a, MonadIO m) => Maybe IntVal -> Maybe IntVal ->
          Property a -> Int -> Transaction m [(DocID a, a)]
 rangeUnsafe mst msti p pg = page_ f mst
   where f st m = fromMaybe [] $ do
-                   ds <- Map.lookup (prop p) (intIdx m)
+                   ds <- Map.lookup (propI p) (intIdx m)
                    return $ getPage st (ival msti) pg ds
 
 filter :: (Document a, MonadIO m) => DocID a -> Maybe IntVal -> Maybe (DocID a) ->
@@ -418,9 +418,9 @@ filterUnsafe :: (Document a, MonadIO m) => IntVal -> Maybe IntVal -> Maybe IntVa
           Property a -> Property a -> Int -> Transaction m [(DocID a, a)]
 filterUnsafe (IntVal k) mst msti fprop sprop pg = page_ f mst
   where f _ m = fromMaybe [] . liftM (getPage (ival mst) (ival msti) pg) $
-                  Map.lookup (prop fprop) (refIdx m) >>=
+                  Map.lookup (propR fprop) (refIdx m) >>=
                   Map.lookup (toInt k) >>=
-                  Map.lookup (prop sprop)
+                  Map.lookup (propI sprop)
 
 pageK_ :: MonadIO m => (Int -> MasterState -> [Int]) ->
          Maybe IntVal -> Transaction m [DocID a]
@@ -441,13 +441,13 @@ rangeKUnsafe :: (Document a, MonadIO m) => Maybe IntVal -> Maybe IntVal ->
          Property a -> Int -> Transaction m [DocID a]
 rangeKUnsafe mst msti p pg = pageK_ f mst
   where f st m = fromMaybe [] $ getPage st (ival msti) pg <$>
-                                Map.lookup (prop p) (intIdx m)
+                                Map.lookup (propI p) (intIdx m)
 
 size :: (Document a, MonadIO m) => Property a -> Transaction m Int
 size p = Transaction $ do
   t <- S.get
   withMasterLock (transHandle t) $ \m -> return . fromMaybe 0 $
-    (sum . map (Set.size . snd) . Map.toList) <$> Map.lookup (prop p) (intIdx m)
+    (sum . map (Set.size . snd) . Map.toList) <$> Map.lookup (propI p) (intIdx m)
 
 debug :: MonadIO m => Handle -> m String
 debug h = do
@@ -762,8 +762,11 @@ tRecSize r = case r of
 ival :: Maybe IntVal -> Int
 ival  = toInt . unIntVal . fromMaybe maxBound
 
-prop :: forall a. Document a => Property a -> Int
-prop = toInt . checkIntProp
+propI :: forall a. Document a => Property a -> Int
+propI = toInt . checkIntProp
+
+propR :: forall a. Document a => Property a -> Int
+propR = toInt . checkRefProp
 
 checkIntProp :: forall a. Document a => Property a -> PropID
 checkIntProp p@(Property (pid, _)) =
