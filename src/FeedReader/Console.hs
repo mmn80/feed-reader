@@ -13,6 +13,7 @@ import           Data.String           (IsString (..))
 import           Data.Time.Clock       (getCurrentTime)
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
+import           FeedReader.DB         (DocID, Property)
 import qualified FeedReader.DB         as DB
 import           FeedReader.Types
 import           Pipes
@@ -87,35 +88,35 @@ randomTime = do
   return . posixSecondsToUTCTime $ fromInteger ti
 
 randomCat =
-  DB.Cat <$> randomString 10 30
+  Cat <$> randomString 10 30
 
 randomFeed c =
-  DB.Feed <$> pure c
+  Feed <$> pure c
           <*> randomString 100 300
-          <*> (DB.Text <$> randomString 100 300)
-          <*> (DB.Text <$> randomString 100 300)
+          <*> (Text <$> randomString 100 300)
+          <*> (Text <$> randomString 100 300)
           <*> randomString 2 10
           <*> pure []
           <*> pure []
-          <*> (DB.Text <$> randomString 10 50)
+          <*> (Text <$> randomString 10 50)
           <*> pure Nothing
           <*> randomTime
 
 randomPerson =
-  DB.Person <$> randomString 10 30
+  Person <$> randomString 10 30
             <*> randomString 100 300
             <*> randomString 10 30
 
 randomItem f =
-  DB.Item <$> pure f
+  Item <$> pure f
           <*> randomString 100 300
-          <*> (DB.Text <$> randomString 100 300)
-          <*> (DB.Text <$> randomString 100 300)
+          <*> (Text <$> randomString 100 300)
+          <*> (Text <$> randomString 100 300)
           <*> pure []
           <*> pure []
           <*> pure []
-          <*> (DB.Text <$> randomString 10 50)
-          <*> (DB.Text <$> randomString 200 300)
+          <*> (Text <$> randomString 10 50)
+          <*> (Text <$> randomString 200 300)
           <*> randomTime
           <*> randomTime
 
@@ -136,7 +137,7 @@ cmdStats h _ = timed $ do
   yield $ "Person count  : " ++ show (DB.countPersons s)
   yield $ "Entry count   : " ++ show (DB.countItems s)
 
-type LookupRet a = IO (Maybe (DB.DocID a, a))
+type LookupRet a = IO (Maybe (DocID a, a))
 
 cmdGet h args = timed $ do
   let t = args !! 1
@@ -215,7 +216,7 @@ cmdFilter h args = timed $ do
   let s = args !! 6
   cmdPage h args s k o
 
-clean :: [Maybe (DB.DocID a)] -> [String]
+clean :: [Maybe (DocID a)] -> [String]
 clean = map (show . fromJust) . filter (not . null)
 
 showIDs mbs = do
@@ -278,10 +279,10 @@ cmdRangeDel h args = timed $ do
           yield "Explicit value required."
           return 0
         else let k = fromJust mb in case t of
-          "cat"    -> DB.runDeleteRange h k (df c "Name"    :: DB.Property Cat   ) p
-          "feed"   -> DB.runDeleteRange h k (df c "Updated" :: DB.Property Feed  ) p
-          "person" -> DB.runDeleteRange h k (df c "Name"    :: DB.Property Person) p
-          "item"   -> DB.runDeleteRange h k (df c "Updated" :: DB.Property Item  ) p
+          "cat"    -> DB.runDeleteRange h k (df c "Name"    :: Property Cat   ) p
+          "feed"   -> DB.runDeleteRange h k (df c "Updated" :: Property Feed  ) p
+          "person" -> DB.runDeleteRange h k (df c "Name"    :: Property Person) p
+          "item"   -> DB.runDeleteRange h k (df c "Updated" :: Property Item  ) p
           _        -> do
                         yield $ t ++ " is not a valid table name."
                         return 0

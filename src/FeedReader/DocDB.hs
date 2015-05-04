@@ -46,18 +46,21 @@ module FeedReader.DocDB
   , debug
   ) where
 
-import           Control.Arrow         (first)
 import           Control.Concurrent    (MVar, ThreadId, forkIO, newMVar,
                                         putMVar, takeMVar, threadDelay)
 import           Control.Exception     (bracket, bracketOnError)
 import           Control.Monad         (forM, forM_, liftM, replicateM, unless,
                                         when)
+import           Control.Monad.State   (StateT)
 import qualified Control.Monad.State   as S
 import           Control.Monad.Trans   (MonadIO (liftIO))
+import           Data.ByteString       (ByteString)
 import qualified Data.ByteString       as B
 import           Data.Function         (on)
 import           Data.Hashable         (hash)
+import           Data.IntMap.Strict    (IntMap)
 import qualified Data.IntMap.Strict    as Map
+import           Data.IntSet           (IntSet)
 import qualified Data.IntSet           as Set
 import qualified Data.List             as L
 import           Data.Maybe            (fromJust, fromMaybe)
@@ -68,9 +71,8 @@ import           Data.Serialize.Put    (putWord32be)
 import           Data.String           (IsString (..))
 import           Data.Time.Clock       (UTCTime)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import           Data.Typeable         (Typeable, Proxy (..), typeRep)
+import           Data.Typeable         (Proxy (..), Typeable, typeRep)
 import           Data.Word             (Word32, Word8)
-import           Debug.Trace
 import           Numeric               (showHex)
 import           Prelude               hiding (filter, lookup)
 import           System.Directory      (renameFile)
@@ -114,9 +116,9 @@ data DocRecord = DocRecord
   , docDel   :: !Bool
   } deriving (Show)
 
-type SortIndex = Map.IntMap (Map.IntMap Set.IntSet)
+type SortIndex = IntMap (IntMap IntSet)
 
-type FilterIndex = Map.IntMap (Map.IntMap SortIndex)
+type FilterIndex = IntMap (IntMap SortIndex)
 
 data MasterState = MasterState
   { logHandle :: IO.Handle
@@ -124,10 +126,10 @@ data MasterState = MasterState
   , logSize   :: !Size
   , newTID    :: !TID
   , keepTrans :: !Bool
-  , gaps      :: !(Map.IntMap [Addr])
-  , logPend   :: !(Map.IntMap [(DocRecord, B.ByteString)])
-  , logComp   :: !(Map.IntMap [DocRecord])
-  , mainIdx   :: !(Map.IntMap [DocRecord])
+  , gaps      :: !(IntMap [Addr])
+  , logPend   :: !(IntMap [(DocRecord, ByteString)])
+  , logComp   :: !(IntMap [DocRecord])
+  , mainIdx   :: !(IntMap [DocRecord])
   , intIdx    :: !SortIndex
   , refIdx    :: !FilterIndex
   }
@@ -162,10 +164,10 @@ data TransactionState = TransactionState
   { transHandle     :: Handle
   , transTID        :: TID
   , transReadList   :: [DID]
-  , transUpdateList :: [(DocRecord, B.ByteString)]
+  , transUpdateList :: [(DocRecord, ByteString)]
   }
 
-newtype Transaction m a = Transaction { unTransaction :: S.StateT TransactionState m a }
+newtype Transaction m a = Transaction { unTransaction :: StateT TransactionState m a }
   deriving (Functor, Applicative, Monad)
 
 instance MonadIO m => MonadIO (Transaction m) where
@@ -553,7 +555,7 @@ logError h err = do
 mkNewTID :: MonadIO m => Handle -> m TID
 mkNewTID h = withMaster h $ \m -> return (m { newTID = newTID m + 1 }, newTID m)
 
-updateMainIdx :: Map.IntMap [DocRecord] -> [DocRecord] -> Map.IntMap [DocRecord]
+updateMainIdx :: IntMap [DocRecord] -> [DocRecord] -> IntMap [DocRecord]
 updateMainIdx = L.foldl' f
   where f idx r = let did = toInt (docID r) in
                   let rs' = case Map.lookup did idx of
@@ -602,15 +604,15 @@ updateRefIdx = L.foldl' f
                                   Just ss -> Map.insert rval ss' is
                                     where ss' = updateIntIdx ss [r]
 
-emptyGaps :: Addr -> Map.IntMap [Addr]
+emptyGaps :: Addr -> IntMap [Addr]
 emptyGaps sz = Map.singleton (toInt $ maxBound - sz) [sz]
 
-addGap :: Size -> Addr -> Map.IntMap [Addr] -> Map.IntMap [Addr]
+addGap :: Size -> Addr -> IntMap [Addr] -> IntMap [Addr]
 addGap s addr gs = Map.insert sz (addr:as) gs
   where as = fromMaybe [] $ Map.lookup sz gs
         sz = toInt s
 
-updateGaps :: MasterState -> Map.IntMap [Addr]
+updateGaps :: MasterState -> IntMap [Addr]
 updateGaps m = addTail . L.foldl' f (Map.empty, 0) $ L.sortOn docAddr firstD
   where
     firstD = [ r | r:_ <- Map.elems (mainIdx m), not $ docDel r ]
@@ -620,7 +622,7 @@ updateGaps m = addTail . L.foldl' f (Map.empty, 0) $ L.sortOn docAddr firstD
             sz = docAddr r - addr
     addTail (gs, addr) = addGap (maxBound - addr) addr gs
 
-alloc :: Map.IntMap [Addr] -> Size -> (Addr, Map.IntMap [Addr])
+alloc :: IntMap [Addr] -> Size -> (Addr, IntMap [Addr])
 alloc gs s = let sz = toInt s in
   case Map.lookupGE sz gs of
     Nothing -> error $ "DB full, no more gaps of requested size: " ++ show sz ++ " !"
@@ -787,12 +789,12 @@ readDocument h r = do
     Right x  -> return x
     Left err -> liftIO . ioError . userError $ "Deserialization error: " ++ err
 
-readDocumentData :: MonadIO m => Handle -> DocRecord -> m B.ByteString
+readDocumentData :: MonadIO m => Handle -> DocRecord -> m ByteString
 readDocumentData h r = withDataLock h $ \(DataState hnd) -> do
   liftIO . IO.hSeek hnd IO.AbsoluteSeek . fromIntegral $ docAddr r
   liftIO . B.hGet hnd . fromIntegral $ docSize r
 
-writeDocument :: MonadIO m => DocRecord -> B.ByteString -> IO.Handle -> m ()
+writeDocument :: MonadIO m => DocRecord -> ByteString -> IO.Handle -> m ()
 writeDocument r bs hnd = unless (docDel r) $ do
   liftIO . IO.hSeek hnd IO.AbsoluteSeek . fromIntegral $ docAddr r
   liftIO $ B.hPut hnd bs
@@ -806,7 +808,7 @@ findFirstDoc m t did = do
   if docDel r then Nothing
   else Just r
 
-getPage :: Int -> Int -> Int -> Map.IntMap Set.IntSet -> [Int]
+getPage :: Int -> Int -> Int -> IntMap IntSet -> [Int]
 getPage st sti p idx = go st p []
   where go st p acc =
           if p == 0 then acc
@@ -817,7 +819,7 @@ getPage st sti p idx = go st p []
                    if p' == 0 then ids ++ acc
                    else go n p' $ ids ++ acc
 
-getPage2 :: Int -> Int -> Set.IntSet -> (Int, [Int])
+getPage2 :: Int -> Int -> IntSet -> (Int, [Int])
 getPage2 st p idx = go st p []
   where go st p acc =
           if p == 0 then (0, acc)
