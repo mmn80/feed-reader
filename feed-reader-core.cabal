@@ -26,11 +26,13 @@ library
     filepath,
     directory,
     hashable,
+    psqueues,
     xml,
     feed
 
   exposed-modules:
     FeedReader.Types,
+    FeedReader.Cache,
     FeedReader.DocDB,
     FeedReader.DB,
     FeedReader.Convert
@@ -57,5 +59,6 @@ executable feeds-console
     pipes-safe,
     bytestring,
     cereal,
+    psqueues,
     xml,
     feed

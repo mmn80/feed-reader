@@ -64,7 +64,6 @@ import           Data.IntSet           (IntSet)
 import qualified Data.IntSet           as Set
 import qualified Data.List             as L
 import           Data.Maybe            (fromJust, fromMaybe)
-import qualified Data.Sequence         as Seq
 import           Data.Serialize        (Serialize (..), decode, encode)
 import           Data.Serialize.Get    (getWord32be)
 import           Data.Serialize.Put    (putWord32be)
@@ -73,6 +72,8 @@ import           Data.Time.Clock       (UTCTime)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import           Data.Typeable         (Proxy (..), Typeable, typeRep)
 import           Data.Word             (Word32, Word8)
+import           FeedReader.Cache      (LRUCache)
+import qualified FeedReader.Cache      as Cache
 import           Numeric               (showHex)
 import           Prelude               hiding (filter, lookup)
 import           System.Directory      (renameFile)
@@ -135,7 +136,9 @@ data MasterState = MasterState
   }
 
 data DataState = DataState
-  { dataHandle :: IO.Handle }
+  { dataHandle :: IO.Handle
+  , dataCache  :: LRUCache
+  }
 
 data GCState = IdleGC | PerformGC | KillGC deriving (Eq)
 
@@ -251,7 +254,10 @@ open lf df = do
         else return m
   let m'' = m' { gaps = updateGaps m' }
   mv <- liftIO $ newMVar m''
-  dv <- liftIO . newMVar $ DataState dfh
+  let d = DataState { dataHandle = dfh
+                    , dataCache = Cache.empty (1024 * 1024) (1024 * 1024 * 10) 60
+                    }
+  dv <- liftIO $ newMVar d
   um <- liftIO $ newMVar False
   gc <- liftIO $ newMVar IdleGC
   let h = Handle DBState { logFilePath  = logPath
@@ -270,7 +276,7 @@ close h = do
   withGC h . const $ return (KillGC, ())
   withUpdateMan h . const $ return (True, ())
   withMasterLock h $ \m -> IO.hClose (logHandle m)
-  withDataLock   h $ \(DataState d) -> IO.hClose d
+  withDataLock   h $ \(DataState d _) -> IO.hClose d
 
 performGC :: MonadIO m => Handle -> m ()
 performGC h = withGC h . const $ return (PerformGC, ())
@@ -790,7 +796,7 @@ readDocument h r = do
     Left err -> liftIO . ioError . userError $ "Deserialization error: " ++ err
 
 readDocumentData :: MonadIO m => Handle -> DocRecord -> m ByteString
-readDocumentData h r = withDataLock h $ \(DataState hnd) -> do
+readDocumentData h r = withDataLock h $ \(DataState hnd _) -> do
   liftIO . IO.hSeek hnd IO.AbsoluteSeek . fromIntegral $ docAddr r
   liftIO . B.hGet hnd . fromIntegral $ docSize r
 
@@ -839,7 +845,7 @@ updateManThread h w = do
       if null mbj then return True
       else do
         let (tid, rs) = fromJust mbj
-        withDataLock h $ \(DataState hnd) -> do
+        withDataLock h $ \(DataState hnd _) -> do
           let maxAddr = toInteger . maximum $ (\r -> docAddr r + docSize r) . fst <$> rs
           sz <- IO.hFileSize hnd
           when (sz < maxAddr + 1) $ do
@@ -925,12 +931,12 @@ gcThread h = do
                               , refIdx    = updateRefIdx  rIdx ncrs
                               }
           return (m, ())
-        withData h $ \(DataState hnd) -> do
+        withData h $ \(DataState hnd cache) -> do
           IO.hClose hnd
           renameFile dataPathNew dataPath
           hnd' <- IO.openBinaryFile dataPath IO.ReadWriteMode
           IO.hSetBuffering hnd' IO.NoBuffering
-          return (DataState hnd', ())
+          return (DataState hnd' cache, ())
         return (kill, ())
     let sgn' = if sgn == PerformGC then IdleGC else sgn
     return (sgn', sgn')
