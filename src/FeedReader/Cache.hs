@@ -65,14 +65,13 @@ trim now c =
                                          }
 
 insert :: Typeable a => UTCTime -> Int -> a -> Int -> LRUCache -> LRUCache
-insert now k a sz c = trim now $! c { cSize  = cSize c + sz -
-                                              if null mbv then 0
-                                              else dynSize . snd $ fromJust mbv
-                                 , cQueue = q
-                                 }
+insert now k a sz c = trim now $! c { cSize  = cSize c + sz - osz
+                                    , cQueue = q
+                                    }
   where (mbv, q) = PQ.insertView k now v (cQueue c)
+        osz = if null mbv then 0 else dynSize . snd $ fromJust mbv
         v = DynValue { dynValue = toDyn a
-                     , dynSize = sz
+                     , dynSize  = sz
                      }
 
 lookup :: Typeable a => UTCTime -> Int -> LRUCache -> Maybe (a, Int, LRUCache)

@@ -23,6 +23,10 @@ The handle is created by an `open` IO action, used for running transaction monad
 
 ### Master State
 
+`mainIdx` is the primary index, holding records' locations in the data file.
+`gaps` is used for fast allocation.
+`intIdx` and `refIdx` are inverted indexes.
+
 `intIdx` indexes columns that hold Int-convertible values, like Date/Time.
 It is used for range queries.
 
@@ -31,8 +35,9 @@ It is used for range queries.
 There can be multiple copies for the same main `PropID`, but sorted on different columns.
 Used for filter+range queries (filter of first prop, then range on second).
 
-The flag `keepTrans` is set during GC, so as to notify Update Manager to abort.
 `logPend` and `logComp` contain pending and completed transactions.
+The flag `keepTrans` is set during GC, to prevent Update Manager
+to clean completed transactions from `logComp`.
 
 ```haskell
 logHandle :: Handle
@@ -47,14 +52,23 @@ refIdx    :: PropID -> [(PropID, DID -> [DID])]
 
 ### Data State
 
+Cached deserialized records wrapped in `Data.Dynamic` are held in `dataCache`.
+This is a big win over just memory mapping the data file,
+since deserialization is by far the slowest part of reads.
+Oldest records are removed at maximum capacity, or based on a maximum age.
+In the latter case, records are removed only above a minimum capacity.
+The cache uses the data file address as key.
+
 ```haskell
 dataHandle :: Handle
+dataCache  :: LRUCache
 ```
 
 Data Files Format
 -----------------
 
-`TID`, `DID`, `Addr`, `PropID`, `Del` and `Size` are all aliases of `DBWord`, a newtype wrapper around `Word32`.
+`TID`, `DID`, `Addr`, `PropID`, `Del` and `Size` are all aliases of `DBWord`,
+a newtype wrapper around `Word32`.
 `DBWord` has a custom serializer that enforces Big Endianess.
 
 The pseudo-Haskell represents just a byte sequence in lexical order.
@@ -75,7 +89,8 @@ TRec = Pending TID DID Addr Size Del ValCount [(PropID, IntVal)] RefCount [(Prop
 
 ### Data File
 
-The data file is a sequence of `ByteString`s produced by the `Serialize` instance of user data types interspersed with gaps (old records orphaned by the GC).
+The data file is a sequence of `ByteString`s produced by the `Serialize` instance
+of user data types, interspersed with gaps (old record versions cleaned by GC).
 
 ```haskell
 recs :: [(ByteString, Gap)]
@@ -103,7 +118,7 @@ other transactions can check the DID list of pending & completed transactions
 and abort themselves in case of conflict.
 
 Read queries target a specific version, `TID <= tid`, and are not blocked by writes.
-Nevertheless, actual file access is under lock.
+Data access is under lock, but the cache will speed things up.
 
 See: https://en.wikipedia.org/wiki/Multiversion_concurrency_control
 
