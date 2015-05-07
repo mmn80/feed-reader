@@ -46,7 +46,10 @@ helpMessage = do
   yield "          : deletes a range of documents starting at k"
   yield "          : params as in 'range'"
   yield "  gc      : performs GC"
-  yield "  debug   : shows all internal state, including indexes"
+  yield "  debug i c"
+  yield "          : shows the internal state"
+  yield "          : i: if '1' will show all indexes"
+  yield "          : c: if '1' will show the contents of the cache"
   yield "  quit    : quits the program"
 
 processCommand h = do
@@ -61,7 +64,7 @@ processCommand h = do
     "del"       -> checkArgs 1 args h cmdDel
     "range_del" -> checkArgs 4 args h cmdRangeDel
     "gc"        -> checkArgs 0 args h cmdGC
-    "debug"     -> checkArgs 0 args h cmdDebug
+    "debug"     -> checkArgs 2 args h cmdDebug
     _           -> yield $ "Command '" ++ head args ++ "' not understood."
   processCommand h
 
@@ -292,7 +295,10 @@ cmdGC h _ = timed $ do
   liftBase $ DB.performGC h
   yield "Garbage collection job scheduled."
 
-cmdDebug h _ = timed $ liftBase (DB.debug h) >>= each . lines
+cmdDebug h args = timed $ do
+  let i = args !! 1 == "1"
+  let c = args !! 2 == "1"
+  liftBase (DB.debug h i c) >>= each . lines
 
 pipeLine h =
       P.stdinLn

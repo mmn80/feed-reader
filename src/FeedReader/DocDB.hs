@@ -255,7 +255,7 @@ open lf df = do
   let m'' = m' { gaps = updateGaps m' }
   mv <- liftIO $ newMVar m''
   let d = DataState { dataHandle = dfh
-                    , dataCache = Cache.empty (1024 * 1024) (1024 * 1024 * 10) 60
+                    , dataCache  = Cache.empty 0x100000 (0x100000 * 10) 60
                     }
   dv <- liftIO $ newMVar d
   um <- liftIO $ newMVar False
@@ -457,23 +457,26 @@ size p = Transaction $ do
   withMasterLock (transHandle t) $ \m -> return . fromMaybe 0 $
     (sum . map (Set.size . snd) . Map.toList) <$> Map.lookup (propI p) (intIdx m)
 
-debug :: MonadIO m => Handle -> m String
-debug h = do
-  mbb <- runTransaction h . Transaction $ do
-    t <- S.get
-    withMasterLock (transHandle t) $ \m -> return $
-      "logPos  : "   ++ show (logPos m) ++
-      "\nlogSize : " ++ show (logSize m) ++
-      "\nnewTID  : " ++ show (newTID m) ++
-      "\nlogPend :\n  " ++ show (logPend m) ++
-      "\nlogComp :\n  " ++ show (logComp m) ++
-      "\nmainIdx :\n  " ++ show (mainIdx m) ++
-      "\nintIdx  :\n  " ++ show (intIdx m) ++
-      "\nrefIdx  :\n  " ++ show (refIdx m) ++
-      "\ngaps    :\n  " ++ show (gaps m)
-  case mbb of
-    Nothing  -> return "Nothing"
-    Just mba -> return mba
+debug :: MonadIO m => Handle -> Bool -> Bool -> m String
+debug h sIdx sCache = do
+  mstr <- withMasterLock h $ \m -> return $
+    "logPos    : "   ++ show (logPos m) ++
+    "\nlogSize   : " ++ show (logSize m) ++
+    "\nnewTID    : " ++ show (newTID m) ++
+    "\nlogPend   :\n  " ++ show (logPend m) ++
+    "\nlogComp   :\n  " ++ show (logComp m) ++
+    if sIdx then
+    "\nmainIdx   :\n  " ++ show (mainIdx m) ++
+    "\nintIdx    :\n  " ++ show (intIdx m) ++
+    "\nrefIdx    :\n  " ++ show (refIdx m) ++
+    "\ngaps      :\n  " ++ show (gaps m)
+    else ""
+  dstr <- withDataLock h $ \d -> return $
+    "\ncacheSize : " ++ show (Cache.cSize $ dataCache d) ++
+    if sCache then
+    "\ncache     :\n  " ++ show (Cache.cQueue $ dataCache d)
+    else ""
+  return $ mstr ++ dstr
 
 ------------------------------------------------------------------------------
 -- Internal

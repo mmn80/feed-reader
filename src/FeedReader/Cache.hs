@@ -14,7 +14,7 @@
 ----------------------------------------------------------------------------
 
 module FeedReader.Cache
-  ( LRUCache
+  ( LRUCache (..)
   , empty
   , insert
   , lookup
