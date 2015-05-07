@@ -68,7 +68,7 @@ import           Data.Serialize        (Serialize (..), decode, encode)
 import           Data.Serialize.Get    (getWord32be)
 import           Data.Serialize.Put    (putWord32be)
 import           Data.String           (IsString (..))
-import           Data.Time.Clock       (UTCTime)
+import           Data.Time.Clock       (UTCTime, getCurrentTime)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import           Data.Typeable         (Proxy (..), Typeable, typeRep)
 import           Data.Word             (Word32, Word8)
@@ -137,7 +137,7 @@ data MasterState = MasterState
 
 data DataState = DataState
   { dataHandle :: IO.Handle
-  , dataCache  :: LRUCache
+  , dataCache  :: !LRUCache
   }
 
 data GCState = IdleGC | PerformGC | KillGC deriving (Eq)
@@ -799,9 +799,16 @@ readDocument h r = do
     Left err -> liftIO . ioError . userError $ "Deserialization error: " ++ err
 
 readDocumentData :: MonadIO m => Handle -> DocRecord -> m ByteString
-readDocumentData h r = withDataLock h $ \(DataState hnd _) -> do
-  liftIO . IO.hSeek hnd IO.AbsoluteSeek . fromIntegral $ docAddr r
-  liftIO . B.hGet hnd . fromIntegral $ docSize r
+readDocumentData h r = withData h $ \(DataState hnd cache) -> do
+  now <- liftIO getCurrentTime
+  let k = toInt $ docAddr r
+  let mbd = Cache.lookup now k cache
+  if null mbd then do
+    liftIO . IO.hSeek hnd IO.AbsoluteSeek . fromIntegral $ docAddr r
+    bs <- liftIO . B.hGet hnd . fromIntegral $ docSize r
+    return (DataState hnd $ Cache.insert now k bs cache, bs)
+  else let (bs, cache') = fromJust mbd in
+    return (DataState hnd cache', bs)
 
 writeDocument :: MonadIO m => DocRecord -> ByteString -> IO.Handle -> m ()
 writeDocument r bs hnd = unless (docDel r) $ do
@@ -848,13 +855,16 @@ updateManThread h w = do
       if null mbj then return True
       else do
         let (tid, rs) = fromJust mbj
-        withDataLock h $ \(DataState hnd _) -> do
+        withData h $ \(DataState hnd cache) -> do
           let maxAddr = toInteger . maximum $ (\r -> docAddr r + docSize r) . fst <$> rs
           sz <- IO.hFileSize hnd
           when (sz < maxAddr + 1) $ do
             let nsz = max (maxAddr + 1) $ sz + 4096
             IO.hSetFileSize hnd nsz
           forM_ rs $ \(r, bs) -> writeDocument r bs hnd
+          now <- getCurrentTime
+          let cache' = L.foldl' (updateCache now) cache rs
+          return (DataState hnd cache', ())
         withMaster h $ \m -> do
           let rs' = fst <$> rs
           let trec = Completed $ fromIntegral tid
@@ -883,6 +893,10 @@ updateManThread h w = do
                        then Map.empty else lgc
                 lgc' = if keep || not (null lgp')
                        then Map.insert tid ors lc else lc
+
+        updateCache now c (r, bs) = if docDel r then Cache.delete k c
+                                    else Cache.insert now k bs c
+          where k = toInt $ docAddr r
 
 gcThread :: Handle -> IO ()
 gcThread h = do

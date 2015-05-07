@@ -18,6 +18,7 @@ module FeedReader.Cache
   , empty
   , insert
   , lookup
+  , delete
   , trim
   ) where
 
@@ -73,3 +74,11 @@ lookup now k c =
       where !c' = trim now $ c { cQueue = q }
   where f Nothing       = (Nothing, Nothing)
         f (Just (_, v)) = (Just v,  Just (now, v))
+
+delete :: Int -> LRUCache -> LRUCache
+delete k c =
+  case PQ.lookup k (cQueue c) of
+    Nothing     -> c
+    Just (p, v) -> c { cSize  = cSize c - BS.length v
+                     , cQueue = PQ.delete k (cQueue c)
+                     }
