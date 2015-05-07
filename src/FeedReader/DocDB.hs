@@ -791,24 +791,24 @@ checkRefProp p@(Property (pid, _)) =
   then error $ "Invalid ref property name: " ++ show p
   else pid
 
-readDocument :: (Serialize a, MonadIO m) => Handle -> DocRecord -> m a
-readDocument h r = do
-  bs <- readDocumentData h r
-  case decode bs of
-    Right x  -> return x
-    Left err -> liftIO . ioError . userError $ "Deserialization error: " ++ err
+readDocument :: (Typeable a, Serialize a, MonadIO m) => Handle -> DocRecord -> m a
+readDocument h r =
+  withData h $ \(DataState hnd cache) -> do
+    now <- getCurrentTime
+    let k = toInt $ docAddr r
+    case Cache.lookup now k cache of
+      Nothing -> do
+        bs <- readDocumentFromFile hnd r
+        a <- case decode bs of
+          Right a  -> return a
+          Left err -> liftIO . ioError . userError $ "Deserialization error: " ++ err
+        return (DataState hnd $ Cache.insert now k a (B.length bs) cache, a)
+      Just (a, _, cache') -> return (DataState hnd cache', a)
 
-readDocumentData :: MonadIO m => Handle -> DocRecord -> m ByteString
-readDocumentData h r = withData h $ \(DataState hnd cache) -> do
-  now <- liftIO getCurrentTime
-  let k = toInt $ docAddr r
-  let mbd = Cache.lookup now k cache
-  if null mbd then do
-    liftIO . IO.hSeek hnd IO.AbsoluteSeek . fromIntegral $ docAddr r
-    bs <- liftIO . B.hGet hnd . fromIntegral $ docSize r
-    return (DataState hnd $ Cache.insert now k bs cache, bs)
-  else let (bs, cache') = fromJust mbd in
-    return (DataState hnd cache', bs)
+readDocumentFromFile :: MonadIO m => IO.Handle -> DocRecord -> m ByteString
+readDocumentFromFile hnd r = do
+  liftIO . IO.hSeek hnd IO.AbsoluteSeek . fromIntegral $ docAddr r
+  liftIO . B.hGet hnd . fromIntegral $ docSize r
 
 writeDocument :: MonadIO m => DocRecord -> ByteString -> IO.Handle -> m ()
 writeDocument r bs hnd = unless (docDel r) $ do
@@ -862,8 +862,8 @@ updateManThread h w = do
             let nsz = max (maxAddr + 1) $ sz + 4096
             IO.hSetFileSize hnd nsz
           forM_ rs $ \(r, bs) -> writeDocument r bs hnd
-          now <- getCurrentTime
-          let cache' = L.foldl' (updateCache now) cache rs
+          let cache' = L.foldl' (\c (r, _) -> Cache.delete (toInt $ docAddr r) c)
+                         cache rs
           return (DataState hnd cache', ())
         withMaster h $ \m -> do
           let rs' = fst <$> rs
@@ -893,10 +893,6 @@ updateManThread h w = do
                        then Map.empty else lgc
                 lgc' = if keep || not (null lgp')
                        then Map.insert tid ors lc else lc
-
-        updateCache now c (r, bs) = if docDel r then Cache.delete k c
-                                    else Cache.insert now k bs c
-          where k = toInt $ docAddr r
 
 gcThread :: Handle -> IO ()
 gcThread h = do
@@ -975,7 +971,7 @@ gcThread h = do
     writeData rs sz h hnd = do
       IO.hSetFileSize hnd $ fromIntegral sz
       forM_ rs $ \(r, oldr) -> do
-        bs <- readDocumentData h oldr
+        bs <- withDataLock h $ \(DataState hnd _) -> readDocumentFromFile hnd oldr
         writeDocument r bs hnd
 
     realloc st = L.foldl' f ([], st)

@@ -14,7 +14,8 @@
 ----------------------------------------------------------------------------
 
 module FeedReader.Cache
-  ( LRUCache (..)
+  ( DynValue (..)
+  , LRUCache (..)
   , empty
   , insert
   , lookup
@@ -22,22 +23,27 @@ module FeedReader.Cache
   , trim
   ) where
 
-import           Data.ByteString (ByteString)
-import qualified Data.ByteString as BS
+import           Data.Dynamic    (Dynamic, fromDynamic, toDyn)
 import           Data.Int        (Int64)
 import           Data.IntPSQ     (IntPSQ)
 import qualified Data.IntPSQ     as PQ
 import           Data.Maybe      (fromJust)
-import           Data.Time.Clock (UTCTime, NominalDiffTime, diffUTCTime)
+import           Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime)
+import           Data.Typeable   (Typeable)
 import           Prelude         hiding (lookup)
+
+data DynValue = DynValue
+  { dynValue :: !Dynamic
+  , dynSize  :: !Int
+  } deriving (Show)
 
 data LRUCache = LRUCache
   { cMinCap :: !Int
   , cMaxCap :: !Int
   , cMaxAge :: !NominalDiffTime
   , cSize   :: !Int
-  , cQueue  :: !(IntPSQ UTCTime ByteString)
-  } deriving (Eq)
+  , cQueue  :: !(IntPSQ UTCTime DynValue)
+  }
 
 empty :: Int -> Int -> NominalDiffTime -> LRUCache
 empty minc maxc age = LRUCache { cMinCap = minc
@@ -54,23 +60,28 @@ trim now c =
     Nothing        -> c
     Just (k, p, v) -> if (cSize c < cMaxCap c) && (diffUTCTime now p < cMaxAge c)
                       then c
-                      else trim now $! c { cSize  = cSize c - BS.length v
+                      else trim now $! c { cSize  = cSize c - dynSize v
                                          , cQueue = PQ.deleteMin (cQueue c)
                                          }
 
-insert :: UTCTime -> Int -> ByteString -> LRUCache -> LRUCache
-insert now k v c = trim now $! c { cSize  = cSize c + BS.length v -
+insert :: Typeable a => UTCTime -> Int -> a -> Int -> LRUCache -> LRUCache
+insert now k a sz c = trim now $! c { cSize  = cSize c + sz -
                                               if null mbv then 0
-                                              else BS.length . snd $ fromJust mbv
+                                              else dynSize . snd $ fromJust mbv
                                  , cQueue = q
                                  }
   where (mbv, q) = PQ.insertView k now v (cQueue c)
+        v = DynValue { dynValue = toDyn a
+                     , dynSize = sz
+                     }
 
-lookup :: UTCTime -> Int -> LRUCache -> Maybe (ByteString, LRUCache)
+lookup :: Typeable a => UTCTime -> Int -> LRUCache -> Maybe (a, Int, LRUCache)
 lookup now k c =
   case PQ.alter f k (cQueue c) of
     (Nothing, _) -> Nothing
-    (Just v,  q) -> Just (v, c')
+    (Just v,  q) -> case fromDynamic $ dynValue v of
+                      Nothing -> Nothing
+                      Just a  -> Just (a, dynSize v, c')
       where !c' = trim now $ c { cQueue = q }
   where f Nothing       = (Nothing, Nothing)
         f (Just (_, v)) = (Just v,  Just (now, v))
@@ -79,6 +90,6 @@ delete :: Int -> LRUCache -> LRUCache
 delete k c =
   case PQ.lookup k (cQueue c) of
     Nothing     -> c
-    Just (p, v) -> c { cSize  = cSize c - BS.length v
+    Just (p, v) -> c { cSize  = cSize c - dynSize v
                      , cQueue = PQ.delete k (cQueue c)
                      }
