@@ -88,7 +88,7 @@ instance Serialize DBWord where
   get = DBWord <$> getWord32be
 
 instance Show DBWord where
-  show (DBWord d) = show d
+  showsPrec p = showsPrec p . unDBWord
 
 type Addr     = DBWord
 type TID      = DBWord
@@ -161,7 +161,7 @@ data TRec = Pending DocRecord | Completed TID
 newtype Handle = Handle { unHandle :: DBState } deriving (Eq)
 
 instance Show Handle where
-  show (Handle s) = logFilePath s
+  showsPrec p = showsPrec p . logFilePath . unHandle
 
 data TransactionState = TransactionState
   { transHandle     :: Handle
@@ -184,7 +184,8 @@ instance Eq (Property a) where
   Property (pid, _) == Property (pid', _) = pid == pid'
 
 instance Show (Property a) where
-  show (Property (pid, s)) = s ++ "[" ++ show pid ++ "]"
+  showsPrec p (Property (pid, s)) = showsPrec p s . showsPrec p "[" .
+    showsPrec p pid . showsPrec p "]"
 
 instance Typeable a => IsString (Property a) where
   fromString s = Property (pid, s)
@@ -195,7 +196,8 @@ instance Typeable a => IsString (Property a) where
 newtype IntVal = IntVal { unIntVal :: DID }
   deriving (Eq, Ord, Bounded, Num)
 
-instance Show (IntVal) where show (IntVal k) =  "0x" ++ showHex k ""
+instance Show (IntVal) where
+  showsPrec p (IntVal k) =  showsPrec p "0x" . showHex k
 
 data IntValList a = forall b. IntValList { intPropName :: Property a
                                          , intPropVals :: [IntVal] }
@@ -203,7 +205,8 @@ data IntValList a = forall b. IntValList { intPropName :: Property a
 newtype DocID a = DocID { unDocID :: DID }
   deriving (Eq, Ord, Bounded, Serialize)
 
-instance Show (DocID a) where show (DocID k) = "0x" ++ showHex k ""
+instance Show (DocID a) where
+  showsPrec p (DocID k) = showsPrec p "0x" . showHex k
 
 data DocRefList a = forall b. DocRefList { docPropName :: Property a
                                          , docPropVals :: [DocID b] }
@@ -460,23 +463,24 @@ size p = Transaction $ do
 debug :: MonadIO m => Handle -> Bool -> Bool -> m String
 debug h sIdx sCache = do
   mstr <- withMasterLock h $ \m -> return $
-    "logPos    : "   ++ show (logPos m) ++
-    "\nlogSize   : " ++ show (logSize m) ++
-    "\nnewTID    : " ++ show (newTID m) ++
-    "\nlogPend   :\n  " ++ show (logPend m) ++
-    "\nlogComp   :\n  " ++ show (logComp m) ++
+    showsH "logPos    : " (logPos m) .
+    showsH "\nlogSize   : " (logSize m) .
+    showsH "\nnewTID    : " (newTID m) .
+    showsH "\nlogPend   :\n  " (logPend m) .
+    showsH "\nlogComp   :\n  " (logComp m) .
     if sIdx then
-    "\nmainIdx   :\n  " ++ show (mainIdx m) ++
-    "\nintIdx    :\n  " ++ show (intIdx m) ++
-    "\nrefIdx    :\n  " ++ show (refIdx m) ++
-    "\ngaps      :\n  " ++ show (gaps m)
-    else ""
+    showsH "\nmainIdx   :\n  " (mainIdx m) .
+    showsH "\nintIdx    :\n  " (intIdx m) .
+    showsH "\nrefIdx    :\n  " (refIdx m) .
+    showsH "\ngaps      :\n  " (gaps m)
+    else showString ""
   dstr <- withDataLock h $ \d -> return $
-    "\ncacheSize : " ++ show (Cache.cSize $ dataCache d) ++
+    showsH "\ncacheSize : " (Cache.cSize $ dataCache d) .
     if sCache then
-    "\ncache     :\n  " ++ show (Cache.cQueue $ dataCache d)
-    else ""
-  return $ mstr ++ dstr
+    showsH "\ncache     :\n  " (Cache.cQueue $ dataCache d)
+    else showString ""
+  return $ mstr . dstr $ ""
+  where showsH s a = showString s . shows a
 
 ------------------------------------------------------------------------------
 -- Internal

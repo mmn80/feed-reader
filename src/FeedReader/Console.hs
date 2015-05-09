@@ -70,8 +70,9 @@ processCommand h = do
 
 checkArgs n args h f =
   if n == length args - 1 then f h args
-  else yield $ "Command '" ++ head args ++ "' requires " ++ show n ++ " arguments\
-               \ but " ++ show (length args - 1) ++ " were supplied."
+  else yields' "Command '" $ showString (head args) . showString "' requires " .
+         shows n . showString " arguments but " .
+         shows (length args - 1) . showString " were supplied."
 
 ------------------------------------------------------------------------------
 -- Random Utilities
@@ -127,18 +128,21 @@ randomItem f =
 -- Command Functions
 ------------------------------------------------------------------------------
 
+yields sf = yield $ sf ""
+yields' s sf = yields $ showString s . sf
+
 timed f = do
   t0 <- liftBase getCurrentTime
   f
   t1 <- liftBase getCurrentTime
-  yield $ "Command: " ++ show (DB.diffMs t0 t1) ++ " ms"
+  yields' "Command: " $ shows (DB.diffMs t0 t1) . showString " ms"
 
 cmdStats h _ = timed $ do
   s <- liftBase $ DB.getStats h
-  yield $ "Category count: " ++ show (DB.countCats s)
-  yield $ "Feed count    : " ++ show (DB.countFeeds s)
-  yield $ "Person count  : " ++ show (DB.countPersons s)
-  yield $ "Entry count   : " ++ show (DB.countItems s)
+  yields' "Category count: " $ shows (DB.countCats s)
+  yields' "Feed count    : " $ shows (DB.countFeeds s)
+  yields' "Person count  : " $ shows (DB.countPersons s)
+  yields' "Entry count   : " $ shows (DB.countItems s)
 
 type LookupRet a = IO (Maybe (DocID a, a))
 
@@ -148,7 +152,7 @@ cmdGet h args = timed $ do
   let k = read kstr :: Int
   let out = \case
               Just s -> each $ lines s
-              _      -> yield $ "No record found with ID = " ++ kstr
+              _      -> yields' "No record found with ID = " $ showString kstr
   case t of
     "cat"    -> liftBase (DB.runLookup h (fromIntegral k) :: LookupRet Cat)
                   >>= out . fmap (show . snd)
@@ -178,34 +182,36 @@ cmdPage h args s k o = do
   let p = (read $ args !! 1) :: Int
   let t = args !! 2
   let c = args !! 3
-  let formatK k i = i ++ replicate (k - length i) ' '
-  let format = formatK 12
-  let sCat (iid, i) = format (show iid) ++ show (catName i)
-  let sFeed (iid, i) = format (show iid) ++
-                       format (show $ feedCatID i) ++
-                       show (feedUpdated i)
-  let sPerson (iid, i) = format (show iid) ++ show (personName i)
-  let sItem (iid, i) = format (show iid) ++
-                       format (show $ itemFeedID i) ++
-                       formatK 25 (show $ itemUpdated i) ++
-                       show (itemPublished i)
+  let formatsK k i = i . showString (replicate (k - length (i "")) ' ')
+  let formats = formatsK 12
+  let format = formats . showString
+  let sCat (iid, i) = formats (shows iid) . shows (catName i) $ ""
+  let sFeed (iid, i) = formats (shows iid) .
+                       formats (shows $ feedCatID i) .
+                       shows (feedUpdated i) $ ""
+  let sPerson (iid, i) = formats (shows iid) . shows (personName i) $ ""
+  let sItem (iid, i) = formats (shows iid) .
+                       formats (shows $ itemFeedID i) .
+                       formatsK 25 (shows $ itemUpdated i) .
+                       shows (itemPublished i) $ ""
   now <- liftBase getCurrentTime
   case t of
     "cat"    -> do
       as <- page h c p s k o now "Name"
-      yield $ format "ID" ++ "Name"
+      yields $ format "ID" . showString "Name"
       each $ sCat <$> as
     "feed"   -> do
       as <- page h c p s k o now "Updated"
-      yield $ format "ID" ++ format "CatID" ++ "Updated"
+      yields $ format "ID" . format "CatID" . showString "Updated"
       each $ sFeed <$> as
     "person" -> do
       as <- page h c p s k o now "Name"
-      yield $ format "ID" ++ "Name"
+      yields $ format "ID" . showString "Name"
       each $ sPerson <$> as
     "item"   -> do
       as <- page h c p s k o now "Updated"
-      yield $ format "ID" ++ format "FeedID" ++ formatK 25 "Updated" ++ "Published"
+      yields $ format "ID" . format "FeedID" .
+        formatsK 25 (showString "Updated") . showString "Published"
       each $ sItem <$> as
     _        -> yield $ t ++ " is not a valid table name."
 
@@ -226,10 +232,10 @@ showIDs mbs = do
   let ids = clean mbs
   let l = length ids
   let (prefix, suffix) = if l > 10
-                         then ("First 10 IDs: ", "...")
-                         else ("IDs: ", ".")
-  yield $ show l ++ " records generated."
-  yield $ prefix ++ intercalate ", " (take 10 ids) ++ suffix
+                         then (showString "First 10 IDs: ", showString "...")
+                         else (showString "IDs: ", showString ".")
+  yields $ shows l . showString " records generated."
+  yields $ prefix . showString (intercalate ", " (take 10 ids)) . suffix
 
 cmdAdd h args = timed $ do
   let n = (read $ args !! 1) :: Int
@@ -289,7 +295,7 @@ cmdRangeDel h args = timed $ do
           _        -> do
                         yield $ t ++ " is not a valid table name."
                         return 0
-  yield $ show sz ++ " records deleted."
+  yields $ shows sz . showString " records deleted."
 
 cmdGC h _ = timed $ do
   liftBase $ DB.performGC h
