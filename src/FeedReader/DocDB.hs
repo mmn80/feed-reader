@@ -184,8 +184,8 @@ instance Eq (Property a) where
   Property (pid, _) == Property (pid', _) = pid == pid'
 
 instance Show (Property a) where
-  showsPrec p (Property (pid, s)) = showsPrec p s . showsPrec p "[" .
-    showsPrec p pid . showsPrec p "]"
+  showsPrec p (Property (pid, s)) = showString s . showString "[" .
+    showsPrec p pid . showString "]"
 
 instance Typeable a => IsString (Property a) where
   fromString s = Property (pid, s)
@@ -197,7 +197,7 @@ newtype IntVal = IntVal { unIntVal :: DID }
   deriving (Eq, Ord, Bounded, Num)
 
 instance Show (IntVal) where
-  showsPrec p (IntVal k) =  showsPrec p "0x" . showHex k
+  showsPrec _ (IntVal k) =  showString "0x" . showHex k
 
 data IntValList a = forall b. IntValList { intPropName :: Property a
                                          , intPropVals :: [IntVal] }
@@ -206,7 +206,7 @@ newtype DocID a = DocID { unDocID :: DID }
   deriving (Eq, Ord, Bounded, Serialize)
 
 instance Show (DocID a) where
-  showsPrec p (DocID k) = showsPrec p "0x" . showHex k
+  showsPrec _ (DocID k) = showString "0x" . showHex k
 
 data DocRefList a = forall b. DocRefList { docPropName :: Property a
                                          , docPropVals :: [DocID b] }
@@ -540,7 +540,7 @@ readWord h = do
   bs <- liftIO $ B.hGet h wordSize
   case decode bs of
     Right x  -> return x
-    Left err -> logError h err
+    Left err -> logError h $ showString err
 
 writeWord :: MonadIO m => IO.Handle -> DBWord -> m ()
 writeWord h w = liftIO . B.hPut h $ encode w
@@ -560,10 +560,11 @@ writeLogPos h p = do
   liftIO $ IO.hSeek h IO.AbsoluteSeek 0
   liftIO $ B.hPut h $ encode p
 
-logError :: MonadIO m => IO.Handle -> String -> m a
+logError :: MonadIO m => IO.Handle -> ShowS -> m a
 logError h err = do
   pos <- liftIO $ IO.hTell h
-  liftIO . ioError . userError $ "Corrupted log. " ++ err ++ " Position: " ++ show pos
+  liftIO . ioError . userError . showString "Corrupted log. " . err .
+    showString " Position: " . shows pos $ ""
 
 mkNewTID :: MonadIO m => Handle -> m TID
 mkNewTID h = withMaster h $ \m -> return (m { newTID = newTID m + 1 }, newTID m)
@@ -638,7 +639,8 @@ updateGaps m = addTail . L.foldl' f (Map.empty, 0) $ L.sortOn docAddr firstD
 alloc :: IntMap [Addr] -> Size -> (Addr, IntMap [Addr])
 alloc gs s = let sz = toInt s in
   case Map.lookupGE sz gs of
-    Nothing -> error $ "DB full, no more gaps of requested size: " ++ show sz ++ " !"
+    Nothing -> error . showString "DB full, no more gaps of requested size: " .
+                 shows sz $ " !"
     Just (gsz, a:as) ->
       if delta == 0 then (a, gs')
       else (a, addGap (fromIntegral delta) (a + fromIntegral sz) gs')
@@ -679,8 +681,8 @@ readLog m pos = do
                                   , logPend = Map.insert tid ((r, B.empty):rs) l }
           Completed tid ->
             case Map.lookup (toInt tid) l of
-              Nothing -> logError h $ "Completed TID:" ++ show tid ++
-                " found but transaction did not previously occur."
+              Nothing -> logError h $ showString "Completed TID:" . shows tid .
+                showString " found but transaction did not previously occur."
               Just rps -> let rs = fst <$> rps in
                           return m { newTID  = max (newTID m) (tid + 1)
                                    , logPend = Map.delete (toInt tid) l
@@ -717,8 +719,8 @@ readLogTRec h = do
       dlb <- case toInt del of
                x | x == truTag  -> return True
                x | x == flsTag -> return False
-               _ -> logError h $ "True ('T') or False ('F') tag expected but " ++
-                      show del ++ " found."
+               _ -> logError h $ showString "True ('T') or False ('F') tag expected but " .
+                      shows del . showString " found."
       irfc <- readWord h
       irfs <- replicateM (toInt irfc) $ do
                 rpid <- readWord h
@@ -744,8 +746,8 @@ readLogTRec h = do
     x | x == cmpTag -> do
       tid <- readWord h
       return $ Completed tid
-    _ -> logError h $ "Pending ('p') or Completed ('c') tag expected but " ++
-           show tag ++ " found."
+    _ -> logError h $ showString "Pending ('p') or Completed ('c') tag expected but " .
+           shows tag . showString " found."
 
 writeLogTRec :: MonadIO m => IO.Handle -> TRec -> m ()
 writeLogTRec h t =
@@ -786,13 +788,13 @@ propR = toInt . checkRefProp
 checkIntProp :: forall a. Document a => Property a -> PropID
 checkIntProp p@(Property (pid, _)) =
   if p `notElem` (getIntProps :: [Property a])
-  then error $ "Invalid int property name: " ++ show p
+  then error . showString "Invalid int property name: " . shows p $ ""
   else pid
 
 checkRefProp :: forall a. Document a => Property a -> PropID
 checkRefProp p@(Property (pid, _)) =
   if p `notElem` (getRefProps :: [Property a])
-  then error $ "Invalid ref property name: " ++ show p
+  then error . showString "Invalid ref property name: " . shows p $ ""
   else pid
 
 readDocument :: (Typeable a, Serialize a, MonadIO m) => Handle -> DocRecord -> m a
@@ -805,7 +807,8 @@ readDocument h r =
         bs <- readDocumentFromFile hnd r
         a <- case decode bs of
           Right a  -> return a
-          Left err -> liftIO . ioError . userError $ "Deserialization error: " ++ err
+          Left err -> liftIO . ioError . userError .
+                        showString "Deserialization error: " $ err
         return (DataState hnd $ Cache.insert now k a (B.length bs) cache, a)
       Just (a, _, cache') -> return (DataState hnd cache', a)
 

@@ -28,10 +28,11 @@ eContent2DB = \case
   A.TextContent       s -> Text s
   A.HTMLContent       s -> HTML s
   A.XHTMLContent      e -> XHTML $ show e
-  A.MixedContent   j cs -> Text $ fromMaybe "" j ++ foldMap show cs
-  A.ExternalContent j u -> Text $ (if null j then ""
-                                      else "MediaType: " ++ fromJust j ++ "\n")
-                                      ++ "URL: " ++ u
+  A.MixedContent   j cs -> Text $ foldl (flip shows) (fromMaybe "" j) cs
+  A.ExternalContent j u -> Text .
+    (if null j then showString ""
+     else showString "MediaType: " . showString (fromJust j) . showString "\n")
+    . showString "URL: " $ u
 
 tryEContent2DB :: Maybe A.EntryContent -> Content
 tryEContent2DB c = eContent2DB $ fromMaybe (A.TextContent "") c

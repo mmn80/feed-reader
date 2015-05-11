@@ -65,7 +65,8 @@ processCommand h = do
     "range_del" -> checkArgs 4 args h cmdRangeDel
     "gc"        -> checkArgs 0 args h cmdGC
     "debug"     -> checkArgs 2 args h cmdDebug
-    _           -> yield $ "Command '" ++ head args ++ "' not understood."
+    _           -> yield . showString "Command '" . showString (head args) $
+                     "' not understood."
   processCommand h
 
 checkArgs n args h f =
@@ -162,7 +163,7 @@ cmdGet h args = timed $ do
                   >>= out . fmap (show . snd)
     "item"   -> liftBase (DB.runLookup h (fromIntegral k) :: LookupRet Item)
                   >>= out . fmap (show . snd)
-    _        -> yield $ t ++ " is not a valid table name."
+    _        -> yield . shows t $ " is not a valid table name."
 
 page h c p s k o now df = liftBase $
   if k == 0
@@ -185,11 +186,11 @@ cmdPage h args s k o = do
   let formatsK k i = i . showString (replicate (k - length (i "")) ' ')
   let formats = formatsK 12
   let format = formats . showString
-  let sCat (iid, i) = formats (shows iid) . shows (catName i) $ ""
+  let sCat (iid, i) = formats (shows iid) . showString (catName i) $ ""
   let sFeed (iid, i) = formats (shows iid) .
                        formats (shows $ feedCatID i) .
                        shows (feedUpdated i) $ ""
-  let sPerson (iid, i) = formats (shows iid) . shows (personName i) $ ""
+  let sPerson (iid, i) = formats (shows iid) . showString (personName i) $ ""
   let sItem (iid, i) = formats (shows iid) .
                        formats (shows $ itemFeedID i) .
                        formatsK 25 (shows $ itemUpdated i) .
@@ -213,7 +214,7 @@ cmdPage h args s k o = do
       yields $ format "ID" . format "FeedID" .
         formatsK 25 (showString "Updated") . showString "Published"
       each $ sItem <$> as
-    _        -> yield $ t ++ " is not a valid table name."
+    _        -> yield . shows t $ " is not a valid table name."
 
 cmdRange h args = timed $ do
   let s = args !! 4
@@ -267,7 +268,7 @@ cmdAdd h args = timed $ do
         yield
       showIDs is
       return ()
-    _      -> yield $ t ++ " is not a valid table name."
+    _      -> yield . shows t $ " is not a valid table name."
 
 cmdDel h args = timed $ do
   let k = (read $ args !! 1) :: Int
@@ -293,7 +294,7 @@ cmdRangeDel h args = timed $ do
           "person" -> DB.runDeleteRange h k (df c "Name"    :: Property Person) p
           "item"   -> DB.runDeleteRange h k (df c "Updated" :: Property Item  ) p
           _        -> do
-                        yield $ t ++ " is not a valid table name."
+                        yield . shows t $ " is not a valid table name."
                         return 0
   yields $ shows sz . showString " records deleted."
 
@@ -311,7 +312,7 @@ pipeLine h =
   >-> P.takeWhile (/= "quit")
   >-> processCommand h
   >-> introMessage
-  >-> P.map ("  " ++)
+  >-> P.map (showString "  ")
   >-> P.stdoutLn
 
 main :: IO ()
@@ -320,7 +321,7 @@ main = runSafeT . runEffect $ bracket
         putStrLn "  Opening DB..."
         h <- DB.open (Just "feeds.log") (Just "feeds.dat")
         t1 <- getCurrentTime
-        putStrLn $ "  DB opened in " ++ show (DB.diffMs t0 t1) ++ " ms."
+        putStrLn . showString "  DB opened in " . shows (DB.diffMs t0 t1) $ " ms."
         return h )
     (\h -> do
         putStrLn "  Closing DB..."
