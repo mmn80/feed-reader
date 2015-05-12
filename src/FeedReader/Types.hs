@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveAnyClass    #-}
 {-# LANGUAGE DeriveGeneric     #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -51,9 +52,7 @@ type Language = String
 type Tag      = String
 
 data Content  = Text String | HTML String | XHTML String
-  deriving (Show, Generic)
-
-instance Serialize Content
+  deriving (Show, Generic, Serialize)
 
 getContentText (Text s) = s
 getContentText (HTML s) = s
@@ -61,9 +60,7 @@ getContentText (XHTML s) = s
 
 data Cat = Cat
   { catName :: String
-  } deriving (Show, Generic)
-
-instance Serialize Cat
+  } deriving (Show, Generic, Serialize)
 
 instance Document Cat where
   getIntProps = [ "Name" ]
@@ -73,9 +70,7 @@ data Person = Person
   { personName  :: String
   , personURL   :: URL
   , personEmail :: String
-  } deriving (Show, Generic)
-
-instance Serialize Person
+  } deriving (Show, Generic, Serialize)
 
 instance Document Person where
   getIntProps = [ "Name" ]
@@ -88,9 +83,7 @@ data Image = Image
   , imageLink        :: URL
   , imageWidth       :: Int
   , imageHeight      :: Int
-  } deriving (Show, Generic)
-
-instance Serialize Image
+  } deriving (Show, Generic, Serialize)
 
 data Feed = Feed
   { feedCatID        :: DocID Cat
@@ -103,9 +96,7 @@ data Feed = Feed
   , feedRights       :: Content
   , feedImage        :: Maybe Image
   , feedUpdated      :: UTCTime
-  } deriving (Show, Generic)
-
-instance Serialize Feed
+  } deriving (Show, Generic, Serialize)
 
 instance Document Feed where
   getIntProps = [ "Updated", "Title" ]
@@ -130,13 +121,11 @@ data Item = Item
   , itemContent      :: Content
   , itemPublished    :: UTCTime
   , itemUpdated      :: UTCTime
-  } deriving (Show, Generic)
+  } deriving (Show, Generic, Serialize)
 
 instance Serialize UTCTime where
   put t = put . toRational $ utcTimeToPOSIXSeconds t
   get = liftM (posixSecondsToUTCTime . fromRational) get
-
-instance Serialize Item
 
 instance Document Item where
   getIntProps = [ "Updated", "Published" ]

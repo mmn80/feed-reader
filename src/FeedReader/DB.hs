@@ -17,6 +17,7 @@ module FeedReader.DB
 
 import           Control.Monad       (forM_)
 import           Control.Monad.Trans (MonadIO (liftIO))
+import qualified Data.List           as L
 import           Data.Maybe          (fromJust, fromMaybe)
 import           Data.Time.Clock     (getCurrentTime)
 import           FeedReader.DocDB
@@ -73,7 +74,7 @@ getStats h = fromMaybe (DBStats 0 0 0 0) <$>
     <*> size ("Updated" :: Property Item))
 
 clean :: [Maybe a] -> [a]
-clean as = [ fromJust x | x <- as, not $ null x ]
+clean = map fromJust . L.filter (not . null)
 
 addItemConv :: (MonadIO m, ToItem i) => Handle -> i -> DocID Feed -> URL -> m Item
 addItemConv h it fid u = do
