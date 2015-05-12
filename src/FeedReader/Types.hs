@@ -42,7 +42,7 @@ import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
 import           Data.Time.Format      (defaultTimeLocale, iso8601DateFormat,
                                         parseTimeM, rfc822DateFormat)
-import           FeedReader.DocDB      (DocID, DocRefList (..), Document (..),
+import           FeedReader.DocDB      (DocID, Document (..),
                                         IntValList (..), string2IntVal,
                                         utcTime2IntVal)
 import           GHC.Generics          (Generic)
@@ -103,11 +103,11 @@ instance Document Feed where
   getIntVals a = [ IntValList "Updated" [ utcTime2IntVal $ feedUpdated a ]
                  , IntValList "Title" [ string2IntVal . getContentText $ feedTitle a ]
                  ]
-  getRefProps = [ "CatID", "Authors", "Contributors" ]
-  getDocRefs a = [ DocRefList "CatID"        [ feedCatID a ]
-                 , DocRefList "Authors"      $ feedAuthors a
-                 , DocRefList "Contributors" $ feedContributors a
-                 ]
+  -- getRefProps = [ "CatID", "Authors", "Contributors" ]
+  -- getDocRefs a = [ DocRefList "CatID"        [ feedCatID a ]
+  --                , DocRefList "Authors"      $ feedAuthors a
+  --                , DocRefList "Contributors" $ feedContributors a
+  --                ]
 
 data Item = Item
   { itemFeedID       :: DocID Feed
@@ -132,11 +132,11 @@ instance Document Item where
   getIntVals a = [ IntValList "Published" [ utcTime2IntVal $ itemPublished a ]
                  , IntValList "Updated"   [ utcTime2IntVal $ itemUpdated a ]
                  ]
-  getRefProps = [ "FeedID", "Authors", "Contributors" ]
-  getDocRefs a = [ DocRefList "FeedID"       [ itemFeedID a ]
-                 , DocRefList "Authors"      $ itemAuthors a
-                 , DocRefList "Contributors" $ itemContributors a
-                 ]
+  -- getRefProps = [ "FeedID", "Authors", "Contributors" ]
+  -- getDocRefs a = [ DocRefList "FeedID"       [ itemFeedID a ]
+  --                , DocRefList "Authors"      $ itemAuthors a
+  --                , DocRefList "Contributors" $ itemContributors a
+  --                ]
 
 class ToFeed f where
   toFeed :: f -> DocID Cat -> URL -> UTCTime -> (Feed, [Person], [Person])
