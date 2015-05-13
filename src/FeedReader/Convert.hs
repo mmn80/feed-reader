@@ -39,7 +39,7 @@ tryEContent2DB c = eContent2DB $ fromMaybe (A.TextContent "") c
 
 instance ToPerson A.Person where
   toPerson p = Person
-    { personName  = A.personName p
+    { personName  = Indexable $ A.personName p
     , personURL   = fromMaybe "" $ A.personURI p
     , personEmail = fromMaybe "" $ A.personEmail p
     }
@@ -49,14 +49,14 @@ instance ToFeed A.Feed where
     ( Feed
       { feedCatID        = c
       , feedURL          = u
-      , feedTitle        = content2DB $ A.feedTitle f
+      , feedTitle        = Indexable . content2DB $ A.feedTitle f
       , feedDescription  = tryContent2DB $ A.feedSubtitle f
       , feedLanguage     = ""
       , feedAuthors      = []
       , feedContributors = []
       , feedRights       = tryContent2DB $ A.feedRights f
       , feedImage        = imageFromURL <$> (A.feedLogo f <|> A.feedIcon f)
-      , feedUpdated      = text2UTCTime (A.feedUpdated f) df
+      , feedUpdated      = Indexable $ text2UTCTime (A.feedUpdated f) df
       }
     , toPerson <$> A.feedAuthors f
     , toPerson <$> A.feedContributors f
@@ -75,8 +75,8 @@ instance ToItem A.Entry where
       , itemContributors = []
       , itemRights       = tryContent2DB $ A.entryRights i
       , itemContent      = tryEContent2DB $ A.entryContent i
-      , itemPublished    = text2UTCTime (fromMaybe "" $ A.entryPublished i) df
-      , itemUpdated      = date
+      , itemPublished    = Indexable $ text2UTCTime (fromMaybe "" $ A.entryPublished i) df
+      , itemUpdated      = Indexable date
       }
     , toPerson <$> A.entryAuthors i
     , toPerson <$> A.entryContributor i

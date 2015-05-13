@@ -28,6 +28,7 @@ module FeedReader.Types
   , ToFeed (..)
   , ToPerson (..)
   , ToItem (..)
+  , Indexable (..)
   , text2UTCTime
   , imageFromURL
   , diffMs
@@ -42,9 +43,7 @@ import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
 import           Data.Time.Format      (defaultTimeLocale, iso8601DateFormat,
                                         parseTimeM, rfc822DateFormat)
-import           FeedReader.DocDB      (DocID, Document (..),
-                                        IntValList (..), string2IntVal,
-                                        utcTime2IntVal)
+import           FeedReader.DocDB      (DocID, Document (..), Indexable (..), DBValue)
 import           GHC.Generics          (Generic)
 
 type URL      = String
@@ -52,29 +51,26 @@ type Language = String
 type Tag      = String
 
 data Content  = Text String | HTML String | XHTML String
-  deriving (Show, Generic, Serialize)
+  deriving (Generic, Serialize, DBValue)
 
-getContentText (Text s) = s
-getContentText (HTML s) = s
-getContentText (XHTML s) = s
+instance Show Content where
+  showsPrec p (Text s)  = showString s
+  showsPrec p (HTML s)  = showString s
+  showsPrec p (XHTML s) = showString s
 
 data Cat = Cat
-  { catName :: String
+  { catName :: Indexable String
   } deriving (Show, Generic, Serialize)
 
-instance Document Cat where
-  getIntProps = [ "Name" ]
-  getIntVals a = [ IntValList "Name" [ string2IntVal $ catName a ] ]
+instance Document Cat
 
 data Person = Person
-  { personName  :: String
+  { personName  :: Indexable String
   , personURL   :: URL
   , personEmail :: String
   } deriving (Show, Generic, Serialize)
 
-instance Document Person where
-  getIntProps = [ "Name" ]
-  getIntVals a = [ IntValList "Name" [ string2IntVal $ personName a ] ]
+instance Document Person
 
 data Image = Image
   { imageURL         :: URL
@@ -83,31 +79,22 @@ data Image = Image
   , imageLink        :: URL
   , imageWidth       :: Int
   , imageHeight      :: Int
-  } deriving (Show, Generic, Serialize)
+  } deriving (Show, Generic, Serialize, DBValue)
 
 data Feed = Feed
   { feedCatID        :: DocID Cat
   , feedURL          :: URL
-  , feedTitle        :: Content
+  , feedTitle        :: Indexable Content
   , feedDescription  :: Content
   , feedLanguage     :: Language
   , feedAuthors      :: [DocID Person]
   , feedContributors :: [DocID Person]
   , feedRights       :: Content
   , feedImage        :: Maybe Image
-  , feedUpdated      :: UTCTime
+  , feedUpdated      :: Indexable UTCTime
   } deriving (Show, Generic, Serialize)
 
-instance Document Feed where
-  getIntProps = [ "Updated", "Title" ]
-  getIntVals a = [ IntValList "Updated" [ utcTime2IntVal $ feedUpdated a ]
-                 , IntValList "Title" [ string2IntVal . getContentText $ feedTitle a ]
-                 ]
-  -- getRefProps = [ "CatID", "Authors", "Contributors" ]
-  -- getDocRefs a = [ DocRefList "CatID"        [ feedCatID a ]
-  --                , DocRefList "Authors"      $ feedAuthors a
-  --                , DocRefList "Contributors" $ feedContributors a
-  --                ]
+instance Document Feed
 
 data Item = Item
   { itemFeedID       :: DocID Feed
@@ -119,24 +106,15 @@ data Item = Item
   , itemContributors :: [DocID Person]
   , itemRights       :: Content
   , itemContent      :: Content
-  , itemPublished    :: UTCTime
-  , itemUpdated      :: UTCTime
+  , itemPublished    :: Indexable UTCTime
+  , itemUpdated      :: Indexable UTCTime
   } deriving (Show, Generic, Serialize)
 
-instance Serialize UTCTime where
-  put t = put . toRational $ utcTimeToPOSIXSeconds t
-  get = liftM (posixSecondsToUTCTime . fromRational) get
+instance Document Item
 
-instance Document Item where
-  getIntProps = [ "Updated", "Published" ]
-  getIntVals a = [ IntValList "Published" [ utcTime2IntVal $ itemPublished a ]
-                 , IntValList "Updated"   [ utcTime2IntVal $ itemUpdated a ]
-                 ]
-  -- getRefProps = [ "FeedID", "Authors", "Contributors" ]
-  -- getDocRefs a = [ DocRefList "FeedID"       [ itemFeedID a ]
-  --                , DocRefList "Authors"      $ itemAuthors a
-  --                , DocRefList "Contributors" $ itemContributors a
-  --                ]
+instance Serialize UTCTime where
+  put = put . toRational . utcTimeToPOSIXSeconds
+  get = liftM (posixSecondsToUTCTime . fromRational) get
 
 class ToFeed f where
   toFeed :: f -> DocID Cat -> URL -> UTCTime -> (Feed, [Person], [Person])

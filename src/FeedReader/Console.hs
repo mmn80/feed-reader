@@ -10,7 +10,7 @@ import           Data.Maybe            (fromJust)
 import qualified Data.Sequence         as S
 import           Data.Serialize        (Serialize (..), decode, encode)
 import           Data.String           (IsString (..))
-import           Data.Time.Clock       (getCurrentTime)
+import           Data.Time.Clock       (UTCTime, getCurrentTime)
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
 import           FeedReader.DB         (DocID, Property)
@@ -83,6 +83,10 @@ randomString l r = do
   ln <- randomRIO (l, r)
   replicateM ln $ randomRIO (' ', '~')
 
+randomStringIx l r = Indexable <$> randomString l r
+
+randomContentIx l r = Indexable . Text <$> randomString l r
+
 time2Int str = fromInteger . round . utcTimeToPOSIXSeconds . DB.text2UTCTime str
 
 randomTime = do
@@ -92,25 +96,27 @@ randomTime = do
   ti <- randomRIO (l, r)
   return . posixSecondsToUTCTime $ fromInteger ti
 
+randomTimeIx = Indexable <$> randomTime
+
 randomCat =
-  Cat <$> randomString 10 30
+  Cat <$> randomStringIx 10 30
 
 randomFeed c =
   Feed <$> pure c
           <*> randomString 100 300
-          <*> (Text <$> randomString 100 300)
+          <*> randomContentIx 100 300
           <*> (Text <$> randomString 100 300)
           <*> randomString 2 10
           <*> pure []
           <*> pure []
           <*> (Text <$> randomString 10 50)
           <*> pure Nothing
-          <*> randomTime
+          <*> randomTimeIx
 
 randomPerson =
-  Person <$> randomString 10 30
-            <*> randomString 100 300
-            <*> randomString 10 30
+  Person <$> randomStringIx 10 30
+         <*> randomString 100 300
+         <*> randomString 10 30
 
 randomItem f =
   Item <$> pure f
@@ -122,8 +128,8 @@ randomItem f =
           <*> pure []
           <*> (Text <$> randomString 10 50)
           <*> (Text <$> randomString 200 300)
-          <*> randomTime
-          <*> randomTime
+          <*> randomTimeIx
+          <*> randomTimeIx
 
 ------------------------------------------------------------------------------
 -- Command Functions
@@ -166,7 +172,7 @@ cmdGet h args = timed $ do
     _        -> yield . shows t $ " is not a valid table name."
 
 page h c p s k o now df = liftBase $
-  if k == 0
+  if (k :: Int) == 0
   then DB.runRange h (parseVal s now) (fromString fprop) p
   else DB.runFilter h (fromIntegral k) (parseVal s now)
          (fromString fprop) (fromString oprop) p
@@ -174,10 +180,10 @@ page h c p s k o now df = liftBase $
         oprop = if o == "*" then df else o
 
 parseVal s now
-  | "D:" `isPrefixOf` s = Just . DB.utcTime2IntVal $ text2UTCTime (drop 2 s) now
-  | "S:" `isPrefixOf` s = Just $ DB.string2IntVal (drop 2 s)
+  | "D:" `isPrefixOf` s = Just . DB.intVal $ text2UTCTime (drop 2 s) now
+  | "S:" `isPrefixOf` s = Just . DB.intVal $ drop 2 s
   | s == "*"            = Nothing
-  | otherwise           = Just $ fromIntegral (read s :: Int)
+  | otherwise           = Just . DB.intVal $ (read s :: Int)
 
 cmdPage h args s k o = do
   let p = (read $ args !! 1) :: Int
@@ -186,11 +192,11 @@ cmdPage h args s k o = do
   let formatsK k i = i . showString (replicate (k - length (i "")) ' ')
   let formats = formatsK 12
   let format = formats . showString
-  let sCat (iid, i) = formats (shows iid) . showString (catName i) $ ""
+  let sCat (iid, i) = formats (shows iid) . showString (unIndexable $ catName i) $ ""
   let sFeed (iid, i) = formats (shows iid) .
                        formats (shows $ feedCatID i) .
                        shows (feedUpdated i) $ ""
-  let sPerson (iid, i) = formats (shows iid) . showString (personName i) $ ""
+  let sPerson (iid, i) = formats (shows iid) . showString (unIndexable $ personName i) $ ""
   let sItem (iid, i) = formats (shows iid) .
                        formats (shows $ itemFeedID i) .
                        formatsK 25 (shows $ itemUpdated i) .
@@ -198,19 +204,19 @@ cmdPage h args s k o = do
   now <- liftBase getCurrentTime
   case t of
     "cat"    -> do
-      as <- page h c p s k o now "Name"
+      as <- page h c p s k o now "catName"
       yields $ format "ID" . showString "Name"
       each $ sCat <$> as
     "feed"   -> do
-      as <- page h c p s k o now "Updated"
+      as <- page h c p s k o now "feedUpdated"
       yields $ format "ID" . format "CatID" . showString "Updated"
       each $ sFeed <$> as
     "person" -> do
-      as <- page h c p s k o now "Name"
+      as <- page h c p s k o now "personName"
       yields $ format "ID" . showString "Name"
       each $ sPerson <$> as
     "item"   -> do
-      as <- page h c p s k o now "Updated"
+      as <- page h c p s k o now "itemUpdated"
       yields $ format "ID" . format "FeedID" .
         formatsK 25 (showString "Updated") . showString "Published"
       each $ sItem <$> as
@@ -250,7 +256,7 @@ cmdAdd h args = timed $ do
                   (randomPerson >>= DB.runInsert h)) >>=
                 showIDs
     "feed" -> do
-      cs' <- liftBase $ DB.runRange h Nothing "Name" 100
+      cs' <- liftBase $ DB.runRange h Nothing "catName" 100
       let cs = S.fromList cs'
       let rs = take n $ randomRs (0, S.length cs - 1) g
       fs <- liftBase . P.toListM . for (each rs) $ \r ->
@@ -259,7 +265,7 @@ cmdAdd h args = timed $ do
         yield
       showIDs fs
     "item" -> do
-      fs' <- liftBase $ DB.runRange h Nothing "Updated" 1000
+      fs' <- liftBase $ DB.runRange h Nothing "feedUpdated" 1000
       let fs = S.fromList fs'
       let rfids = (fst . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
       is <- liftBase . P.toListM . for (each rfids) $ \fid ->
@@ -289,10 +295,10 @@ cmdRangeDel h args = timed $ do
           yield "Explicit value required."
           return 0
         else let k = fromJust mb in case t of
-          "cat"    -> DB.runDeleteRange h k (df c "Name"    :: Property Cat   ) p
-          "feed"   -> DB.runDeleteRange h k (df c "Updated" :: Property Feed  ) p
-          "person" -> DB.runDeleteRange h k (df c "Name"    :: Property Person) p
-          "item"   -> DB.runDeleteRange h k (df c "Updated" :: Property Item  ) p
+          "cat"    -> DB.runDeleteRange h k (df c "catName"     :: Property Cat   ) p
+          "feed"   -> DB.runDeleteRange h k (df c "feedUpdated" :: Property Feed  ) p
+          "person" -> DB.runDeleteRange h k (df c "personName"  :: Property Person) p
+          "item"   -> DB.runDeleteRange h k (df c "itemUpdated" :: Property Item  ) p
           _        -> do
                         yield . shows t $ " is not a valid table name."
                         return 0

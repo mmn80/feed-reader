@@ -24,37 +24,37 @@ import           FeedReader.DocDB
 import           FeedReader.Types
 import           Prelude             hiding (filter, lookup)
 
-runLookup :: (Document a, MonadIO m) => Handle -> IntVal -> m (Maybe (DocID a, a))
+runLookup :: (Document a, MonadIO m) => Handle -> DocID a -> m (Maybe (DocID a, a))
 runLookup h k = fromMaybe Nothing <$>
-  runTransaction h (lookupUnsafe k)
+  runTransaction h (lookup k)
 
-runRange :: (Document a, MonadIO m) => Handle -> Maybe IntVal ->
+runRange :: (Document a, MonadIO m) => Handle -> Maybe (IntVal b) ->
             Property a -> Int -> m [(DocID a, a)]
 runRange h s prop pg = fromMaybe [] <$>
   runTransaction h (range s Nothing prop pg)
 
-runFilter :: (Document a, MonadIO m) => Handle -> IntVal -> Maybe IntVal ->
+runFilter :: (Document a, MonadIO m) => Handle -> DocID b -> Maybe (IntVal c) ->
              Property a -> Property a -> Int -> m [(DocID a, a)]
 runFilter h k s fprop sprop pg = fromMaybe [] <$>
-  runTransaction h (filterUnsafe k s Nothing fprop sprop pg)
+  runTransaction h (filter k s Nothing fprop sprop pg)
 
 runInsert :: (Document a, MonadIO m) => Handle -> a -> m (Maybe (DocID a))
 runInsert h a = runTransaction h $ insert a
 
-runDelete :: (MonadIO m) => Handle -> IntVal -> m ()
+runDelete :: MonadIO m => Handle -> DocID a -> m ()
 runDelete h did = do
-  runTransaction h $ deleteUnsafe did
+  runTransaction h $ delete did
   return ()
 
-deleteRange :: (Document a, MonadIO m) => IntVal -> Property a -> Int ->
+deleteRange :: (Document a, MonadIO m) => IntVal b -> Property a -> Int ->
                Transaction m Int
 deleteRange did prop pg = do
-  ks <- rangeKUnsafe (Just did) Nothing prop pg
+  ks <- rangeK (Just did) Nothing prop pg
   forM_ ks $ \k -> delete k
   return $ length ks
 
-runDeleteRange :: (Document a, MonadIO m) => Handle -> IntVal ->
-                  Property a -> Int -> m Int
+runDeleteRange :: (Document a, MonadIO m) => Handle -> IntVal b -> Property a ->
+                  Int -> m Int
 runDeleteRange h did prop pg = fromMaybe 0 <$>
   runTransaction h (deleteRange did prop pg)
 
@@ -68,10 +68,10 @@ data DBStats = DBStats
 getStats :: MonadIO m => Handle -> m DBStats
 getStats h = fromMaybe (DBStats 0 0 0 0) <$>
   runTransaction h (DBStats
-    <$> size ("Name"    :: Property Cat)
-    <*> size ("Updated" :: Property Feed)
-    <*> size ("Name"    :: Property Person)
-    <*> size ("Updated" :: Property Item))
+    <$> size ("catName"     :: Property Cat)
+    <*> size ("feedUpdated" :: Property Feed)
+    <*> size ("personName"  :: Property Person)
+    <*> size ("itemUpdated" :: Property Item))
 
 clean :: [Maybe a] -> [a]
 clean = map fromJust . L.filter (not . null)

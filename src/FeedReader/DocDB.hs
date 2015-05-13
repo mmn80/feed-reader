@@ -1,6 +1,4 @@
-{-# LANGUAGE DataKinds                  #-}
 {-# LANGUAGE DefaultSignatures          #-}
-{-# LANGUAGE ExistentialQuantification  #-}
 {-# LANGUAGE FlexibleContexts           #-}
 {-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -27,24 +25,20 @@ module FeedReader.DocDB
   , performGC
   , Transaction
   , runTransaction
-  , DocID
   , Property
-  , utcTime2IntVal
-  , string2IntVal
-  , IntValList (..)
+  , DocID
+  , IntVal
+  , intVal
+  , DBValue
+  , Indexable (..)
   , Document (..)
   , lookup
-  , lookupUnsafe
   , insert
   , update
   , delete
-  , deleteUnsafe
   , range
-  , rangeUnsafe
   , rangeK
-  , rangeKUnsafe
   , filter
-  , filterUnsafe
   , size
   , debug
   ) where
@@ -200,29 +194,41 @@ instance Typeable a => IsString (Property a) where
 -- Values ----------------------------------------------------------------------
 
 newtype DocID a = DocID { unDocID :: DID }
-  deriving (Eq, Ord, Bounded, Serialize)
+  deriving (Eq, Ord, Bounded, Num, Enum, Real, Integral, Serialize)
 
 instance Show (DocID a) where
   showsPrec _ (DocID k) = showString "0x" . showHex k
 
+newtype IntVal a = IntVal { unIntVal :: DID }
+  deriving (Eq, Ord, Bounded, Num, Enum, Real, Integral, Show)
+
+intVal :: DBValue (Indexable a) => a -> IntVal b
+intVal = fromIntegral . head . getDBValues . Indexable
+
 newtype Indexable a = Indexable { unIndexable :: a }
   deriving (Eq, Ord, Bounded, Serialize)
 
+instance Show a => Show (Indexable a) where
+  showsPrec p (Indexable a) = showsPrec p a
+
 class DBValue a where
   getDBValues :: a -> [DBWord]
+  getDBValues _ = []
+
   isReference :: Proxy a -> Bool
+  isReference _ = False
 
 instance DBValue (DocID a) where
   getDBValues (DocID did) = [did]
   isReference _ = True
 
-instance DBValue [DocID a] where
-  getDBValues as = concat $ getDBValues <$> as
-  isReference _ = True
+instance {-# OVERLAPPABLE #-} (DBValue a, Foldable f) => DBValue (f a) where
+  getDBValues = foldMap getDBValues
+  isReference _ = isReference (Proxy :: Proxy a)
 
-instance {-# OVERLAPPABLE #-} DBValue a => DBValue [a] where
-  getDBValues as = concat $ getDBValues <$> as
-  isReference _ = False
+instance DBValue Bool
+instance DBValue Int
+instance DBValue String
 
 instance DBValue (Indexable UTCTime) where
   getDBValues (Indexable t) = [ round $ utcTimeToPOSIXSeconds t ]
@@ -242,16 +248,12 @@ instance {-# OVERLAPPABLE #-} Show a => DBValue (Indexable a) where
           f (n, v) b = (n - 1, if n >= 0 then v + fromIntegral b * 2 ^ (8 * n) else v)
   isReference _ = False
 
-instance {-# OVERLAPPABLE #-} DBValue a where
-  getDBValues _ = []
-  isReference _ = False
-
 -- Records ---------------------------------------------------------------------
 
 data Indexables = Indexables
   { ixRefs :: [(String, DID)]
   , ixInts :: [(String, DID)]
-  }
+  } deriving (Show)
 
 class (Typeable a, Generic a, Serialize a) => Document a where
   getIndexables :: a -> Indexables
@@ -273,16 +275,16 @@ instance (GetIndexablesG a, GetIndexablesG b) => GetIndexablesG (a :+: b) where
   getIndexablesG _ (Gen.L1 x) = getIndexablesG "" x
   getIndexablesG _ (Gen.R1 x) = getIndexablesG "" x
 
-instance (GetIndexablesG a) => GetIndexablesG (Gen.M1 Gen.D c a) where
+instance GetIndexablesG a => GetIndexablesG (Gen.M1 Gen.D c a) where
   getIndexablesG _ m1@(Gen.M1 x) = getIndexablesG "" x
 
-instance (GetIndexablesG a) => GetIndexablesG (Gen.M1 Gen.C c a) where
+instance GetIndexablesG a => GetIndexablesG (Gen.M1 Gen.C c a) where
   getIndexablesG _ m1@(Gen.M1 x) = getIndexablesG "" x
 
 instance (GetIndexablesG a, Gen.Selector c) => GetIndexablesG (Gen.M1 Gen.S c a) where
   getIndexablesG _ m1@(Gen.M1 x) = getIndexablesG (Gen.selName m1) x
 
-instance (DBValue a) => GetIndexablesG (Gen.K1 i a) where
+instance DBValue a => GetIndexablesG (Gen.K1 i a) where
   getIndexablesG n (Gen.K1 x) = if isReference (Proxy :: Proxy a)
                                 then Indexables { ixRefs = vs, ixInts = [] }
                                 else Indexables { ixRefs = [], ixInts = vs }
@@ -398,13 +400,8 @@ runTransaction h (Transaction t) = do
         writeLogTRec (logHandle m) $ Pending t
 
 lookup :: (Document a, MonadIO m) => DocID a -> Transaction m (Maybe (DocID a, a))
-lookup = lookupUnsafe . Indexable . unDocID
-
-lookupUnsafe :: (Document a, MonadIO m) => Indexable b ->
-                Transaction m (Maybe (DocID a, a))
-lookupUnsafe ixb = Transaction $ do
+lookup (DocID did) = Transaction $ do
   t <- S.get
-  let did = head $ getDBValues ixb
   mbr <- withMasterLock (transHandle t) $ \m ->
            return $ findFirstDoc m t did
   mba <- if null mbr then return Nothing
@@ -440,13 +437,9 @@ insert a = Transaction $ do
   unTransaction $ update (DocID tid) a
   return $ DocID tid
 
-delete :: (Document a, MonadIO m) => DocID a -> Transaction m ()
-delete = deleteUnsafe . Indexable . unDocID
-
-deleteUnsafe :: MonadIO m => Indexable a -> Transaction m ()
-deleteUnsafe ixb = Transaction $ do
+delete :: MonadIO m => DocID a -> Transaction m ()
+delete (DocID did) = Transaction $ do
   t <- S.get
-  let did = head $ getDBValues ixb
   (addr, sz, irs, drs) <- withMasterLock (transHandle t) $ \m -> return $
     case findFirstDoc m t did of
       Nothing -> (0, 0, [], [])
@@ -462,7 +455,7 @@ deleteUnsafe ixb = Transaction $ do
   S.put t { transUpdateList = (r, B.empty) : transUpdateList t }
 
 page_ :: (Document a, MonadIO m) => (Int -> MasterState -> [Int]) ->
-         Maybe (Indexable b) -> Transaction m [(DocID a, a)]
+         Maybe (IntVal b) -> Transaction m [(DocID a, a)]
 page_ f mdid = Transaction $ do
   t <- S.get
   dds <- withMasterLock (transHandle t) $ \m -> do
@@ -475,34 +468,24 @@ page_ f mdid = Transaction $ do
   S.put t { transReadList = (unDocID . fst <$> dds') ++ transReadList t }
   return dds'
 
-range :: (Document a, MonadIO m) => Maybe (Indexable b) -> Maybe (DocID a) ->
+range :: (Document a, MonadIO m) => Maybe (IntVal b) -> Maybe (DocID a) ->
          Property a -> Int -> Transaction m [(DocID a, a)]
-range mst msti = rangeUnsafe mst (Indexable . unDocID <$> msti)
-
-rangeUnsafe :: (Document a, MonadIO m) => Maybe (Indexable b) -> Maybe (Indexable c) ->
-               Property a -> Int -> Transaction m [(DocID a, a)]
-rangeUnsafe mst msti p pg = page_ f mst
+range mst msti p pg = page_ f mst
   where f st m = fromMaybe [] $ do
                    ds <- Map.lookup (propI p) (intIdx m)
-                   return $ getPage st (ival msti) pg ds
+                   return $ getPage st (rval msti) pg ds
 
-filter :: (Document a, MonadIO m) => DocID a -> Maybe (Indexable b) ->
+filter :: (Document a, MonadIO m) => DocID c -> Maybe (IntVal b) ->
           Maybe (DocID a) -> Property a -> Property a -> Int ->
           Transaction m [(DocID a, a)]
-filter (DocID k) mst msti = filterUnsafe (Indexable k) mst
-                              (Indexable . unDocID <$> msti)
-
-filterUnsafe :: (Document a, MonadIO m) => Indexable b -> Maybe (Indexable c) ->
-                Maybe (Indexable d) -> Property a -> Property a -> Int ->
-                Transaction m [(DocID a, a)]
-filterUnsafe ixb mst msti fprop sprop pg = page_ f mst
-  where f _ m = fromMaybe [] . liftM (getPage (ival mst) (ival msti) pg) $
+filter (DocID did) mst msti fprop sprop pg = page_ f mst
+  where f _ m = fromMaybe [] . liftM (getPage (ival mst) (rval msti) pg) $
                   Map.lookup (toInt . fst . unProperty $ fprop) (refIdx m) >>=
-                  Map.lookup (toInt . head $ getDBValues ixb) >>=
+                  Map.lookup (toInt did) >>=
                   Map.lookup (propI sprop)
 
-pageK_ :: MonadIO m => (Int -> MasterState -> [Int]) ->
-          Maybe (Indexable b) -> Transaction m [DocID a]
+pageK_ :: MonadIO m => (Int -> MasterState -> [Int]) -> Maybe (IntVal b) ->
+          Transaction m [DocID a]
 pageK_ f mdid = Transaction $ do
   t <- S.get
   dds <- withMasterLock (transHandle t) $ \m -> do
@@ -512,14 +495,10 @@ pageK_ f mdid = Transaction $ do
   S.put t { transReadList = dds ++ transReadList t }
   return (DocID <$> dds)
 
-rangeK :: (Document a, MonadIO m) => Maybe (Indexable b) -> Maybe (DocID a) ->
+rangeK :: (Document a, MonadIO m) => Maybe (IntVal b) -> Maybe (DocID a) ->
           Property a -> Int -> Transaction m [DocID a]
-rangeK mst msti = rangeKUnsafe mst (Indexable . unDocID <$> msti)
-
-rangeKUnsafe :: (Document a, MonadIO m) => Maybe (Indexable b) ->
-                Maybe (Indexable c) -> Property a -> Int -> Transaction m [DocID a]
-rangeKUnsafe mst msti p pg = pageK_ f mst
-  where f st m = fromMaybe [] $ getPage st (ival msti) pg <$>
+rangeK mst msti p pg = pageK_ f mst
+  where f st m = fromMaybe [] $ getPage st (rval msti) pg <$>
                                 Map.lookup (propI p) (intIdx m)
 
 size :: (Document a, MonadIO m) => Property a -> Transaction m Int
@@ -844,28 +823,14 @@ tRecSize r = case r of
   Pending dr  -> 8 + (2 * length (docIRefs dr)) + (2 * length (docDRefs dr))
   Completed _ -> 2
 
-ival :: Maybe (Indexable a) -> Int
-ival mb = toInt $ case mb of
-  Nothing  -> maxBound
-  Just ixb -> head $ getDBValues ixb
+ival :: Maybe (IntVal a) -> Int
+ival = toInt . unIntVal. fromMaybe maxBound
+
+rval :: Maybe (DocID a) -> Int
+rval = toInt . unDocID . fromMaybe maxBound
 
 propI :: forall a. Document a => Property a -> Int
 propI = toInt . fst . unProperty
-
--- propR :: forall a. Document a => Property a -> Int
--- propR = toInt . fst . unProperty
-
--- checkIntProp :: forall a. Document a => Property a -> PropID
--- checkIntProp p@(Property (pid, _)) =
---   if p `notElem` (getIntProps :: [Property a])
---   then error . showString "Invalid int property name: " . shows p $ ""
---   else pid
-
--- checkRefProp :: forall a. Document a => Property a -> PropID
--- checkRefProp p@(Property (pid, _)) =
---   if p `notElem` (getRefProps :: [Property a])
---   then error . showString "Invalid ref property name: " . shows p $ ""
---   else pid
 
 readDocument :: (Typeable a, Serialize a, MonadIO m) => Handle -> DocRecord -> m a
 readDocument h r =
