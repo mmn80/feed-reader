@@ -11,8 +11,8 @@ module FeedReader.DB
   , runDeleteRange
   , getStats
   , DBStats (..)
-  , addItemConv
-  , addFeedConv
+  , runToItem
+  , runToFeed
   ) where
 
 import           Control.Monad       (forM_)
@@ -20,6 +20,7 @@ import           Control.Monad.Trans (MonadIO (liftIO))
 import qualified Data.List           as L
 import           Data.Maybe          (fromJust, fromMaybe)
 import           Data.Time.Clock     (getCurrentTime)
+import           FeedReader.Convert
 import           FeedReader.DocDB
 import           FeedReader.Types
 import           Prelude             hiding (filter, lookup)
@@ -76,26 +77,14 @@ getStats h = fromMaybe (DBStats 0 0 0 0) <$>
 clean :: [Maybe a] -> [a]
 clean = map fromJust . L.filter (not . null)
 
-addItemConv :: (MonadIO m, ToItem i) => Handle -> i -> DocID Feed -> URL -> m Item
-addItemConv h it fid u = do
+runToItem :: (MonadIO m, ToItem i) => Handle -> i -> DocID Feed -> URL ->
+             m (Maybe (DocID Item, Item))
+runToItem h it fid u = do
   df <- liftIO getCurrentTime
-  let (i, as, cs) = toItem it fid u df
-  as' <- sequence $ runInsert h <$> as
-  cs' <- sequence $ runInsert h <$> cs
-  let i' = i { itemAuthors      = clean as'
-             , itemContributors = clean cs'
-             }
-  runInsert h i'
-  return i'
+  runTransaction h $ toItem it fid u df
 
-addFeedConv :: (MonadIO m, ToFeed f) => Handle -> f -> DocID Cat -> URL -> m Feed
-addFeedConv h it cid u = do
+runToFeed :: (MonadIO m, ToFeed f) => Handle -> f -> DocID Cat -> URL ->
+             m (Maybe (DocID Feed, Feed))
+runToFeed h it cid u = do
   df <- liftIO getCurrentTime
-  let (f, as, cs) = toFeed it cid u df
-  as' <- sequence $ runInsert h <$> as
-  cs' <- sequence $ runInsert h <$> cs
-  let f' = f { feedAuthors      = clean as'
-             , feedContributors = clean cs'
-             }
-  runInsert h f'
-  return f'
+  runTransaction h $ toFeed it cid u df

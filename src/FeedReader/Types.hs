@@ -43,8 +43,10 @@ import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
 import           Data.Time.Format      (defaultTimeLocale, iso8601DateFormat,
                                         parseTimeM, rfc822DateFormat)
-import           FeedReader.DocDB      (DocID, Document (..), Indexable (..), DBValue)
+import           FeedReader.DocDB      (DBValue, DocID, Document (..),
+                                        Indexable (..), Transaction)
 import           GHC.Generics          (Generic)
+import           Control.Monad.Trans   (MonadIO)
 
 type URL      = String
 type Language = String
@@ -117,13 +119,15 @@ instance Serialize UTCTime where
   get = liftM (posixSecondsToUTCTime . fromRational) get
 
 class ToFeed f where
-  toFeed :: f -> DocID Cat -> URL -> UTCTime -> (Feed, [Person], [Person])
+  toFeed :: MonadIO m => f -> DocID Cat -> URL -> UTCTime ->
+            Transaction m (DocID Feed, Feed)
 
 class ToPerson p where
-  toPerson :: p -> Person
+  toPerson :: MonadIO m => p -> Transaction m (DocID Person, Person)
 
 class ToItem i where
-  toItem :: i -> DocID Feed -> URL -> UTCTime -> (Item, [Person], [Person])
+  toItem :: MonadIO m => i -> DocID Feed -> URL -> UTCTime ->
+            Transaction m (DocID Item, Item)
 
 text2UTCTime :: String -> UTCTime -> UTCTime
 text2UTCTime t df = fromMaybe df $ iso <|> iso' <|> rfc
