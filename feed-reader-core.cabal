@@ -28,14 +28,18 @@ library
     hashable,
     psqueues,
     xml,
-    feed
+    feed,
+    pipes,
+    pipes-http,
+    http-types
 
   exposed-modules:
     FeedReader.Types,
     FeedReader.Cache,
     FeedReader.DocDB,
     FeedReader.DB,
-    FeedReader.Convert
+    FeedReader.Convert,
+    FeedReader.Import
 
   -- other-modules:
   -- other-extensions:
@@ -57,6 +61,8 @@ executable feeds-console
     directory,
     pipes,
     pipes-safe,
+    pipes-http,
+    http-types,
     bytestring,
     cereal,
     psqueues,

@@ -15,6 +15,7 @@ import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
 import           FeedReader.DB         (DocID, Property)
 import qualified FeedReader.DB         as DB
+import           FeedReader.Import     (downloadFeed)
 import           FeedReader.Types
 import           Pipes
 import qualified Pipes.Prelude         as P
@@ -50,6 +51,7 @@ helpMessage = do
   yield "          : shows the internal state"
   yield "          : i: if '1' will show all indexes"
   yield "          : c: if '1' will show the contents of the cache"
+  yield "  curl u  : downloads and parses feed at URL = u"
   yield "  quit    : quits the program"
 
 processCommand h = do
@@ -65,6 +67,7 @@ processCommand h = do
     "range_del" -> checkArgs 4 args h cmdRangeDel
     "gc"        -> checkArgs 0 args h cmdGC
     "debug"     -> checkArgs 2 args h cmdDebug
+    "curl"      -> checkArgs 1 args h cmdCurl
     _           -> yield . showString "Command '" . showString (head args) $
                      "' not understood."
   processCommand h
@@ -312,6 +315,10 @@ cmdDebug h args = timed $ do
   let i = args !! 1 == "1"
   let c = args !! 2 == "1"
   liftBase (DB.debug h i c) >>= each . lines
+
+cmdCurl _ args = timed $ do
+  let url = args !! 1
+  liftBase (show <$> downloadFeed url) >>= each . lines
 
 pipeLine h =
       P.stdinLn
