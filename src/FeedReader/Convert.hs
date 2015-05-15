@@ -4,15 +4,15 @@
 module FeedReader.Convert
   () where
 
-import           Control.Applicative ((<|>))
-import           Data.Maybe          (fromJust, fromMaybe)
-import           FeedReader.DocDB    (Transaction, intValUnique, updateUnique)
+import           Control.Applicative   ((<|>))
+import           Data.List             (find)
+import           Data.Maybe            (fromJust, fromMaybe)
+import           FeedReader.DocDB      (Transaction, intValUnique, updateUnique)
 import           FeedReader.Types
-import qualified Text.Atom.Feed      as A
-import qualified Text.RSS.Syntax     as R
-import qualified Text.RSS1.Syntax    as R1
+import qualified Text.Atom.Feed        as A
 import qualified Text.DublinCore.Types as DC
-import Data.List (find)
+import qualified Text.RSS.Syntax       as R
+import qualified Text.RSS1.Syntax      as R1
 
 ------------------------------------------------------------------------------
 -- Conversion transactions for Atom
@@ -70,12 +70,15 @@ instance ToFeed A.Feed where
     return (fid, f')
 
 instance ToItem A.Entry where
-  toItem i f u df = do
+  toItem i f df = do
     as <- mapM toPerson $ A.entryAuthors i
     cs <- mapM toPerson $ A.entryContributor i
     let date = text2UTCTime (A.entryUpdated i) df
+    let url = case A.entryLinks i of
+                []    -> ""
+                (l:_) -> A.linkHref l
     let i' = Item { itemFeedID       = f
-                  , itemURL          = Unique u
+                  , itemURL          = Unique url
                   , itemTitle        = content2DB $ A.entryTitle i
                   , itemSummary      = tryContent2DB $ A.entrySummary i
                   , itemTags         = A.catTerm <$> A.entryCategories i
@@ -87,7 +90,7 @@ instance ToItem A.Entry where
                                          (fromMaybe "" $ A.entryPublished i) df
                   , itemUpdated      = Indexable date
                   }
-    iid <- updateUnique "itemURL" (intValUnique u) i'
+    iid <- updateUnique "itemURL" (intValUnique url) i'
     return (iid, i')
 
 ------------------------------------------------------------------------------
@@ -138,11 +141,12 @@ instance ToFeed R.RSSChannel where
     return (fid, f')
 
 instance ToItem R.RSSItem where
-  toItem i f u df = do
+  toItem i f df = do
     as <- mapM toPerson . rssPersonToPerson $ R.rssItemAuthor i
+    let url = fromMaybe "" $ R.rssItemLink i
     let date = Indexable $ text2UTCTime (fromMaybe "" $ R.rssItemPubDate i) df
     let i' = Item { itemFeedID       = f
-                  , itemURL          = Unique u
+                  , itemURL          = Unique url
                   , itemTitle        = Text . fromMaybe "" $ R.rssItemTitle i
                   , itemSummary      = Text ""
                   , itemTags         = R.rssCategoryValue <$> R.rssItemCategories i
@@ -153,7 +157,7 @@ instance ToItem R.RSSItem where
                   , itemPublished    = date
                   , itemUpdated      = date
                   }
-    iid <- updateUnique "itemURL" (intValUnique u) i'
+    iid <- updateUnique "itemURL" (intValUnique url) i'
     return (iid, i')
 
 ------------------------------------------------------------------------------
@@ -198,13 +202,14 @@ instance ToFeed R1.Feed where
     return (fid, f')
 
 instance ToItem R1.Item where
-  toItem i f u df = do
+  toItem i f df = do
     let dcs = R1.itemDC i
     as <- mapM toPerson $ extractDcPersons dcs DC.DC_Creator
     cs <- mapM toPerson $ extractDcPersons dcs DC.DC_Contributor
+    let url = if null $ R1.itemLink i then R1.itemURI i else R1.itemLink i
     let date = Indexable $ text2UTCTime (extractDcInfo dcs DC.DC_Date) df
     let i' = Item { itemFeedID       = f
-                  , itemURL          = Unique u
+                  , itemURL          = Unique url
                   , itemTitle        = Text $ R1.itemTitle i
                   , itemSummary      = HTML . fromMaybe "" $ R1.itemDesc i
                   , itemTags         = R1.itemTopics i
@@ -216,5 +221,5 @@ instance ToItem R1.Item where
                   , itemPublished    = date
                   , itemUpdated      = date
                   }
-    iid <- updateUnique "itemURL" (intValUnique u) i'
+    iid <- updateUnique "itemURL" (intValUnique url) i'
     return (iid, i')

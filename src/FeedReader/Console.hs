@@ -15,7 +15,7 @@ import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
 import           FeedReader.DB         (DocID, Property)
 import qualified FeedReader.DB         as DB
-import           FeedReader.Import     (downloadFeed)
+import           FeedReader.Import     (downloadFeed, updateFeed)
 import           FeedReader.Types
 import           Pipes
 import qualified Pipes.Prelude         as P
@@ -55,6 +55,8 @@ helpMessage = do
   yield "          : i: if '1' will show all indexes"
   yield "          : c: if '1' will show the contents of the cache"
   yield "  curl u  : downloads and parses feed at URL = u"
+  yield "  feed u c: downloads, parses and uploads feed at URL = u"
+  yield "          : c: category ID"
   yield "  quit    : quits the program"
 
 processCommand h = do
@@ -72,6 +74,7 @@ processCommand h = do
     "gc"        -> checkArgs 0 args h cmdGC
     "debug"     -> checkArgs 2 args h cmdDebug
     "curl"      -> checkArgs 1 args h cmdCurl
+    "feed"      -> checkArgs 2 args h cmdFeed
     _           -> yield . showString "Command '" . showString (head args) $
                      "' not understood."
   processCommand h
@@ -342,6 +345,20 @@ cmdDebug h args = timed $ do
 cmdCurl _ args = timed $ do
   let url = args !! 1
   liftBase (show <$> downloadFeed url) >>= each . lines
+
+cmdFeed h args = timed $ do
+  let url = args !! 1
+  let c = (read $ args !! 2) :: Int
+  e <- liftBase $ downloadFeed url
+  case e of
+    Left err -> yield err
+    Right f  -> do
+      mb <- liftBase $ updateFeed h f (fromIntegral c) url
+      case mb of
+        Nothing        -> yield "DataBase upload error."
+        Just (fid, fd) -> do
+          yield $ "Feed " ++ show fid ++ " updated ok."
+          each . lines $ show fd
 
 pipeLine h =
       P.stdinLn

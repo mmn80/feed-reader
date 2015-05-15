@@ -12,7 +12,9 @@
 ----------------------------------------------------------------------------
 
 module FeedReader.Import
-  (downloadFeed) where
+  ( downloadFeed
+  , updateFeed
+  ) where
 
 import           Control.Exception         (throw, try)
 import           Control.Monad.Trans       (MonadIO (liftIO))
@@ -24,8 +26,11 @@ import           Network.HTTP.Types.Status (Status (..), statusIsSuccessful,
 import           Pipes
 import           Pipes.HTTP
 import           Pipes.Prelude             (toListM)
+import qualified Text.Atom.Feed            as A
 import           Text.Feed.Import          (readAtom, readRSS1, readRSS2)
 import qualified Text.Feed.Types           as F
+import qualified Text.RSS.Syntax           as R
+import qualified Text.RSS1.Syntax          as R1
 import           Text.XML.Light            as XML
 
 downloadFeed :: MonadIO m => URL -> m (Either String F.Feed)
@@ -64,3 +69,22 @@ parseFeed bs =
       readRSS2 e `mplus`
       readRSS1 e `mplus`
       Nothing
+
+updateFeed :: MonadIO m => Handle -> F.Feed -> DocID Cat -> URL ->
+              m (Maybe (DocID Feed, Feed))
+updateFeed h ff c u = do
+  mb <- case ff of
+    F.AtomFeed af -> runToFeed h af c u
+    F.RSSFeed rss -> runToFeed h (R.rssChannel rss) c u
+    F.RSS1Feed rf -> runToFeed h rf c u
+  case mb of
+    Nothing       -> return Nothing
+    Just (fid, f) -> do
+      case ff of
+        F.AtomFeed af -> addItems fid $ A.feedEntries af
+        F.RSSFeed rss -> addItems fid $ R.rssItems (R.rssChannel rss)
+        F.RSS1Feed rf -> addItems fid $ R1.feedItems rf
+      return $ Just (fid, f)
+  where addItems fid is = runEffect $ for (each is) $ \i -> do
+          lift $ runToItem h i fid
+          return ()

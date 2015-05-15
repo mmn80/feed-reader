@@ -87,11 +87,11 @@ getStats h = fromMaybe (DBStats 0 0 0 0) <$>
 clean :: [Maybe a] -> [a]
 clean = map fromJust . L.filter (not . null)
 
-runToItem :: (MonadIO m, ToItem i) => Handle -> i -> DocID Feed -> URL ->
+runToItem :: (MonadIO m, ToItem i) => Handle -> i -> DocID Feed ->
              m (Maybe (DocID Item, Item))
-runToItem h it fid u = do
+runToItem h it fid = do
   df <- liftIO getCurrentTime
-  runTransaction h $ toItem it fid u df
+  runTransaction h $ toItem it fid df
 
 runToFeed :: (MonadIO m, ToFeed f) => Handle -> f -> DocID Cat -> URL ->
              m (Maybe (DocID Feed, Feed))

@@ -128,7 +128,7 @@ class ToPerson p where
   toPerson :: MonadIO m => p -> Transaction m (DocID Person, Person)
 
 class ToItem i where
-  toItem :: MonadIO m => i -> DocID Feed -> URL -> UTCTime ->
+  toItem :: MonadIO m => i -> DocID Feed -> UTCTime ->
             Transaction m (DocID Item, Item)
 
 text2UTCTime :: String -> UTCTime -> UTCTime
