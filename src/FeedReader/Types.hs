@@ -69,8 +69,8 @@ data Cat = Cat
 instance Document Cat
 
 data Person = Person
-  { personName  :: Indexable String
-  , personURL   :: Unique URL
+  { personName  :: Unique (Indexable String)
+  , personURL   :: URL
   , personEmail :: String
   } deriving (Show, Generic, Serialize)
 

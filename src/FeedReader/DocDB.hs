@@ -35,13 +35,14 @@ module FeedReader.DocDB
   , DBValue
   , Document (..)
   , lookup
-  , lookupUnique
   , insert
   , update
   , delete
   , range
   , rangeK
   , filter
+  , lookupUnique
+  , updateUnique
   , size
   , debug
   ) where
@@ -269,7 +270,12 @@ instance {-# OVERLAPPABLE #-} Show a => DBValue (Indexable a) where
           f (n, v) b = (n - 1, if n >= 0 then v + fromIntegral b * 2 ^ (8 * n) else v)
   isReference _ = False
 
-instance Hashable a => DBValue (Unique a) where
+instance (Hashable a, DBValue (Indexable a)) => DBValue (Unique (Indexable a)) where
+  getUnique (Unique (Indexable a)) = Just . fromIntegral $ hash a
+  getDBValues = getDBValues . unUnique
+  isReference _ = isReference (Proxy :: Proxy (Indexable a))
+
+instance {-# OVERLAPPABLE #-} Hashable a => DBValue (Unique a) where
   getUnique (Unique a) = Just . fromIntegral $ hash a
 
 -- Records ---------------------------------------------------------------------
@@ -451,6 +457,14 @@ lookupUnique p (IntVal u) = Transaction $ do
   t <- S.get
   withMasterLock (transHandle t) $ \m -> return . liftM (DocID . fromIntegral) $
     Map.lookup (toInt . fst $ unProperty p) (unqIdx m) >>= Map.lookup (toInt u)
+
+updateUnique :: (Document a, MonadIO m) => Property a -> IntVal b -> a ->
+                Transaction m (DocID a)
+updateUnique p u a = do
+  mdid <- lookupUnique p u
+  case mdid of
+    Nothing  -> insert a
+    Just did -> update did a >> return did
 
 update :: forall a m. (Document a, MonadIO m) => DocID a -> a -> Transaction m ()
 update did a = Transaction $ do

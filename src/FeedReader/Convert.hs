@@ -1,12 +1,13 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module FeedReader.Convert
   () where
 
 import           Control.Applicative ((<|>))
 import           Data.Maybe          (fromJust, fromMaybe)
+import           FeedReader.DocDB    (Transaction, intValUnique, updateUnique)
 import           FeedReader.Types
-import           FeedReader.DocDB (Transaction, insert)
 import qualified Text.Atom.Feed      as A
 import qualified Text.RSS.Syntax     as R
 import qualified Text.RSS1.Syntax    as R1
@@ -40,11 +41,12 @@ tryEContent2DB c = eContent2DB $ fromMaybe (A.TextContent "") c
 
 instance ToPerson A.Person where
   toPerson p = do
-    let p' = Person { personName  = Indexable $ A.personName p
-                    , personURL   = Unique . fromMaybe "" $ A.personURI p
+    let name = Indexable $ A.personName p
+    let p' = Person { personName  = Unique name
+                    , personURL   = fromMaybe "" $ A.personURI p
                     , personEmail = fromMaybe "" $ A.personEmail p
                     }
-    pid <- insert p'
+    pid <- updateUnique "personName" (intValUnique name) p'
     return (pid, p')
 
 instance ToFeed A.Feed where
@@ -62,7 +64,7 @@ instance ToFeed A.Feed where
                   , feedImage        = imageFromURL <$> (A.feedLogo f <|> A.feedIcon f)
                   , feedUpdated      = Indexable $ text2UTCTime (A.feedUpdated f) df
                   }
-    fid <- insert f'
+    fid <- updateUnique "feedURL" (intValUnique u) f'
     return (fid, f')
 
 instance ToItem A.Entry where
@@ -83,5 +85,5 @@ instance ToItem A.Entry where
                                          (fromMaybe "" $ A.entryPublished i) df
                   , itemUpdated      = Indexable date
                   }
-    iid <- insert i'
+    iid <- updateUnique "itemURL" (intValUnique u) i'
     return (iid, i')
