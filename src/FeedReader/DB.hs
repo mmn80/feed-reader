@@ -6,6 +6,7 @@ module FeedReader.DB
   , runRange
   , runFilter
   , runLookup
+  , runLookupUnique
   , runInsert
   , runDelete
   , runDeleteRange
@@ -28,6 +29,15 @@ import           Prelude             hiding (filter, lookup)
 runLookup :: (Document a, MonadIO m) => Handle -> DocID a -> m (Maybe (DocID a, a))
 runLookup h k = fromMaybe Nothing <$>
   runTransaction h (lookup k)
+
+runLookupUnique :: (Document a, MonadIO m) => Handle -> Property a -> IntVal b ->
+                   m (Maybe (DocID a, a))
+runLookupUnique h p k = fromMaybe Nothing <$>
+  runTransaction h (do
+    mdid <- lookupUnique p k
+    case mdid of
+      Nothing  -> return Nothing
+      Just did -> lookup did)
 
 runRange :: (Document a, MonadIO m) => Handle -> Maybe (IntVal b) ->
             Property a -> Int -> m [(DocID a, a)]

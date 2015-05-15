@@ -29,6 +29,7 @@ module FeedReader.Types
   , ToPerson (..)
   , ToItem (..)
   , Indexable (..)
+  , Unique (..)
   , text2UTCTime
   , imageFromURL
   , diffMs
@@ -36,6 +37,7 @@ module FeedReader.Types
 
 import           Control.Applicative   ((<|>))
 import           Control.Monad         (liftM)
+import           Control.Monad.Trans   (MonadIO)
 import           Data.Maybe            (fromMaybe)
 import           Data.Serialize        (Get (..), Serialize (..))
 import           Data.Time.Clock       (UTCTime, diffUTCTime)
@@ -44,9 +46,9 @@ import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
 import           Data.Time.Format      (defaultTimeLocale, iso8601DateFormat,
                                         parseTimeM, rfc822DateFormat)
 import           FeedReader.DocDB      (DBValue, DocID, Document (..),
-                                        Indexable (..), Transaction)
+                                        Indexable (..), Transaction,
+                                        Unique (..))
 import           GHC.Generics          (Generic)
-import           Control.Monad.Trans   (MonadIO)
 
 type URL      = String
 type Language = String
@@ -68,7 +70,7 @@ instance Document Cat
 
 data Person = Person
   { personName  :: Indexable String
-  , personURL   :: URL
+  , personURL   :: Unique URL
   , personEmail :: String
   } deriving (Show, Generic, Serialize)
 
@@ -85,7 +87,7 @@ data Image = Image
 
 data Feed = Feed
   { feedCatID        :: DocID Cat
-  , feedURL          :: URL
+  , feedURL          :: Unique URL
   , feedTitle        :: Indexable Content
   , feedDescription  :: Content
   , feedLanguage     :: Language
@@ -100,7 +102,7 @@ instance Document Feed
 
 data Item = Item
   { itemFeedID       :: DocID Feed
-  , itemURL          :: URL
+  , itemURL          :: Unique URL
   , itemTitle        :: Content
   , itemSummary      :: Content
   , itemTags         :: [Tag]

@@ -29,10 +29,13 @@ module FeedReader.DocDB
   , DocID
   , IntVal
   , intVal
-  , DBValue
+  , intValUnique
+  , Unique (..)
   , Indexable (..)
+  , DBValue
   , Document (..)
   , lookup
+  , lookupUnique
   , insert
   , update
   , delete
@@ -43,6 +46,7 @@ module FeedReader.DocDB
   , debug
   ) where
 
+import           Control.Arrow         ((&&&))
 import           Control.Concurrent    (MVar, ThreadId, forkIO, newMVar,
                                         putMVar, takeMVar, threadDelay)
 import           Control.Exception     (bracket, bracketOnError)
@@ -54,7 +58,7 @@ import           Control.Monad.Trans   (MonadIO (liftIO))
 import           Data.ByteString       (ByteString)
 import qualified Data.ByteString       as B
 import           Data.Function         (on)
-import           Data.Hashable         (hash)
+import           Data.Hashable         (Hashable, hash)
 import           Data.IntMap.Strict    (IntMap)
 import qualified Data.IntMap.Strict    as Map
 import           Data.IntSet           (IntSet)
@@ -71,8 +75,9 @@ import           Data.Typeable         (Proxy (..), Typeable, typeRep)
 import           Data.Word             (Word32, Word8)
 import           FeedReader.Cache      (LRUCache)
 import qualified FeedReader.Cache      as Cache
-import           GHC.Generics          ((:*:), (:+:), Generic)
-import qualified GHC.Generics          as Gen
+import           GHC.Generics          ((:*:) (..), (:+:) (..), C, D, Generic,
+                                        K1 (..), M1 (..), Rep, S, Selector,
+                                        U1 (..), from, selName)
 import           GHC.TypeLits          (Symbol)
 import           Numeric               (showHex)
 import           Prelude               hiding (filter, lookup)
@@ -110,6 +115,7 @@ data IntReference = IntReference
 data DocRecord = DocRecord
   { docID    :: !DID
   , docTID   :: !TID
+  , docURefs :: ![IntReference]
   , docIRefs :: ![IntReference]
   , docDRefs :: ![DocReference]
   , docAddr  :: !Addr
@@ -121,6 +127,8 @@ type SortIndex = IntMap (IntMap IntSet)
 
 type FilterIndex = IntMap (IntMap SortIndex)
 
+type UniqueIndex = IntMap (IntMap Int)
+
 data MasterState = MasterState
   { logHandle :: IO.Handle
   , logPos    :: !Addr
@@ -131,6 +139,7 @@ data MasterState = MasterState
   , logPend   :: !(IntMap [(DocRecord, ByteString)])
   , logComp   :: !(IntMap [DocRecord])
   , mainIdx   :: !(IntMap [DocRecord])
+  , unqIdx    :: !UniqueIndex
   , intIdx    :: !SortIndex
   , refIdx    :: !FilterIndex
   }
@@ -205,11 +214,20 @@ newtype IntVal a = IntVal { unIntVal :: DID }
 intVal :: DBValue (Indexable a) => a -> IntVal b
 intVal = fromIntegral . head . getDBValues . Indexable
 
+intValUnique :: DBValue (Unique a) => a -> IntVal b
+intValUnique = fromIntegral . fromJust . getUnique . Unique
+
 newtype Indexable a = Indexable { unIndexable :: a }
   deriving (Eq, Ord, Bounded, Serialize)
 
 instance Show a => Show (Indexable a) where
   showsPrec p (Indexable a) = showsPrec p a
+
+newtype Unique a = Unique { unUnique :: a }
+  deriving (Eq, Serialize)
+
+instance Show a => Show (Unique a) where
+  showsPrec p (Unique a) = showsPrec p a
 
 class DBValue a where
   getDBValues :: a -> [DBWord]
@@ -217,6 +235,9 @@ class DBValue a where
 
   isReference :: Proxy a -> Bool
   isReference _ = False
+
+  getUnique :: a -> Maybe IntValue
+  getUnique _ = Nothing
 
 instance DBValue (DocID a) where
   getDBValues (DocID did) = [did]
@@ -248,47 +269,55 @@ instance {-# OVERLAPPABLE #-} Show a => DBValue (Indexable a) where
           f (n, v) b = (n - 1, if n >= 0 then v + fromIntegral b * 2 ^ (8 * n) else v)
   isReference _ = False
 
+instance Hashable a => DBValue (Unique a) where
+  getUnique (Unique a) = Just . fromIntegral $ hash a
+
 -- Records ---------------------------------------------------------------------
 
 data Indexables = Indexables
   { ixRefs :: [(String, DID)]
   , ixInts :: [(String, DID)]
+  , ixUnqs :: [(String, IntValue)]
   } deriving (Show)
 
 class (Typeable a, Generic a, Serialize a) => Document a where
   getIndexables :: a -> Indexables
-  default getIndexables :: (GetIndexablesG (Gen.Rep a)) => a -> Indexables
-  getIndexables = getIndexablesG "" . Gen.from
+  default getIndexables :: (GetIndexables (Rep a)) => a -> Indexables
+  getIndexables = ggetIndexables "" . from
 
-class GetIndexablesG f where
-  getIndexablesG :: String -> f a -> Indexables
+class GetIndexables f where
+  ggetIndexables :: String -> f a -> Indexables
 
-instance GetIndexablesG Gen.U1 where
-  getIndexablesG _ Gen.U1 = Indexables [] []
+instance GetIndexables U1 where
+  ggetIndexables _ U1 = Indexables [] [] []
 
-instance (GetIndexablesG a, GetIndexablesG b) => GetIndexablesG (a :*: b) where
-  getIndexablesG _ (x Gen.:*: y) = Indexables (xrs ++ yrs) (xis ++ yis)
-    where (Indexables xrs xis) = getIndexablesG "" x
-          (Indexables yrs yis) = getIndexablesG "" y
+instance (GetIndexables a, GetIndexables b) => GetIndexables (a :*: b) where
+  ggetIndexables _ (x :*: y) = Indexables (xrs ++ yrs) (xis ++ yis) (xus ++ yus)
+    where (Indexables xrs xis xus) = ggetIndexables "" x
+          (Indexables yrs yis yus) = ggetIndexables "" y
 
-instance (GetIndexablesG a, GetIndexablesG b) => GetIndexablesG (a :+: b) where
-  getIndexablesG _ (Gen.L1 x) = getIndexablesG "" x
-  getIndexablesG _ (Gen.R1 x) = getIndexablesG "" x
+instance (GetIndexables a, GetIndexables b) => GetIndexables (a :+: b) where
+  ggetIndexables _ (L1 x) = ggetIndexables "" x
+  ggetIndexables _ (R1 x) = ggetIndexables "" x
 
-instance GetIndexablesG a => GetIndexablesG (Gen.M1 Gen.D c a) where
-  getIndexablesG _ m1@(Gen.M1 x) = getIndexablesG "" x
+instance GetIndexables a => GetIndexables (M1 D c a) where
+  ggetIndexables _ m1@(M1 x) = ggetIndexables "" x
 
-instance GetIndexablesG a => GetIndexablesG (Gen.M1 Gen.C c a) where
-  getIndexablesG _ m1@(Gen.M1 x) = getIndexablesG "" x
+instance GetIndexables a => GetIndexables (M1 C c a) where
+  ggetIndexables _ m1@(M1 x) = ggetIndexables "" x
 
-instance (GetIndexablesG a, Gen.Selector c) => GetIndexablesG (Gen.M1 Gen.S c a) where
-  getIndexablesG _ m1@(Gen.M1 x) = getIndexablesG (Gen.selName m1) x
+instance (GetIndexables a, Selector c) => GetIndexables (M1 S c a) where
+  ggetIndexables _ m1@(M1 x) = ggetIndexables (selName m1) x
 
-instance DBValue a => GetIndexablesG (Gen.K1 i a) where
-  getIndexablesG n (Gen.K1 x) = if isReference (Proxy :: Proxy a)
-                                then Indexables { ixRefs = vs, ixInts = [] }
-                                else Indexables { ixRefs = [], ixInts = vs }
+instance DBValue a => GetIndexables (K1 i a) where
+  ggetIndexables n (K1 x) =
+    if isReference (Proxy :: Proxy a)
+    then Indexables { ixRefs = vs, ixInts = [], ixUnqs = us }
+    else Indexables { ixRefs = [], ixInts = vs, ixUnqs = us }
     where vs = (\did -> (n, did)) <$> getDBValues x
+          us = case getUnique x of
+                 Nothing -> []
+                 Just a  -> [(n, a)]
 
 
 -- Functions ---------------------------------------------------------------------
@@ -311,6 +340,7 @@ open lf df = do
                       , logPend   = Map.empty
                       , logComp   = Map.empty
                       , mainIdx   = Map.empty
+                      , unqIdx    = Map.empty
                       , intIdx    = Map.empty
                       , refIdx    = Map.empty
                       }
@@ -352,7 +382,7 @@ runTransaction h (Transaction t) = do
   (a, q, u) <- runUserCode tid
   if null u then return $ Just a
   else withMaster h $ \m ->
-    if checkValid tid (logPend m) (logComp m) q u then do
+    if checkUnique u (unqIdx m) && checkValid tid (logPend m) (logComp m) q u then do
       let tsz = sum $ (tRecSize . Pending . fst) <$> u
       let pos = toInt (logPos m) + tsz
       lsz <- checkLogSize (logHandle m) (toInt (logSize m)) pos
@@ -377,6 +407,11 @@ runTransaction h (Transaction t) = do
           }
       let u' = L.nubBy ((==) `on` docID . fst) u
       return (a, q, u')
+
+    checkUnique u idx = all ck u
+      where ck (d, _) = docDel d || all cku (docURefs d)
+            cku ir = null $ Map.lookup (toInt $ irefPID ir) idx >>=
+                            Map.lookup (toInt $ irefVal ir)
 
     checkValid tid logp logc q u = ck qs && ck us
       where
@@ -411,6 +446,12 @@ lookup (DocID did) = Transaction $ do
   S.put t { transReadList = did : transReadList t }
   return mba
 
+lookupUnique :: MonadIO m => Property a -> IntVal b -> Transaction m (Maybe (DocID a))
+lookupUnique p (IntVal u) = Transaction $ do
+  t <- S.get
+  withMasterLock (transHandle t) $ \m -> return . liftM (DocID . fromIntegral) $
+    Map.lookup (toInt . fst $ unProperty p) (unqIdx m) >>= Map.lookup (toInt u)
+
 update :: forall a m. (Document a, MonadIO m) => DocID a -> a -> Transaction m ()
 update did a = Transaction $ do
   t <- S.get
@@ -418,6 +459,7 @@ update did a = Transaction $ do
   let is = getIndexables a
   let r = DocRecord { docID   = unDocID did
                     , docTID  = transTID t
+                    , docURefs = fi <$> ixUnqs is
                     , docIRefs = fi <$> ixInts is
                     , docDRefs = fd <$> ixRefs is
                     , docAddr = 0
@@ -426,7 +468,7 @@ update did a = Transaction $ do
                     }
   S.put t { transUpdateList = (r, bs) : transUpdateList t }
   where
-    fi (p, did) = IntReference (getP p) did
+    fi (p, val) = IntReference (getP p) val
     fd (p, did) = DocReference (getP p) did
     getP p = fst $ unProperty (fromString p :: Property a)
 
@@ -440,12 +482,13 @@ insert a = Transaction $ do
 delete :: MonadIO m => DocID a -> Transaction m ()
 delete (DocID did) = Transaction $ do
   t <- S.get
-  (addr, sz, irs, drs) <- withMasterLock (transHandle t) $ \m -> return $
+  (addr, sz, urs, irs, drs) <- withMasterLock (transHandle t) $ \m -> return $
     case findFirstDoc m t did of
-      Nothing -> (0, 0, [], [])
-      Just r  -> (docAddr r, docSize r, docIRefs r, docDRefs r)
+      Nothing -> (0, 0, [], [], [])
+      Just r  -> (docAddr r, docSize r, docURefs r, docIRefs r, docDRefs r)
   let r = DocRecord { docID    = did
                     , docTID   = transTID t
+                    , docURefs = urs
                     , docIRefs = irs
                     , docDRefs = drs
                     , docAddr  = addr
@@ -517,6 +560,7 @@ debug h sIdx sCache = do
     showsH "\nlogComp   :\n  " (logComp m) .
     if sIdx then
     showsH "\nmainIdx   :\n  " (mainIdx m) .
+    showsH "\nunqIdx    :\n  " (unqIdx m) .
     showsH "\nintIdx    :\n  " (intIdx m) .
     showsH "\nrefIdx    :\n  " (refIdx m) .
     showsH "\ngaps      :\n  " (gaps m)
@@ -623,6 +667,22 @@ updateMainIdx = L.foldl' f
                               Nothing  -> [r]
                               Just ors -> r : ors in
                   Map.insert did rs' idx
+
+updateUnqIdx :: UniqueIndex -> [DocRecord] -> UniqueIndex
+updateUnqIdx = L.foldl' f
+  where f idx r = L.foldl' g idx (docURefs r)
+          where
+            did = toInt (docID r)
+            del = docDel r
+            g idx' ref =
+              let rpid = toInt (irefPID ref) in
+              let rval = toInt (irefVal ref) in
+              case Map.lookup rpid idx' of
+                Nothing -> if del then idx'
+                           else Map.insert rpid (Map.singleton rval did) idx'
+                Just is -> Map.insert rpid is' idx'
+                  where is' = if del then Map.delete rval is
+                              else Map.insert rval did is
 
 updateIntIdx :: SortIndex -> [DocRecord] -> SortIndex
 updateIntIdx = L.foldl' f
@@ -734,6 +794,7 @@ readLog m pos = do
                           return m { newTID  = max (newTID m) (tid + 1)
                                    , logPend = Map.delete (toInt tid) l
                                    , mainIdx = updateMainIdx (mainIdx m) rs
+                                   , unqIdx  = updateUnqIdx (unqIdx m) rs
                                    , intIdx  = updateIntIdx (intIdx m) rs
                                    , refIdx  = updateRefIdx (refIdx m) rs
                                    }
@@ -768,24 +829,14 @@ readLogTRec h = do
                x | x == flsTag -> return False
                _ -> logError h $ showString "True ('T') or False ('F') tag expected but " .
                       shows del . showString " found."
-      irfc <- readWord h
-      irfs <- replicateM (toInt irfc) $ do
-                rpid <- readWord h
-                rval <- readWord h
-                return IntReference { irefPID = rpid
-                                    , irefVal = rval
-                                    }
-      drfc <- readWord h
-      drfs <- replicateM (toInt drfc) $ do
-                rpid <- readWord h
-                rdid <- readWord h
-                return DocReference { drefPID = rpid
-                                    , drefDID = rdid
-                                    }
+      us <- readWordList IntReference
+      is <- readWordList IntReference
+      ds <- readWordList DocReference
       return $ Pending DocRecord { docID    = did
                                  , docTID   = tid
-                                 , docIRefs = irfs
-                                 , docDRefs = drfs
+                                 , docURefs = us
+                                 , docIRefs = is
+                                 , docDRefs = ds
                                  , docAddr  = adr
                                  , docSize  = siz
                                  , docDel   = dlb
@@ -795,6 +846,13 @@ readLogTRec h = do
       return $ Completed tid
     _ -> logError h $ showString "Pending ('p') or Completed ('c') tag expected but " .
            shows tag . showString " found."
+  where readWordList con = do
+          sz <- readWord h
+          replicateM (toInt sz) $ do
+            pid <- readWord h
+            val <- readWord h
+            return $ con pid val
+
 
 writeLogTRec :: MonadIO m => IO.Handle -> TRec -> m ()
 writeLogTRec h t =
@@ -806,21 +864,23 @@ writeLogTRec h t =
       writeWord h $ docAddr doc
       writeWord h $ docSize doc
       writeWord h . fromIntegral $ if docDel doc then truTag else flsTag
-      writeWord h . fromIntegral . length $ docIRefs doc
-      forM_ (docIRefs doc) $ \r -> do
-         writeWord h $ irefPID r
-         writeWord h $ irefVal r
-      writeWord h . fromIntegral . length $ docDRefs doc
-      forM_ (docDRefs doc) $ \r -> do
-         writeWord h $ drefPID r
-         writeWord h $ drefDID r
+      writeWordList $ (irefPID &&& irefVal) <$> docURefs doc
+      writeWordList $ (irefPID &&& irefVal) <$> docIRefs doc
+      writeWordList $ (drefPID &&& drefDID) <$> docDRefs doc
     Completed tid -> do
       writeWord h $ fromIntegral cmpTag
       writeWord h tid
+  where writeWordList rs = do
+          writeWord h . fromIntegral $ length rs
+          forM_ rs $ \(pid, val) -> do
+             writeWord h pid
+             writeWord h val
 
 tRecSize :: TRec -> Int
 tRecSize r = case r of
-  Pending dr  -> 8 + (2 * length (docIRefs dr)) + (2 * length (docDRefs dr))
+  Pending dr  -> 9 + (2 * length (docURefs dr)) +
+                     (2 * length (docIRefs dr)) +
+                     (2 * length (docDRefs dr))
   Completed _ -> 2
 
 ival :: Maybe (IntVal a) -> Int
@@ -922,6 +982,7 @@ updateManThread h w = do
                      , logPend = lgp
                      , logComp = lgc
                      , mainIdx = updateMainIdx (mainIdx m) rs'
+                     , unqIdx  = updateUnqIdx (unqIdx m) rs'
                      , intIdx  = updateIntIdx (intIdx m) rs'
                      , refIdx  = updateRefIdx (refIdx m) rs'
                      }
@@ -953,8 +1014,9 @@ gcThread h = do
       let dataPathNew = dataPath ++ ".new"
       IO.withBinaryFile dataPathNew IO.ReadWriteMode $ writeData rs2 dpos h
       let mIdx = updateMainIdx Map.empty rs'
-      let iIdx = updateIntIdx Map.empty rs'
-      let rIdx = updateRefIdx Map.empty rs'
+      let uIdx = updateUnqIdx  Map.empty rs'
+      let iIdx = updateIntIdx  Map.empty rs'
+      let rIdx = updateRefIdx  Map.empty rs'
       when (forceEval mIdx iIdx rIdx) $ withUpdateMan h $ \kill -> do
         withMaster h $ \nm -> do
           let (ncrs', dpos') = realloc dpos $ concat <$> splitNew om $ logComp nm
@@ -982,6 +1044,7 @@ gcThread h = do
                               , logPend   = logp'
                               , logComp   = Map.empty
                               , mainIdx   = updateMainIdx mIdx ncrs
+                              , unqIdx    = updateUnqIdx  uIdx ncrs
                               , intIdx    = updateIntIdx  iIdx ncrs
                               , refIdx    = updateRefIdx  rIdx ncrs
                               }

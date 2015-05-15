@@ -1,15 +1,15 @@
 Invariants
 ----------
 
-- All locks last at most **O(log n)**.
-This includes "big" procedures, like GC, that never "stop the world".
+- All locks are held for at most **O(log n)** time.
+This includes "big" procedures, like GC, that never "stop the world" for too long.
 - All meta data (incl. indexes) reside in memory in a `MasterState` structure.
 - All meta data is built incrementally, in **O(log n)** steps,
 from the transaction log (no backtracking).
-- No meta data resides in the data file, just serialized user "records".
+- No meta data resides in the data file, just serialized user "documents".
 - No serialized user data is saved in the transaction log file, just keys, addresses and sizes.
 - All primitive transactions in the user facing API are **O(log n)**.
-- Index management is fully automatic, online (*O(log n)* with no rebuild steps), and hidden.
+- Index management is fully automatic, online (*O(log n)* with no rebuild steps), and hidden from user.
 
 Memory Data Structures
 ----------------------
@@ -26,6 +26,10 @@ The handle is created by an `open` IO action, used for running transaction monad
 `mainIdx` is the primary index, holding records' locations in the data file.
 `gaps` is used for fast allocation.
 `intIdx` and `refIdx` are inverted indexes.
+
+`unqIdx` is used for unique fields.
+The `IntVal` is computed with the `Hashable` instance of the value type.
+The index is used for ensuring uniqueness, and also for lookup queries.
 
 `intIdx` indexes columns that hold Int-convertible values, like Date/Time.
 It is used for range queries.
@@ -46,6 +50,7 @@ logPend   :: TID -> [(DID, Addr, Size, Del, [(PropID, [DID])])]
 logComp   :: TID -> [(DID, Addr, Size, Del, [(PropID, [DID])])]
 gaps      :: Size -> [Addr]
 mainIdx   :: DID -> [(TID, Addr, Size, [(PropID, [DID])])]
+unqIdx    :: PropID -> IntVal -> DID
 intIdx    :: PropID -> IntVal -> [DID]
 refIdx    :: PropID -> [(PropID, DID -> [DID])]
 ```
@@ -131,7 +136,7 @@ update :: DID a -> a -> Trans ()
 delete :: DID a -> Trans ()
 ```
 
-Also range/page queries, and queries on the `intIdx`.
+Also range/page queries, and queries on the `intIdx` and `unqIdx`.
 
 ### Running Transactions
 
@@ -193,7 +198,7 @@ repeat:
       remove transaction from logPend
       if keepTrans or new pending transactions exist, add it to logComp
       if logPend is empty and not keepTrans, empty logComp
-      update mainIdx, intIdx, refIdx
+      update mainIdx, unqIdx, intIdx, refIdx
       add "Completed: TID" to the transaction log
       update logPos in the transaction log
 ```
@@ -209,7 +214,7 @@ with master lock:
   keepTrans = True
 collect garbage from grabbed masterState
 reallocate records contiguously (empty gaps)
-rebuild mainIdx, intIdx, refIdx
+rebuild mainIdx, unqIdx, intIdx, refIdx
 write new log file
 write new data file
 with UM lock:
@@ -217,7 +222,7 @@ with UM lock:
     update old logComp and logPend (reallocate)
     update new (empty) gaps from logComp and logPend
     write new transactions to new log & new data file
-    update new mainIdx, intIdx, refIdx from logComp
+    update new mainIdx, unqIdx, intIdx, refIdx from logComp
     swap log files (close old handle; rename file; open new handle)
     keepTrans = False
   with data lock:

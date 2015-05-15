@@ -41,7 +41,7 @@ tryEContent2DB c = eContent2DB $ fromMaybe (A.TextContent "") c
 instance ToPerson A.Person where
   toPerson p = do
     let p' = Person { personName  = Indexable $ A.personName p
-                    , personURL   = fromMaybe "" $ A.personURI p
+                    , personURL   = Unique . fromMaybe "" $ A.personURI p
                     , personEmail = fromMaybe "" $ A.personEmail p
                     }
     pid <- insert p'
@@ -52,7 +52,7 @@ instance ToFeed A.Feed where
     as <- mapM toPerson $ A.feedAuthors f
     cs <- mapM toPerson $ A.feedContributors f
     let f' = Feed { feedCatID        = c
-                  , feedURL          = u
+                  , feedURL          = Unique u
                   , feedTitle        = Indexable . content2DB $ A.feedTitle f
                   , feedDescription  = tryContent2DB $ A.feedSubtitle f
                   , feedLanguage     = ""
@@ -71,7 +71,7 @@ instance ToItem A.Entry where
     cs <- mapM toPerson $ A.entryContributor i
     let date = text2UTCTime (A.entryUpdated i) df
     let i' = Item { itemFeedID       = f
-                  , itemURL          = u
+                  , itemURL          = Unique u
                   , itemTitle        = content2DB $ A.entryTitle i
                   , itemSummary      = tryContent2DB $ A.entrySummary i
                   , itemTags         = A.catTerm <$> A.entryCategories i

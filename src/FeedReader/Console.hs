@@ -33,6 +33,8 @@ helpMessage = do
   yield "  stats   : shows general stats"
   yield "  get t k : SELECT * FROM t WHERE ID = k"
   yield "          : t: 'cat', 'feed', 'person' or 'item'"
+  yield "  getk t k: SELECT * FROM t WHERE URL = k"
+  yield "          : t: 'feed', 'person' or 'item'"
   yield "  range p t c s"
   yield "          : SELECT TOP p * FROM t WHERE c < s ORDER BY c DESC"
   yield "          : c: '*' will use a default column"
@@ -60,6 +62,7 @@ processCommand h = do
     "help"      -> helpMessage
     "stats"     -> checkArgs 0 args h cmdStats
     "get"       -> checkArgs 2 args h cmdGet
+    "getk"      -> checkArgs 2 args h cmdGetk
     "range"     -> checkArgs 4 args h cmdRange
     "filter"    -> checkArgs 6 args h cmdFilter
     "add"       -> checkArgs 2 args h cmdAdd
@@ -90,7 +93,7 @@ randomStringIx l r = Indexable <$> randomString l r
 
 randomContentIx l r = Indexable . Text <$> randomString l r
 
-time2Int str = fromInteger . round . utcTimeToPOSIXSeconds . DB.text2UTCTime str
+time2Int str = fromInteger . round . utcTimeToPOSIXSeconds . text2UTCTime str
 
 randomTime = do
   df <- getCurrentTime
@@ -106,7 +109,7 @@ randomCat =
 
 randomFeed c =
   Feed <$> pure c
-          <*> randomString 100 300
+          <*> (Unique <$> randomString 100 300)
           <*> randomContentIx 100 300
           <*> (Text <$> randomString 100 300)
           <*> randomString 2 10
@@ -118,12 +121,12 @@ randomFeed c =
 
 randomPerson =
   Person <$> randomStringIx 10 30
-         <*> randomString 100 300
+         <*> (Unique <$> randomString 100 300)
          <*> randomString 10 30
 
 randomItem f =
   Item <$> pure f
-          <*> randomString 100 300
+          <*> (Unique <$> randomString 100 300)
           <*> (Text <$> randomString 100 300)
           <*> (Text <$> randomString 100 300)
           <*> pure []
@@ -172,6 +175,24 @@ cmdGet h args = timed $ do
                   >>= out . fmap (show . snd)
     "item"   -> liftBase (DB.runLookup h (fromIntegral k) :: LookupRet Item)
                   >>= out . fmap (show . snd)
+    _        -> yield . shows t $ " is not a valid table name."
+
+cmdGetk h args = timed $ do
+  let t = args !! 1
+  let k = args !! 2
+  let out = \case
+              Just s -> each $ lines s
+              _      -> yields' "No record found with URL = " $ showString k
+  case t of
+    "feed"   ->
+      liftBase (DB.runLookupUnique h "feedURL"   (DB.intValUnique k) :: LookupRet Feed)
+      >>= out . fmap (show . snd)
+    "person" ->
+      liftBase (DB.runLookupUnique h "personURL" (DB.intValUnique k) :: LookupRet Person)
+      >>= out . fmap (show . snd)
+    "item"   ->
+      liftBase (DB.runLookupUnique h "itemURL"   (DB.intValUnique k) :: LookupRet Item)
+      >>= out . fmap (show . snd)
     _        -> yield . shows t $ " is not a valid table name."
 
 page h c p s k o now df = liftBase $
