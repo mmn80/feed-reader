@@ -30,21 +30,15 @@ module FeedReader.Types
   , ToItem (..)
   , Indexable (..)
   , Unique (..)
-  , text2UTCTime
-  , imageFromURL
-  , diffMs
   ) where
 
-import           Control.Applicative   ((<|>))
 import           Control.Monad         (liftM)
 import           Control.Monad.Trans   (MonadIO)
 import           Data.Maybe            (fromMaybe)
 import           Data.Serialize        (Get (..), Serialize (..))
-import           Data.Time.Clock       (UTCTime, diffUTCTime)
+import           Data.Time.Clock       (UTCTime)
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
-import           Data.Time.Format      (defaultTimeLocale, iso8601DateFormat,
-                                        parseTimeM, rfc822DateFormat)
 import           FeedReader.DocDB      (DBValue, DocID, Document (..),
                                         Indexable (..), Transaction,
                                         Unique (..))
@@ -125,24 +119,3 @@ class ToPerson p where
 class ToItem i where
   toItem :: MonadIO m => i -> DocID Feed -> UTCTime ->
             Transaction m (DocID Item, Item)
-
-text2UTCTime :: String -> UTCTime -> UTCTime
-text2UTCTime t df = fromMaybe df $ iso <|> iso' <|> rfc
-  where
-    iso  = tryParse . iso8601DateFormat $ Just "%H:%M:%S"
-    iso' = tryParse $ iso8601DateFormat Nothing
-    rfc  = tryParse rfc822DateFormat
-    tryParse f = parseTimeM True defaultTimeLocale f t
-
-diffMs :: UTCTime -> UTCTime -> Float
-diffMs t0 t1 = 1000 * fromRational (toRational $ diffUTCTime t1 t0)
-
-imageFromURL :: URL -> Image
-imageFromURL u = Image
-  { imageURL         = u
-  , imageTitle       = ""
-  , imageDescription = ""
-  , imageLink        = u
-  , imageWidth       = 0
-  , imageHeight      = 0
-  }

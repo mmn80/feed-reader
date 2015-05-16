@@ -39,7 +39,8 @@ library
     FeedReader.DocDB,
     FeedReader.DB,
     FeedReader.Convert,
-    FeedReader.Import
+    FeedReader.Import,
+    FeedReader.Utils
 
   -- other-modules:
   -- other-extensions:

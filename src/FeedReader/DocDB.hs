@@ -3,6 +3,7 @@
 {-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE TupleSections              #-}
 {-# LANGUAGE TypeOperators              #-}
 
 -----------------------------------------------------------------------------
@@ -324,10 +325,7 @@ instance DBValue a => GetIndexables (K1 i a) where
     then Indexables { ixRefs = vs, ixInts = [], ixUnqs = us }
     else Indexables { ixRefs = [], ixInts = vs, ixUnqs = us }
     where vs = (\did -> (n, did)) <$> getDBValues x
-          us = case getUnique x of
-                 Nothing -> []
-                 Just a  -> [(n, a)]
-
+          us = maybe [] (pure . (n,)) (getUnique x)
 
 -- Functions ---------------------------------------------------------------------
 
@@ -452,10 +450,10 @@ lookup (DocID did) = Transaction $ do
   t <- S.get
   mbr <- withMasterLock (transHandle t) $ \m ->
            return $ findFirstDoc m t did
-  mba <- if null mbr then return Nothing
-         else do
-           a <- readDocument (transHandle t) (fromJust mbr)
-           return $ Just (DocID did, a)
+  mba <- maybe (return Nothing) (\r -> do
+           a <- readDocument (transHandle t) r
+           return $ Just (DocID did, a))
+         mbr
   S.put t { transReadList = did : transReadList t }
   return mba
 
@@ -511,17 +509,14 @@ insert a = Transaction $ do
 delete :: MonadIO m => DocID a -> Transaction m ()
 delete (DocID did) = Transaction $ do
   t <- S.get
-  (addr, sz, urs, irs, drs) <- withMasterLock (transHandle t) $ \m -> return $
-    case findFirstDoc m t did of
-      Nothing -> (0, 0, [], [], [])
-      Just r  -> (docAddr r, docSize r, docURefs r, docIRefs r, docDRefs r)
+  mb <- withMasterLock (transHandle t) $ \m -> return $ findFirstDoc m t did
   let r = DocRecord { docID    = did
                     , docTID   = transTID t
-                    , docURefs = urs
-                    , docIRefs = irs
-                    , docDRefs = drs
-                    , docAddr  = addr
-                    , docSize  = sz
+                    , docURefs = maybe [] docURefs mb
+                    , docIRefs = maybe [] docIRefs mb
+                    , docDRefs = maybe [] docDRefs mb
+                    , docAddr  = maybe 0 docAddr mb
+                    , docSize  = maybe 0 docSize mb
                     , docDel   = True
                     }
   S.put t { transUpdateList = (r, B.empty) : transUpdateList t }
@@ -533,7 +528,7 @@ page_ f mdid = Transaction $ do
   dds <- withMasterLock (transHandle t) $ \m -> do
            let ds = f (ival mdid) m
            let mbds = findFirstDoc m t . fromIntegral <$> ds
-           return [ fromJust mb | mb <- mbds, not (null mb) ]
+           return $ concatMap (foldMap pure) mbds
   dds' <- forM (reverse dds) $ \d -> do
     a <- readDocument (transHandle t) d
     return (DocID $ docID d, a)
@@ -560,10 +555,9 @@ pageK_ :: MonadIO m => (Int -> MasterState -> [Int]) -> Maybe (IntVal b) ->
           Transaction m [DocID a]
 pageK_ f mdid = Transaction $ do
   t <- S.get
-  dds <- withMasterLock (transHandle t) $ \m -> do
-           let ds = f (ival mdid) m
-           let mbds = findFirstDoc m t . fromIntegral <$> ds
-           return [ docID $ fromJust mb | mb <- mbds, not (null mb) ]
+  dds <- withMasterLock (transHandle t) $ \m -> return $
+    concatMap (map docID . foldMap pure . findFirstDoc m t . fromIntegral) $
+    f (ival mdid) m
   S.put t { transReadList = dds ++ transReadList t }
   return (DocID <$> dds)
 
@@ -658,9 +652,7 @@ withGC h f = liftIO $ bracketOnError
 readWord :: MonadIO m => IO.Handle -> m DBWord
 readWord h = do
   bs <- liftIO $ B.hGet h wordSize
-  case decode bs of
-    Right x  -> return x
-    Left err -> logError h $ showString err
+  either (logError h . showString) return (decode bs)
 
 writeWord :: MonadIO m => IO.Handle -> DBWord -> m ()
 writeWord h w = liftIO . B.hPut h $ encode w
@@ -692,9 +684,7 @@ mkNewTID h = withMaster h $ \m -> return (m { newTID = newTID m + 1 }, newTID m)
 updateMainIdx :: IntMap [DocRecord] -> [DocRecord] -> IntMap [DocRecord]
 updateMainIdx = L.foldl' f
   where f idx r = let did = toInt (docID r) in
-                  let rs' = case Map.lookup did idx of
-                              Nothing  -> [r]
-                              Just ors -> r : ors in
+                  let rs' = maybe [r] (r:) (Map.lookup did idx) in
                   Map.insert did rs' idx
 
 updateUnqIdx :: UniqueIndex -> [DocRecord] -> UniqueIndex
@@ -720,19 +710,19 @@ updateIntIdx = L.foldl' f
             did = toInt (docID r)
             del = docDel r
             g idx' ref =
-                let rpid = toInt (irefPID ref) in
-                let rval = toInt (irefVal ref) in
-                let sng = Set.singleton did in
-                case Map.lookup rpid idx' of
-                  Nothing -> if del then idx'
-                             else Map.insert rpid (Map.singleton rval sng) idx'
-                  Just is -> Map.insert rpid is' idx'
-                    where is' = case Map.lookup rval is of
-                                  Nothing -> if del then is
-                                             else Map.insert rval sng is
-                                  Just ss -> Map.insert rval ss' is
-                                    where ss' = if del then Set.delete did ss
-                                                else Set.insert did ss
+              let rpid = toInt (irefPID ref) in
+              let rval = toInt (irefVal ref) in
+              let sng = Set.singleton did in
+              case Map.lookup rpid idx' of
+                Nothing -> if del then idx'
+                           else Map.insert rpid (Map.singleton rval sng) idx'
+                Just is -> Map.insert rpid is' idx'
+                  where is' = case Map.lookup rval is of
+                                Nothing -> if del then is
+                                           else Map.insert rval sng is
+                                Just ss -> Map.insert rval ss' is
+                                  where ss' = if del then Set.delete did ss
+                                              else Set.insert did ss
 
 updateRefIdx :: FilterIndex -> [DocRecord] -> FilterIndex
 updateRefIdx = L.foldl' f
@@ -741,18 +731,18 @@ updateRefIdx = L.foldl' f
             did = toInt (docID r)
             del = docDel r
             g idx' ref =
-                let rpid = toInt (drefPID ref) in
-                let rval = toInt (drefDID ref) in
-                let sng = updateIntIdx Map.empty [r] in
-                case Map.lookup rpid idx' of
-                  Nothing -> if del then idx'
-                             else Map.insert rpid (Map.singleton rval sng) idx'
-                  Just is -> Map.insert rpid is' idx'
-                    where is' = case Map.lookup rval is of
-                                  Nothing -> if del then is
-                                             else Map.insert rval sng is
-                                  Just ss -> Map.insert rval ss' is
-                                    where ss' = updateIntIdx ss [r]
+              let rpid = toInt (drefPID ref) in
+              let rval = toInt (drefDID ref) in
+              let sng = updateIntIdx Map.empty [r] in
+              case Map.lookup rpid idx' of
+                Nothing -> if del then idx'
+                           else Map.insert rpid (Map.singleton rval sng) idx'
+                Just is -> Map.insert rpid is' idx'
+                  where is' = case Map.lookup rval is of
+                                Nothing -> if del then is
+                                           else Map.insert rval sng is
+                                Just ss -> Map.insert rval ss' is
+                                  where ss' = updateIntIdx ss [r]
 
 emptyGaps :: Addr -> IntMap [Addr]
 emptyGaps sz = Map.singleton (toInt $ maxBound - sz) [sz]
@@ -765,7 +755,7 @@ addGap s addr gs = Map.insert sz (addr:as) gs
 updateGaps :: MasterState -> IntMap [Addr]
 updateGaps m = addTail . L.foldl' f (Map.empty, 0) $ L.sortOn docAddr firstD
   where
-    firstD = [ r | r:_ <- Map.elems (mainIdx m), not $ docDel r ]
+    firstD = L.filter (not . docDel) . map head . Map.elems $ mainIdx m
     f (gs, addr) r = (gs', docAddr r + docSize r)
       where gs' = if addr == docAddr r then gs
                   else addGap sz addr gs
@@ -856,7 +846,8 @@ readLogTRec h = do
       dlb <- case toInt del of
                x | x == truTag  -> return True
                x | x == flsTag -> return False
-               _ -> logError h $ showString "True ('T') or False ('F') tag expected but " .
+               _ -> logError h $
+                      showString "True ('T') or False ('F') tag expected but " .
                       shows del . showString " found."
       us <- readWordList IntReference
       is <- readWordList IntReference
@@ -929,10 +920,9 @@ readDocument h r =
     case Cache.lookup now k cache of
       Nothing -> do
         bs <- readDocumentFromFile hnd r
-        a <- case decode bs of
-          Right a  -> return a
-          Left err -> liftIO . ioError . userError .
-                        showString "Deserialization error: " $ err
+        a <- either (liftIO . ioError . userError .
+               showString "Deserialization error: ") return $
+             decode bs
         return (DataState hnd $ Cache.insert now k a (B.length bs) cache, a)
       Just (a, _, cache') -> return (DataState hnd cache', a)
 
@@ -979,15 +969,15 @@ updateManThread h w = do
   (kill, wait) <- withUpdateMan h $ \kill -> do
     wait <- if kill then return True else do
       when w . threadDelay $ 100 * 1000
-      mbj <- withMasterLock h $ \m ->
+      withMasterLock h $ \m ->
         let lgp = logPend m in
         if null lgp then return Nothing
         else return . Just $ Map.findMin lgp
-      if null mbj then return True
-      else do
-        let (tid, rs) = fromJust mbj
+      >>=
+      maybe (return True) (\(tid, rs) -> do
         withData h $ \(DataState hnd cache) -> do
-          let maxAddr = toInteger . maximum $ (\r -> docAddr r + docSize r) . fst <$> rs
+          let maxAddr = toInteger . maximum $ (\r -> docAddr r + docSize r) .
+                        fst <$> rs
           sz <- IO.hFileSize hnd
           when (sz < maxAddr + 1) $ do
             let nsz = max (maxAddr + 1) $ sz + 4096
@@ -1015,7 +1005,7 @@ updateManThread h w = do
                      , intIdx  = updateIntIdx (intIdx m) rs'
                      , refIdx  = updateRefIdx (refIdx m) rs'
                      }
-          return (m', null lgp)
+          return (m', null lgp))
     return (kill, (kill, wait))
   unless kill $ updateManThread h wait
   where updateLog tid keep lgp lgc = (lgp', lgc')

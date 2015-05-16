@@ -72,19 +72,18 @@ parseFeed bs =
 
 updateFeed :: MonadIO m => Handle -> F.Feed -> DocID Cat -> URL ->
               m (Maybe (DocID Feed, Feed, [(DocID Item, Item)]))
-updateFeed h ff c u = do
-  mb <- case ff of
+updateFeed h ff c u =
+  case ff of
     F.AtomFeed af -> runToFeed h af c u
     F.RSSFeed rss -> runToFeed h (R.rssChannel rss) c u
     F.RSS1Feed rf -> runToFeed h rf c u
-  case mb of
-    Nothing       -> return Nothing
-    Just (fid, f) -> do
-      is <- case ff of
-        F.AtomFeed af -> addItems fid $ A.feedEntries af
-        F.RSSFeed rss -> addItems fid . R.rssItems $ R.rssChannel rss
-        F.RSS1Feed rf -> addItems fid $ R1.feedItems rf
-      return $ Just (fid, f, clean is)
+  >>=
+  maybe (return Nothing) (\(fid, f) -> do
+    is <- case ff of
+      F.AtomFeed af -> addItems fid $ A.feedEntries af
+      F.RSSFeed rss -> addItems fid . R.rssItems $ R.rssChannel rss
+      F.RSS1Feed rf -> addItems fid $ R1.feedItems rf
+    return $ Just (fid, f, concatMap (foldMap pure) is))
   where addItems fid is = toListM $ for (each is) $ \i -> do
           mb <- lift $ runToItem h i fid
           yield mb

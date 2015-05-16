@@ -1,15 +1,12 @@
-{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies      #-}
 
 module Main (main) where
 
-import           Control.Monad         (forM, forM_, replicateM, unless)
+import           Control.Monad         (replicateM, unless)
 import           Data.List             (intercalate, isPrefixOf)
-import           Data.Maybe            (fromJust)
 import qualified Data.Sequence         as S
-import           Data.Serialize        (Serialize (..), decode, encode)
-import           Data.String           (IsString (..))
+import           Data.String           (fromString)
 import           Data.Time.Clock       (UTCTime, getCurrentTime)
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
@@ -17,6 +14,7 @@ import           FeedReader.DB         (DocID, Property)
 import qualified FeedReader.DB         as DB
 import           FeedReader.Import     (downloadFeed, updateFeed)
 import           FeedReader.Types
+import           FeedReader.Utils      (diffMs, text2UTCTime)
 import           Pipes
 import qualified Pipes.Prelude         as P
 import           Pipes.Safe
@@ -61,22 +59,23 @@ helpMessage = do
 
 processCommand h = do
   args <- words <$> await
-  case head args of
-    "help"      -> helpMessage
-    "stats"     -> checkArgs 0 args h cmdStats
-    "get"       -> checkArgs 2 args h cmdGet
-    "getk"      -> checkArgs 2 args h cmdGetk
-    "range"     -> checkArgs 4 args h cmdRange
-    "filter"    -> checkArgs 6 args h cmdFilter
-    "add"       -> checkArgs 2 args h cmdAdd
-    "del"       -> checkArgs 1 args h cmdDel
-    "range_del" -> checkArgs 4 args h cmdRangeDel
-    "gc"        -> checkArgs 0 args h cmdGC
-    "debug"     -> checkArgs 2 args h cmdDebug
-    "curl"      -> checkArgs 1 args h cmdCurl
-    "feed"      -> checkArgs 2 args h cmdFeed
-    _           -> yield . showString "Command '" . showString (head args) $
-                     "' not understood."
+  unless (null args) $
+    case head args of
+      "help"      -> helpMessage
+      "stats"     -> checkArgs 0 args h cmdStats
+      "get"       -> checkArgs 2 args h cmdGet
+      "getk"      -> checkArgs 2 args h cmdGetk
+      "range"     -> checkArgs 4 args h cmdRange
+      "filter"    -> checkArgs 6 args h cmdFilter
+      "add"       -> checkArgs 2 args h cmdAdd
+      "del"       -> checkArgs 1 args h cmdDel
+      "range_del" -> checkArgs 4 args h cmdRangeDel
+      "gc"        -> checkArgs 0 args h cmdGC
+      "debug"     -> checkArgs 2 args h cmdDebug
+      "curl"      -> checkArgs 1 args h cmdCurl
+      "feed"      -> checkArgs 2 args h cmdFeed
+      _           -> yield . showString "Command '" . showString (head args) $
+                       "' not understood."
   processCommand h
 
 checkArgs n args h f =
@@ -152,7 +151,7 @@ timed f = do
   t0 <- liftBase getCurrentTime
   f
   t1 <- liftBase getCurrentTime
-  yields' "Command: " $ shows (DB.diffMs t0 t1) . showString " ms"
+  yields' "Command: " $ shows (diffMs t0 t1) . showString " ms"
 
 cmdStats h _ = timed $ do
   s <- liftBase $ DB.getStats h
@@ -167,9 +166,8 @@ cmdGet h args = timed $ do
   let t = args !! 1
   let kstr = args !! 2
   let k = read kstr :: Int
-  let out = \case
-              Just s -> each $ lines s
-              _      -> yields' "No record found with ID = " $ showString kstr
+  let out = maybe (yields' "No record found with ID = " $ showString kstr)
+                  (each . lines)
   case t of
     "cat"    -> liftBase (DB.runLookup h (fromIntegral k) :: LookupRet Cat)
                   >>= out . fmap (show . snd)
@@ -184,9 +182,8 @@ cmdGet h args = timed $ do
 cmdGetk h args = timed $ do
   let t = args !! 1
   let k = args !! 2
-  let out = \case
-              Just s -> each $ lines s
-              _      -> yields' "No record found with Key = " $ showString k
+  let out = maybe (yields' "No record found with Key = " $ showString k)
+                  (each . lines)
   case t of
     "feed"   ->
       liftBase (DB.runLookupUnique h "feedURL" (DB.intValUnique k)
@@ -266,7 +263,7 @@ cmdFilter h args = timed $ do
   cmdPage h args s k o
 
 clean :: [Maybe (DocID a)] -> [String]
-clean = map (show . fromJust) . filter (not . null)
+clean = map show . concatMap (foldMap pure)
 
 showIDs mbs = do
   let ids = clean mbs
@@ -322,19 +319,14 @@ cmdRangeDel h args = timed $ do
   let c = args !! 3
   let s = args !! 4
   now <- liftBase getCurrentTime
-  let mb = parseVal s now
-  sz <- if null mb
-        then do
-          yield "Explicit value required."
-          return 0
-        else let k = fromJust mb in case t of
-          "cat"    -> DB.runDeleteRange h k (df c "catName"     :: Property Cat   ) p
-          "feed"   -> DB.runDeleteRange h k (df c "feedUpdated" :: Property Feed  ) p
-          "person" -> DB.runDeleteRange h k (df c "personName"  :: Property Person) p
-          "item"   -> DB.runDeleteRange h k (df c "itemUpdated" :: Property Item  ) p
-          _        -> do
-                        yield . shows t $ " is not a valid table name."
-                        return 0
+  sz <- maybe (yield "Explicit value required." >> return 0)
+    (\k -> case t of
+      "cat"    -> DB.runDeleteRange h k (df c "catName"     :: Property Cat   ) p
+      "feed"   -> DB.runDeleteRange h k (df c "feedUpdated" :: Property Feed  ) p
+      "person" -> DB.runDeleteRange h k (df c "personName"  :: Property Person) p
+      "item"   -> DB.runDeleteRange h k (df c "itemUpdated" :: Property Item  ) p
+      _        -> yield (shows t " is not a valid table name.") >> return 0)
+    (parseVal s now)
   yields $ shows sz . showString " records deleted."
 
 cmdGC h _ = timed $ do
@@ -350,22 +342,19 @@ cmdCurl _ args = timed $ do
   let url = args !! 1
   liftBase (show <$> downloadFeed url) >>= each . lines
 
-cmdFeed h args = timed $ do
-  let url = args !! 1
-  let c = (read $ args !! 2) :: Int
-  e <- liftBase $ downloadFeed url
-  case e of
-    Left err -> yield err
-    Right f  -> do
-      mb <- liftBase $ updateFeed h f (fromIntegral c) url
-      case mb of
-        Nothing        -> yield "DataBase upload error."
-        Just (fid, fd, is) -> do
-          yield $ showString "Feed " . shows fid $ " updated ok."
-          yield ""
-          each . lines $ show fd
-          yield ""
-          showItems is
+cmdFeed h args =
+  let url = args !! 1 in
+  let c = (read $ args !! 2) :: Int in
+  timed $ liftBase (downloadFeed url) >>=
+  either yield (\f ->
+    liftBase (updateFeed h f (fromIntegral c) url) >>=
+    maybe (yield "DataBase upload error.")
+      (\(fid, fd, is) -> do
+        yield $ showString "Feed " . shows fid $ " updated ok."
+        yield ""
+        each . lines $ show fd
+        yield ""
+        showItems is))
 
 pipeLine h =
       P.stdinLn
@@ -381,7 +370,7 @@ main = runSafeT . runEffect $ bracket
         putStrLn "  Opening DB..."
         h <- DB.open (Just "feeds.log") (Just "feeds.dat")
         t1 <- getCurrentTime
-        putStrLn . showString "  DB opened in " . shows (DB.diffMs t0 t1) $ " ms."
+        putStrLn . showString "  DB opened in " . shows (diffMs t0 t1) $ " ms."
         return h )
     (\h -> do
         putStrLn "  Closing DB..."

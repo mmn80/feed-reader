@@ -1,14 +1,28 @@
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+-----------------------------------------------------------------------------
+-- |
+-- Module : FeedReader.Import
+-- Copyright : (C) 2015 Călin Ardelean,
+-- License : BSD-style (see the file LICENSE)
+--
+-- Maintainer : Călin Ardelean <calinucs@gmail.com>
+-- Stability : experimental
+-- Portability : portable
+--
+-- This module provides DB conversion/import instances for Feed Reader.
+----------------------------------------------------------------------------
+
 module FeedReader.Convert
   () where
 
 import           Control.Applicative   ((<|>))
 import           Data.List             (find)
-import           Data.Maybe            (fromJust, fromMaybe)
+import           Data.Maybe            (fromMaybe)
 import           FeedReader.DocDB      (Transaction, intValUnique, updateUnique)
 import           FeedReader.Types
+import           FeedReader.Utils      (text2UTCTime)
 import qualified Text.Atom.Feed        as A
 import qualified Text.DublinCore.Types as DC
 import qualified Text.RSS.Syntax       as R
@@ -33,13 +47,22 @@ eContent2DB = \case
   A.HTMLContent       s -> HTML s
   A.XHTMLContent      e -> XHTML $ show e
   A.MixedContent   j cs -> Text $ foldl (flip shows) (fromMaybe "" j) cs
-  A.ExternalContent j u -> Text .
-    (if null j then showString ""
-     else showString "MediaType: " . showString (fromJust j) . showString "\n")
+  A.ExternalContent j u -> Text . maybe (showString "")
+    (\s -> showString "MediaType: " . showString s . showString "\n") j
     . showString "URL: " $ u
 
 tryEContent2DB :: Maybe A.EntryContent -> Content
 tryEContent2DB c = eContent2DB $ fromMaybe (A.TextContent "") c
+
+imageFromURL :: URL -> Image
+imageFromURL u = Image
+  { imageURL         = u
+  , imageTitle       = ""
+  , imageDescription = ""
+  , imageLink        = u
+  , imageWidth       = 0
+  , imageHeight      = 0
+  }
 
 instance ToPerson A.Person where
   toPerson p = do
@@ -118,7 +141,7 @@ rssImageToImage i = Image
   , imageHeight      = fromIntegral . fromMaybe 0 $ R.rssImageHeight i
   }
 
-rssPersonToPerson mb = if null mb then [] else [ RSSPerson $ fromJust mb ]
+rssPersonToPerson = maybe [] (pure . RSSPerson)
 
 instance ToFeed R.RSSChannel where
   toFeed f c u df = do
@@ -167,9 +190,7 @@ instance ToItem R.RSSItem where
 extractDcPersons dcs con = map (RSSPerson . DC.dcText) $
                            filter (\d -> DC.dcElt d == con) dcs
 
-extractDcInfo dcs con = case find (\d -> DC.dcElt d == con) dcs of
-                          Nothing -> ""
-                          Just dc -> DC.dcText dc
+extractDcInfo dcs con = maybe "" DC.dcText $ find (\d -> DC.dcElt d == con) dcs
 
 rss1ImageToImage i = Image
   { imageURL         = R1.imageURI i
@@ -216,8 +237,8 @@ instance ToItem R1.Item where
                   , itemAuthors      = fst <$> as
                   , itemContributors = fst <$> cs
                   , itemRights       = Text $ extractDcInfo dcs DC.DC_Rights
-                  , itemContent      = HTML . concatMap fromJust . filter (not . null) .
-                                       map R1.contentValue $ R1.itemContent i
+                  , itemContent      = HTML . concat . concatMap (foldMap pure .
+                                       R1.contentValue) $ R1.itemContent i
                   , itemPublished    = date
                   , itemUpdated      = date
                   }

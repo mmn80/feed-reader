@@ -1,5 +1,18 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+-----------------------------------------------------------------------------
+-- |
+-- Module : FeedReader.Data.DB
+-- Copyright : (C) 2015 Călin Ardelean,
+-- License : BSD-style (see the file LICENSE)
+--
+-- Maintainer : Călin Ardelean <calinucs@gmail.com>
+-- Stability : experimental
+-- Portability : portable
+--
+-- This module provides DB access functions for Feed Reader.
+----------------------------------------------------------------------------
+
 module FeedReader.DB
   ( module FeedReader.Types
   , module FeedReader.DocDB
@@ -14,13 +27,12 @@ module FeedReader.DB
   , DBStats (..)
   , runToItem
   , runToFeed
-  , clean
   ) where
 
-import           Control.Monad       (forM_)
+import           Control.Monad       (forM_, void)
 import           Control.Monad.Trans (MonadIO (liftIO))
 import qualified Data.List           as L
-import           Data.Maybe          (fromJust, fromMaybe)
+import           Data.Maybe          (fromMaybe)
 import           Data.Time.Clock     (getCurrentTime)
 import           FeedReader.Convert
 import           FeedReader.DocDB
@@ -34,11 +46,7 @@ runLookup h k = fromMaybe Nothing <$>
 runLookupUnique :: (Document a, MonadIO m) => Handle -> Property a -> IntVal b ->
                    m (Maybe (DocID a, a))
 runLookupUnique h p k = fromMaybe Nothing <$>
-  runTransaction h (do
-    mdid <- lookupUnique p k
-    case mdid of
-      Nothing  -> return Nothing
-      Just did -> lookup did)
+  runTransaction h (lookupUnique p k >>= maybe (return Nothing) lookup)
 
 runRange :: (Document a, MonadIO m) => Handle -> Maybe (IntVal b) ->
             Property a -> Int -> m [(DocID a, a)]
@@ -54,9 +62,7 @@ runInsert :: (Document a, MonadIO m) => Handle -> a -> m (Maybe (DocID a))
 runInsert h a = runTransaction h $ insert a
 
 runDelete :: MonadIO m => Handle -> DocID a -> m ()
-runDelete h did = do
-  runTransaction h $ delete did
-  return ()
+runDelete h did = void $ runTransaction h (delete did)
 
 deleteRange :: (Document a, MonadIO m) => IntVal b -> Property a -> Int ->
                Transaction m Int
@@ -78,24 +84,19 @@ data DBStats = DBStats
   } deriving (Show)
 
 getStats :: MonadIO m => Handle -> m DBStats
-getStats h = fromMaybe (DBStats 0 0 0 0) <$>
+getStats h = fromMaybe (DBStats (-1) (-1) (-1) (-1)) <$>
   runTransaction h (DBStats
     <$> size ("catName"     :: Property Cat)
     <*> size ("feedUpdated" :: Property Feed)
     <*> size ("personName"  :: Property Person)
     <*> size ("itemUpdated" :: Property Item))
 
-clean :: [Maybe a] -> [a]
-clean = map fromJust . L.filter (not . null)
-
 runToItem :: (MonadIO m, ToItem i) => Handle -> i -> DocID Feed ->
              m (Maybe (DocID Item, Item))
-runToItem h it fid = do
-  df <- liftIO getCurrentTime
-  runTransaction h $ toItem it fid df
+runToItem h it fid =
+  liftIO getCurrentTime >>= runTransaction h . toItem it fid
 
 runToFeed :: (MonadIO m, ToFeed f) => Handle -> f -> DocID Cat -> URL ->
              m (Maybe (DocID Feed, Feed))
-runToFeed h it cid u = do
-  df <- liftIO getCurrentTime
-  runTransaction h $ toFeed it cid u df
+runToFeed h it cid u =
+  liftIO getCurrentTime >>= runTransaction h . toFeed it cid u

@@ -1,4 +1,5 @@
-{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE BangPatterns  #-}
+{-# LANGUAGE TupleSections #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -65,11 +66,10 @@ trim now c =
                                          }
 
 insert :: Typeable a => UTCTime -> Int -> a -> Int -> LRUCache -> LRUCache
-insert now k a sz c = trim now $! c { cSize  = cSize c + sz - osz
+insert now k a sz c = trim now $! c { cSize  = cSize c + sz - maybe 0 (dynSize . snd) mbv
                                     , cQueue = q
                                     }
   where (mbv, q) = PQ.insertView k now v (cQueue c)
-        osz = if null mbv then 0 else dynSize . snd $ fromJust mbv
         v = DynValue { dynValue = toDyn a
                      , dynSize  = sz
                      }
@@ -78,17 +78,13 @@ lookup :: Typeable a => UTCTime -> Int -> LRUCache -> Maybe (a, Int, LRUCache)
 lookup now k c =
   case PQ.alter f k (cQueue c) of
     (Nothing, _) -> Nothing
-    (Just v,  q) -> case fromDynamic $ dynValue v of
-                      Nothing -> Nothing
-                      Just a  -> Just (a, dynSize v, c')
+    (Just v,  q) -> (, dynSize v, c') <$> fromDynamic (dynValue v)
       where !c' = trim now $ c { cQueue = q }
-  where f Nothing       = (Nothing, Nothing)
-        f (Just (_, v)) = (Just v,  Just (now, v))
+  where f = maybe (Nothing, Nothing) (\(_, v) -> (Just v,  Just (now, v)))
 
 delete :: Int -> LRUCache -> LRUCache
-delete k c =
-  case PQ.lookup k (cQueue c) of
-    Nothing     -> c
-    Just (p, v) -> c { cSize  = cSize c - dynSize v
-                     , cQueue = PQ.delete k (cQueue c)
-                     }
+delete k c = maybe c
+  (\(_, v) -> c { cSize  = cSize c - dynSize v
+                , cQueue = PQ.delete k (cQueue c)
+                }) $
+  PQ.lookup k (cQueue c)
