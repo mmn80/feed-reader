@@ -3,7 +3,7 @@
 
 module Main (main) where
 
-import           Control.Monad         (replicateM, unless)
+import           Control.Monad         (liftM, replicateM, unless)
 import           Data.List             (intercalate, isPrefixOf)
 import qualified Data.Sequence         as S
 import           Data.String           (fromString)
@@ -62,27 +62,30 @@ processCommand h = do
   unless (null args) $
     case head args of
       "help"      -> helpMessage
-      "stats"     -> checkArgs 0 args h cmdStats
-      "get"       -> checkArgs 2 args h cmdGet
-      "getk"      -> checkArgs 2 args h cmdGetk
-      "range"     -> checkArgs 4 args h cmdRange
-      "filter"    -> checkArgs 6 args h cmdFilter
-      "add"       -> checkArgs 2 args h cmdAdd
-      "del"       -> checkArgs 1 args h cmdDel
-      "range_del" -> checkArgs 4 args h cmdRangeDel
-      "gc"        -> checkArgs 0 args h cmdGC
-      "debug"     -> checkArgs 2 args h cmdDebug
-      "curl"      -> checkArgs 1 args h cmdCurl
-      "feed"      -> checkArgs 2 args h cmdFeed
+      "stats"     -> doAbortable 0 args h cmdStats
+      "get"       -> doAbortable 2 args h cmdGet
+      "getk"      -> doAbortable 2 args h cmdGetk
+      "range"     -> doAbortable 4 args h cmdRange
+      "filter"    -> doAbortable 6 args h cmdFilter
+      "add"       -> doAbortable 2 args h cmdAdd
+      "del"       -> doAbortable 1 args h cmdDel
+      "range_del" -> doAbortable 4 args h cmdRangeDel
+      "gc"        -> doAbortable 0 args h cmdGC
+      "debug"     -> doAbortable 2 args h cmdDebug
+      "curl"      -> doAbortable 1 args h cmdCurl
+      "feed"      -> doAbortable 2 args h cmdFeed
       _           -> yield . showString "Command '" . showString (head args) $
                        "' not understood."
   processCommand h
 
-checkArgs n args h f =
-  if n == length args - 1 then f h args
+doAbortable n args h f =
+  if n == length args - 1
+  then catch (f h args) (yield . showErr)
   else yields' "Command '" $ showString (head args) . showString "' requires " .
          shows n . showString " arguments but " .
          shows (length args - 1) . showString " were supplied."
+  where showErr (DB.AbortUnique s)   = s
+        showErr (DB.AbortConflict s) = s
 
 ------------------------------------------------------------------------------
 -- Random Utilities
@@ -153,14 +156,16 @@ timed f = do
   t1 <- liftBase getCurrentTime
   yields' "Command: " $ shows (diffMs t0 t1) . showString " ms"
 
+handleAbort cmd = liftBase cmd >>= either throwM return
+
 cmdStats h _ = timed $ do
-  s <- liftBase $ DB.getStats h
+  s <- handleAbort (DB.getStats h)
   yields' "Category count: " $ shows (DB.countCats s)
   yields' "Feed count    : " $ shows (DB.countFeeds s)
   yields' "Person count  : " $ shows (DB.countPersons s)
   yields' "Entry count   : " $ shows (DB.countItems s)
 
-type LookupRet a = IO (Maybe (DocID a, a))
+type LookupRet a = IO (Either DB.TransactionAbort (Maybe (DocID a, a)))
 
 cmdGet h args = timed $ do
   let t = args !! 1
@@ -169,13 +174,13 @@ cmdGet h args = timed $ do
   let out = maybe (yields' "No record found with ID = " $ showString kstr)
                   (each . lines)
   case t of
-    "cat"    -> liftBase (DB.runLookup h (fromIntegral k) :: LookupRet Cat)
+    "cat"    -> handleAbort (DB.runLookup h (fromIntegral k) :: LookupRet Cat)
                   >>= out . fmap (show . snd)
-    "feed"   -> liftBase (DB.runLookup h (fromIntegral k) :: LookupRet Feed)
+    "feed"   -> handleAbort (DB.runLookup h (fromIntegral k) :: LookupRet Feed)
                   >>= out . fmap (show . snd)
-    "person" -> liftBase (DB.runLookup h (fromIntegral k) :: LookupRet Person)
+    "person" -> handleAbort (DB.runLookup h (fromIntegral k) :: LookupRet Person)
                   >>= out . fmap (show . snd)
-    "item"   -> liftBase (DB.runLookup h (fromIntegral k) :: LookupRet Item)
+    "item"   -> handleAbort (DB.runLookup h (fromIntegral k) :: LookupRet Item)
                   >>= out . fmap (show . snd)
     _        -> yield . shows t $ " is not a valid table name."
 
@@ -186,17 +191,17 @@ cmdGetk h args = timed $ do
                   (each . lines)
   case t of
     "feed"   ->
-      liftBase (DB.runLookupUnique h "feedURL" (DB.intValUnique k)
+      handleAbort (DB.runLookupUnique h "feedURL" (DB.intValUnique k)
                :: LookupRet Feed) >>= out . fmap (show . snd)
     "person" ->
-      liftBase (DB.runLookupUnique h "personName" (DB.intValUnique k)
+      handleAbort (DB.runLookupUnique h "personName" (DB.intValUnique k)
                :: LookupRet Person) >>= out . fmap (show . snd)
     "item"   ->
-      liftBase (DB.runLookupUnique h "itemURL" (DB.intValUnique k)
+      handleAbort (DB.runLookupUnique h "itemURL" (DB.intValUnique k)
                :: LookupRet Item) >>= out . fmap (show . snd)
     _        -> yield . shows t $ " is not a valid table name."
 
-page h c p s k o now df = liftBase $
+page h c p s k o now df = handleAbort $
   if (k :: Int) == 0
   then DB.runRange h (parseVal s now) (fromString fprop) p
   else DB.runFilter h (fromIntegral k) (parseVal s now)
@@ -262,11 +267,8 @@ cmdFilter h args = timed $ do
   let s = args !! 6
   cmdPage h args s k o
 
-clean :: [Maybe (DocID a)] -> [String]
-clean = map show . concatMap (foldMap pure)
-
-showIDs mbs = do
-  let ids = clean mbs
+showIDs is = do
+  let ids = map show is
   let l = length ids
   let (prefix, suffix) = if l > 10
                          then (showString "First 10 IDs: ", showString "...")
@@ -279,26 +281,26 @@ cmdAdd h args = timed $ do
   let t = args !! 2
   g <- liftBase getStdGen
   case t of
-    "cat"    -> liftBase (P.toListM $ P.replicateM n
-                  (randomCat >>= DB.runInsert h)) >>=
-                showIDs
-    "person" -> liftBase (P.toListM $ P.replicateM n
-                  (randomPerson >>= DB.runInsert h)) >>=
-                showIDs
+    "cat"    -> handleAbort (liftM sequence . P.toListM . P.replicateM n $
+                  randomCat >>= DB.runInsert h)
+                >>= showIDs
+    "person" -> handleAbort (liftM sequence . P.toListM . P.replicateM n $
+                  randomPerson >>= DB.runInsert h)
+                >>= showIDs
     "feed" -> do
-      cs' <- liftBase $ DB.runRange h Nothing "catName" 100
+      cs' <- handleAbort $ DB.runRange h Nothing "catName" 100
       let cs = S.fromList cs'
       let rs = take n $ randomRs (0, S.length cs - 1) g
-      fs <- liftBase . P.toListM . for (each rs) $ \r ->
+      fs <- handleAbort $ liftM sequence . P.toListM . for (each rs) $ \r ->
         (lift . randomFeed . fst . S.index cs) r >>=
         lift . DB.runInsert h >>=
         yield
       showIDs fs
     "item" -> do
-      fs' <- liftBase $ DB.runRange h Nothing "feedUpdated" 1000
+      fs' <- handleAbort $ DB.runRange h Nothing "feedUpdated" 1000
       let fs = S.fromList fs'
       let rfids = (fst . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
-      is <- liftBase . P.toListM . for (each rfids) $ \fid ->
+      is <- handleAbort $ liftM sequence . P.toListM . for (each rfids) $ \fid ->
         (lift . randomItem) fid >>=
         lift . DB.runInsert h >>=
         yield
@@ -308,7 +310,7 @@ cmdAdd h args = timed $ do
 
 cmdDel h args = timed $ do
   let k = (read $ args !! 1) :: Int
-  liftBase . DB.runDelete h $ fromIntegral k
+  handleAbort . DB.runDelete h $ fromIntegral k
   yield "Record deleted."
 
 df c d = fromString $ if c == "*" then d else c
@@ -321,10 +323,14 @@ cmdRangeDel h args = timed $ do
   now <- liftBase getCurrentTime
   sz <- maybe (yield "Explicit value required." >> return 0)
     (\k -> case t of
-      "cat"    -> DB.runDeleteRange h k (df c "catName"     :: Property Cat   ) p
-      "feed"   -> DB.runDeleteRange h k (df c "feedUpdated" :: Property Feed  ) p
-      "person" -> DB.runDeleteRange h k (df c "personName"  :: Property Person) p
-      "item"   -> DB.runDeleteRange h k (df c "itemUpdated" :: Property Item  ) p
+      "cat"    ->
+        handleAbort (DB.runDeleteRange h k (df c "catName"     :: Property Cat   ) p)
+      "feed"   ->
+        handleAbort (DB.runDeleteRange h k (df c "feedUpdated" :: Property Feed  ) p)
+      "person" ->
+        handleAbort (DB.runDeleteRange h k (df c "personName"  :: Property Person) p)
+      "item"   ->
+        handleAbort (DB.runDeleteRange h k (df c "itemUpdated" :: Property Item  ) p)
       _        -> yield (shows t " is not a valid table name.") >> return 0)
     (parseVal s now)
   yields $ shows sz . showString " records deleted."
@@ -346,15 +352,13 @@ cmdFeed h args =
   let url = args !! 1 in
   let c = (read $ args !! 2) :: Int in
   timed $ liftBase (downloadFeed url) >>=
-  either yield (\f ->
-    liftBase (updateFeed h f (fromIntegral c) url) >>=
-    maybe (yield "DataBase upload error.")
-      (\(fid, fd, is) -> do
-        yield $ showString "Feed " . shows fid $ " updated ok."
-        yield ""
-        each . lines $ show fd
-        yield ""
-        showItems is))
+  either yield (\f -> do
+    (fid, fd, is) <- handleAbort $ updateFeed h f (fromIntegral c) url
+    yield $ showString "Feed " . shows fid $ " updated ok."
+    yield ""
+    each . lines $ show fd
+    yield ""
+    showItems is)
 
 pipeLine h =
       P.stdinLn

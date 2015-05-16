@@ -29,7 +29,7 @@ module FeedReader.DB
   , runToFeed
   ) where
 
-import           Control.Monad       (forM_, void)
+import           Control.Monad       (forM_)
 import           Control.Monad.Trans (MonadIO (liftIO))
 import qualified Data.List           as L
 import           Data.Maybe          (fromMaybe)
@@ -39,30 +39,31 @@ import           FeedReader.DocDB
 import           FeedReader.Types
 import           Prelude             hiding (filter, lookup)
 
-runLookup :: (Document a, MonadIO m) => Handle -> DocID a -> m (Maybe (DocID a, a))
-runLookup h k = fromMaybe Nothing <$>
-  runTransaction h (lookup k)
+runLookup :: (Document a, MonadIO m) => Handle -> DocID a ->
+             m (Either TransactionAbort (Maybe (DocID a, a)))
+runLookup h k = runTransaction h (lookup k)
 
 runLookupUnique :: (Document a, MonadIO m) => Handle -> Property a -> IntVal b ->
-                   m (Maybe (DocID a, a))
-runLookupUnique h p k = fromMaybe Nothing <$>
-  runTransaction h (lookupUnique p k >>= maybe (return Nothing) lookup)
+                   m (Either TransactionAbort (Maybe (DocID a, a)))
+runLookupUnique h p k = runTransaction h $
+  lookupUnique p k >>= maybe (return Nothing) lookup
 
 runRange :: (Document a, MonadIO m) => Handle -> Maybe (IntVal b) ->
-            Property a -> Int -> m [(DocID a, a)]
-runRange h s prop pg = fromMaybe [] <$>
-  runTransaction h (range s Nothing prop pg)
+            Property a -> Int -> m (Either TransactionAbort [(DocID a, a)])
+runRange h s prop pg = runTransaction h $ range s Nothing prop pg
 
 runFilter :: (Document a, MonadIO m) => Handle -> DocID b -> Maybe (IntVal c) ->
-             Property a -> Property a -> Int -> m [(DocID a, a)]
-runFilter h k s fprop sprop pg = fromMaybe [] <$>
-  runTransaction h (filter k s Nothing fprop sprop pg)
+             Property a -> Property a -> Int ->
+             m (Either TransactionAbort [(DocID a, a)])
+runFilter h k s fprop sprop pg = runTransaction h $
+  filter k s Nothing fprop sprop pg
 
-runInsert :: (Document a, MonadIO m) => Handle -> a -> m (Maybe (DocID a))
+runInsert :: (Document a, MonadIO m) => Handle -> a ->
+             m (Either TransactionAbort (DocID a))
 runInsert h a = runTransaction h $ insert a
 
-runDelete :: MonadIO m => Handle -> DocID a -> m ()
-runDelete h did = void $ runTransaction h (delete did)
+runDelete :: MonadIO m => Handle -> DocID a -> m (Either TransactionAbort ())
+runDelete h did = runTransaction h (delete did)
 
 deleteRange :: (Document a, MonadIO m) => IntVal b -> Property a -> Int ->
                Transaction m Int
@@ -72,9 +73,8 @@ deleteRange did prop pg = do
   return $ length ks
 
 runDeleteRange :: (Document a, MonadIO m) => Handle -> IntVal b -> Property a ->
-                  Int -> m Int
-runDeleteRange h did prop pg = fromMaybe 0 <$>
-  runTransaction h (deleteRange did prop pg)
+                  Int -> m (Either TransactionAbort Int)
+runDeleteRange h did prop pg = runTransaction h (deleteRange did prop pg)
 
 data DBStats = DBStats
   { countCats    :: Int
@@ -83,20 +83,19 @@ data DBStats = DBStats
   , countItems   :: Int
   } deriving (Show)
 
-getStats :: MonadIO m => Handle -> m DBStats
-getStats h = fromMaybe (DBStats (-1) (-1) (-1) (-1)) <$>
-  runTransaction h (DBStats
-    <$> size ("catName"     :: Property Cat)
-    <*> size ("feedUpdated" :: Property Feed)
-    <*> size ("personName"  :: Property Person)
-    <*> size ("itemUpdated" :: Property Item))
+getStats :: MonadIO m => Handle -> m (Either TransactionAbort DBStats)
+getStats h = runTransaction h $ DBStats
+  <$> size ("catName"     :: Property Cat)
+  <*> size ("feedUpdated" :: Property Feed)
+  <*> size ("personName"  :: Property Person)
+  <*> size ("itemUpdated" :: Property Item)
 
 runToItem :: (MonadIO m, ToItem i) => Handle -> i -> DocID Feed ->
-             m (Maybe (DocID Item, Item))
+             m (Either TransactionAbort (DocID Item, Item))
 runToItem h it fid =
   liftIO getCurrentTime >>= runTransaction h . toItem it fid
 
 runToFeed :: (MonadIO m, ToFeed f) => Handle -> f -> DocID Cat -> URL ->
-             m (Maybe (DocID Feed, Feed))
+             m (Either TransactionAbort (DocID Feed, Feed))
 runToFeed h it cid u =
   liftIO getCurrentTime >>= runTransaction h . toFeed it cid u

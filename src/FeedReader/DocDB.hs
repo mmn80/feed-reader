@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleContexts           #-}
 {-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiWayIf                 #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE TupleSections              #-}
 {-# LANGUAGE TypeOperators              #-}
@@ -26,6 +27,7 @@ module FeedReader.DocDB
   , performGC
   , Transaction
   , runTransaction
+  , TransactionAbort (..)
   , Property
   , DocID
   , IntVal
@@ -51,7 +53,7 @@ module FeedReader.DocDB
 import           Control.Arrow         ((&&&))
 import           Control.Concurrent    (MVar, ThreadId, forkIO, newMVar,
                                         putMVar, takeMVar, threadDelay)
-import           Control.Exception     (bracket, bracketOnError)
+import           Control.Exception     (Exception, bracket, bracketOnError)
 import           Control.Monad         (forM, forM_, liftM, mplus, replicateM,
                                         unless, when)
 import           Control.Monad.State   (StateT)
@@ -186,6 +188,11 @@ newtype Transaction m a = Transaction { unTransaction :: StateT TransactionState
 
 instance MonadIO m => MonadIO (Transaction m) where
   liftIO = Transaction . liftIO
+
+data TransactionAbort = AbortUnique String | AbortConflict String
+  deriving (Show)
+
+instance Exception TransactionAbort
 
 -- Properties ------------------------------------------------------------------
 
@@ -383,27 +390,30 @@ close h = do
 performGC :: MonadIO m => Handle -> m ()
 performGC h = withGC h . const $ return (PerformGC, ())
 
-runTransaction :: MonadIO m => Handle -> Transaction m a -> m (Maybe a)
+runTransaction :: MonadIO m => Handle -> Transaction m a ->
+                  m (Either TransactionAbort a)
 runTransaction h (Transaction t) = do
   tid <- mkNewTID h
   (a, q, u) <- runUserCode tid
-  if null u then return $ Just a
+  if null u then return $ Right a
   else withMaster h $ \m ->
-    if checkUnique u (unqIdx m) (logPend m) &&
-       checkValid tid (logPend m) (logComp m) q u then do
-      let tsz = sum $ (tRecSize . Pending . fst) <$> u
-      let pos = toInt (logPos m) + tsz
-      lsz <- checkLogSize (logHandle m) (toInt (logSize m)) pos
-      let (ts, gs) = L.foldl' allocFold ([], gaps m) u
-      let m' = m { logPos  = fromIntegral pos
-                 , logSize = fromIntegral lsz
-                 , gaps    = gs
-                 , logPend = Map.insert (toInt tid) ts $ logPend m
-                 }
-      writeTransactions m ts
-      writeLogPos (logHandle m) $ fromIntegral pos
-      return (m', Just a)
-    else return (m, Nothing)
+    if | not $ checkUnique u (unqIdx m) (logPend m) -> return (m, Left $
+           AbortUnique "Transaction aborted. Uniqueness check failed.")
+       | not $ checkValid tid (logPend m) (logComp m) q u -> return (m, Left $
+           AbortConflict "Transaction aborted due to conflicts. Try again later.")
+       | otherwise -> do
+           let tsz = sum $ (tRecSize . Pending . fst) <$> u
+           let pos = toInt (logPos m) + tsz
+           lsz <- checkLogSize (logHandle m) (toInt (logSize m)) pos
+           let (ts, gs) = L.foldl' allocFold ([], gaps m) u
+           let m' = m { logPos  = fromIntegral pos
+                      , logSize = fromIntegral lsz
+                      , gaps    = gs
+                      , logPend = Map.insert (toInt tid) ts $ logPend m
+                      }
+           writeTransactions m ts
+           writeLogPos (logHandle m) $ fromIntegral pos
+           return (m', Right a)
   where
     runUserCode tid = do
       (a, TransactionState _ _ q u) <- S.runStateT t
@@ -938,19 +948,15 @@ writeDocument r bs hnd = unless (docDel r) $ do
 
 findFirstDoc :: MasterState -> TransactionState -> DID -> Maybe DocRecord
 findFirstDoc m t did = do
-  let idx = mainIdx m
-  let tid = transTID t
-  rs <- Map.lookup (toInt did) idx
-  r  <- L.find (\r -> docTID r <= tid) rs
-  if docDel r then Nothing
-  else Just r
+  r <- Map.lookup (toInt did) (mainIdx m) >>= L.find ((<= transTID t) . docTID)
+  if docDel r then Nothing else Just r
 
 getPage :: Int -> Int -> Int -> IntMap IntSet -> [Int]
 getPage st sti p idx = go st p []
   where go st p acc =
           if p == 0 then acc
           else case Map.lookupLT st idx of
-                 Nothing     -> acc
+                 Nothing      -> acc
                  Just (n, is) ->
                    let (p', ids) = getPage2 sti p is in
                    if p' == 0 then ids ++ acc

@@ -1,3 +1,5 @@
+{-# LANGUAGE TupleSections #-}
+
 -----------------------------------------------------------------------------
 -- |
 -- Module : FeedReader.Import
@@ -17,6 +19,7 @@ module FeedReader.Import
   ) where
 
 import           Control.Exception         (throw, try)
+import           Control.Monad             (liftM)
 import           Control.Monad.Trans       (MonadIO (liftIO))
 import           Data.ByteString           (ByteString)
 import           Data.ByteString.Char8     (unpack)
@@ -25,7 +28,7 @@ import           Network.HTTP.Types.Status (Status (..), statusIsSuccessful,
                                             statusMessage)
 import           Pipes
 import           Pipes.HTTP
-import           Pipes.Prelude             (toListM)
+import qualified Pipes.Prelude             as P
 import qualified Text.Atom.Feed            as A
 import           Text.Feed.Import          (readAtom, readRSS1, readRSS2)
 import qualified Text.Feed.Types           as F
@@ -41,7 +44,7 @@ downloadFeed url = do
       withHTTP req m $ \resp ->
         let st = responseStatus resp in
         if statusIsSuccessful st then do
-          bs <- toListM $ responseBody resp
+          bs <- P.toListM $ responseBody resp
           return $ mconcat bs
         else throw $ StatusCodeException st (responseHeaders resp) mempty
   return $ case res of
@@ -71,19 +74,17 @@ parseFeed bs =
       Nothing
 
 updateFeed :: MonadIO m => Handle -> F.Feed -> DocID Cat -> URL ->
-              m (Maybe (DocID Feed, Feed, [(DocID Item, Item)]))
+              m (Either TransactionAbort (DocID Feed, Feed, [(DocID Item, Item)]))
 updateFeed h ff c u =
   case ff of
     F.AtomFeed af -> runToFeed h af c u
     F.RSSFeed rss -> runToFeed h (R.rssChannel rss) c u
     F.RSS1Feed rf -> runToFeed h rf c u
   >>=
-  maybe (return Nothing) (\(fid, f) -> do
-    is <- case ff of
+  either (return . Left) (\(fid, f) -> liftM (liftM (fid, f,) . sequence) $
+    case ff of
       F.AtomFeed af -> addItems fid $ A.feedEntries af
       F.RSSFeed rss -> addItems fid . R.rssItems $ R.rssChannel rss
-      F.RSS1Feed rf -> addItems fid $ R1.feedItems rf
-    return $ Just (fid, f, concatMap (foldMap pure) is))
-  where addItems fid is = toListM $ for (each is) $ \i -> do
-          mb <- lift $ runToItem h i fid
-          yield mb
+      F.RSS1Feed rf -> addItems fid $ R1.feedItems rf)
+  where addItems fid is = P.toListM $ for (each is) $ \i ->
+          lift (runToItem h i fid) >>= yield
