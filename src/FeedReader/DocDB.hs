@@ -51,8 +51,8 @@ import           Control.Arrow         ((&&&))
 import           Control.Concurrent    (MVar, ThreadId, forkIO, newMVar,
                                         putMVar, takeMVar, threadDelay)
 import           Control.Exception     (bracket, bracketOnError)
-import           Control.Monad         (forM, forM_, liftM, replicateM, unless,
-                                        when, mplus)
+import           Control.Monad         (forM, forM_, liftM, mplus, replicateM,
+                                        unless, when)
 import           Control.Monad.State   (StateT)
 import qualified Control.Monad.State   as S
 import           Control.Monad.Trans   (MonadIO (liftIO))
@@ -391,7 +391,8 @@ runTransaction h (Transaction t) = do
   (a, q, u) <- runUserCode tid
   if null u then return $ Just a
   else withMaster h $ \m ->
-    if checkUnique u (unqIdx m) && checkValid tid (logPend m) (logComp m) q u then do
+    if checkUnique u (unqIdx m) (logPend m) &&
+       checkValid tid (logPend m) (logComp m) q u then do
       let tsz = sum $ (tRecSize . Pending . fst) <$> u
       let pos = toInt (logPos m) + tsz
       lsz <- checkLogSize (logHandle m) (toInt (logSize m)) pos
@@ -417,12 +418,13 @@ runTransaction h (Transaction t) = do
       let u' = L.nubBy ((==) `on` docID . fst) u
       return (a, q, u')
 
-    checkUnique u idx = all ck u
-      where ck (d, _) = docDel d || all (cku . toInt $ docID d) (docURefs d)
-            cku did ir = case Map.lookup (toInt $ irefPID ir) idx >>=
-                              Map.lookup (toInt $ irefVal ir) of
-                           Nothing   -> True
-                           Just did' -> did == did'
+    checkUnique u idx logp = all ck u
+      where ck (d, _) = docDel d || all (cku $ docID d) (docURefs d)
+            cku did (IntReference pid val) =
+              cku' did (liftM fromIntegral $ Map.lookup (toInt pid) idx >>=
+                                             Map.lookup (toInt val)) &&
+              cku' did (findUnique pid val (concat $ Map.elems logp))
+            cku' did = maybe True (== did)
 
     checkValid tid logp logc q u = ck qs && ck us
       where
@@ -461,13 +463,15 @@ lookupUnique :: MonadIO m => Property a -> IntVal b -> Transaction m (Maybe (Doc
 lookupUnique p (IntVal u) = Transaction $ do
   t <- S.get
   withMasterLock (transHandle t) $ \m -> return . liftM DocID $
-    findRs (transUpdateList t)
-    `mplus` (findRs . concat . Map.elems $ logPend m)
+    findUnique pp u (transUpdateList t)
+    `mplus` (findUnique pp u . concat . Map.elems $ logPend m)
     `mplus` liftM fromIntegral (Map.lookup (toInt pp) (unqIdx m) >>=
                                 Map.lookup (toInt u))
-  where findRs rs = fmap docID . L.find findR $ map fst rs
-        findR = any (\i -> irefPID i == pp && irefVal i == u) . docURefs
-        pp = fst $ unProperty p
+  where pp = fst $ unProperty p
+
+findUnique :: IntValue -> IntValue -> [(DocRecord, a)] -> Maybe DID
+findUnique p u rs = fmap docID . L.find findR $ map fst rs
+  where findR = any (\i -> irefPID i == p && irefVal i == u) . docURefs
 
 updateUnique :: (Document a, MonadIO m) => Property a -> IntVal b -> a ->
                 Transaction m (DocID a)
