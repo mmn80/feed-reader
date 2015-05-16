@@ -71,7 +71,7 @@ parseFeed bs =
       Nothing
 
 updateFeed :: MonadIO m => Handle -> F.Feed -> DocID Cat -> URL ->
-              m (Maybe (DocID Feed, Feed))
+              m (Maybe (DocID Feed, Feed, [(DocID Item, Item)]))
 updateFeed h ff c u = do
   mb <- case ff of
     F.AtomFeed af -> runToFeed h af c u
@@ -80,11 +80,11 @@ updateFeed h ff c u = do
   case mb of
     Nothing       -> return Nothing
     Just (fid, f) -> do
-      case ff of
+      is <- case ff of
         F.AtomFeed af -> addItems fid $ A.feedEntries af
-        F.RSSFeed rss -> addItems fid $ R.rssItems (R.rssChannel rss)
+        F.RSSFeed rss -> addItems fid . R.rssItems $ R.rssChannel rss
         F.RSS1Feed rf -> addItems fid $ R1.feedItems rf
-      return $ Just (fid, f)
-  where addItems fid is = runEffect $ for (each is) $ \i -> do
-          lift $ runToItem h i fid
-          return ()
+      return $ Just (fid, f, clean is)
+  where addItems fid is = toListM $ for (each is) $ \i -> do
+          mb <- lift $ runToItem h i fid
+          yield mb

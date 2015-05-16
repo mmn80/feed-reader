@@ -52,7 +52,7 @@ import           Control.Concurrent    (MVar, ThreadId, forkIO, newMVar,
                                         putMVar, takeMVar, threadDelay)
 import           Control.Exception     (bracket, bracketOnError)
 import           Control.Monad         (forM, forM_, liftM, replicateM, unless,
-                                        when)
+                                        when, mplus)
 import           Control.Monad.State   (StateT)
 import qualified Control.Monad.State   as S
 import           Control.Monad.Trans   (MonadIO (liftIO))
@@ -175,9 +175,9 @@ instance Show Handle where
 
 data TransactionState = TransactionState
   { transHandle     :: Handle
-  , transTID        :: TID
-  , transReadList   :: [DID]
-  , transUpdateList :: [(DocRecord, ByteString)]
+  , transTID        :: !TID
+  , transReadList   :: ![DID]
+  , transUpdateList :: ![(DocRecord, ByteString)]
   }
 
 newtype Transaction m a = Transaction { unTransaction :: StateT TransactionState m a }
@@ -210,7 +210,10 @@ instance Show (DocID a) where
   showsPrec _ (DocID k) = showString "0x" . showHex k
 
 newtype IntVal a = IntVal { unIntVal :: DID }
-  deriving (Eq, Ord, Bounded, Num, Enum, Real, Integral, Show)
+  deriving (Eq, Ord, Bounded, Num, Enum, Real, Integral)
+
+instance Show (IntVal a) where
+  showsPrec _ (IntVal k) = showString "0x" . showHex k
 
 intVal :: DBValue (Indexable a) => a -> IntVal b
 intVal = fromIntegral . head . getDBValues . Indexable
@@ -415,9 +418,11 @@ runTransaction h (Transaction t) = do
       return (a, q, u')
 
     checkUnique u idx = all ck u
-      where ck (d, _) = docDel d || all cku (docURefs d)
-            cku ir = null $ Map.lookup (toInt $ irefPID ir) idx >>=
-                            Map.lookup (toInt $ irefVal ir)
+      where ck (d, _) = docDel d || all (cku . toInt $ docID d) (docURefs d)
+            cku did ir = case Map.lookup (toInt $ irefPID ir) idx >>=
+                              Map.lookup (toInt $ irefVal ir) of
+                           Nothing   -> True
+                           Just did' -> did == did'
 
     checkValid tid logp logc q u = ck qs && ck us
       where
@@ -455,8 +460,14 @@ lookup (DocID did) = Transaction $ do
 lookupUnique :: MonadIO m => Property a -> IntVal b -> Transaction m (Maybe (DocID a))
 lookupUnique p (IntVal u) = Transaction $ do
   t <- S.get
-  withMasterLock (transHandle t) $ \m -> return . liftM (DocID . fromIntegral) $
-    Map.lookup (toInt . fst $ unProperty p) (unqIdx m) >>= Map.lookup (toInt u)
+  withMasterLock (transHandle t) $ \m -> return . liftM DocID $
+    findRs (transUpdateList t)
+    `mplus` (findRs . concat . Map.elems $ logPend m)
+    `mplus` liftM fromIntegral (Map.lookup (toInt pp) (unqIdx m) >>=
+                                Map.lookup (toInt u))
+  where findRs rs = fmap docID . L.find findR $ map fst rs
+        findR = any (\i -> irefPID i == pp && irefVal i == u) . docURefs
+        pp = fst $ unProperty p
 
 updateUnique :: (Document a, MonadIO m) => Property a -> IntVal b -> a ->
                 Transaction m (DocID a)

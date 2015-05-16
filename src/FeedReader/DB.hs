@@ -14,6 +14,7 @@ module FeedReader.DB
   , DBStats (..)
   , runToItem
   , runToFeed
+  , clean
   ) where
 
 import           Control.Monad       (forM_)

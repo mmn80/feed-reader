@@ -55,12 +55,7 @@ type Language = String
 type Tag      = String
 
 data Content  = Text String | HTML String | XHTML String
-  deriving (Generic, Serialize, DBValue)
-
-instance Show Content where
-  showsPrec p (Text s)  = showString s
-  showsPrec p (HTML s)  = showString s
-  showsPrec p (XHTML s) = showString s
+  deriving (Show, Generic, Serialize, DBValue)
 
 data Cat = Cat
   { catName :: Indexable String

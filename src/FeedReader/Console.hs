@@ -217,19 +217,12 @@ cmdPage h args s k o = do
   let p = (read $ args !! 1) :: Int
   let t = args !! 2
   let c = args !! 3
-  let formatsK k i = i . showString (replicate (k - length (i "")) ' ')
-  let formats = formatsK 12
-  let format = formats . showString
   let sCat (iid, i) = formats (shows iid) . showString (unIndexable $ catName i) $ ""
   let sFeed (iid, i) = formats (shows iid) .
                        formats (shows $ feedCatID i) .
                        shows (feedUpdated i) $ ""
   let sPerson (iid, i) = formats (shows iid) . showString (unIndexable .
                            unUnique $ personName i) $ ""
-  let sItem (iid, i) = formats (shows iid) .
-                       formats (shows $ itemFeedID i) .
-                       formatsK 25 (shows $ itemUpdated i) .
-                       shows (itemPublished i) $ ""
   now <- liftBase getCurrentTime
   case t of
     "cat"    -> do
@@ -246,10 +239,21 @@ cmdPage h args s k o = do
       each $ sPerson <$> as
     "item"   -> do
       as <- page h c p s k o now "itemUpdated"
-      yields $ format "ID" . format "FeedID" .
-        formatsK 25 (showString "Updated") . showString "Published"
-      each $ sItem <$> as
+      showItems as
     _        -> yield . shows t $ " is not a valid table name."
+
+formatsK k i = i . showString (replicate (k - length (i "")) ' ')
+formats = formatsK 12
+format = formats . showString
+
+showItems as = do
+  yields $ format "ID" . format "FeedID" .
+    formatsK 25 (showString "Updated") . showString "Published"
+  each $ sItem <$> as
+  where sItem (iid, i) = formats (shows iid) .
+                         formats (shows $ itemFeedID i) .
+                         formatsK 25 (shows $ itemUpdated i) .
+                         shows (itemPublished i) $ ""
 
 cmdRange h args = timed $ do
   let s = args !! 4
@@ -356,9 +360,12 @@ cmdFeed h args = timed $ do
       mb <- liftBase $ updateFeed h f (fromIntegral c) url
       case mb of
         Nothing        -> yield "DataBase upload error."
-        Just (fid, fd) -> do
-          yield $ "Feed " ++ show fid ++ " updated ok."
+        Just (fid, fd, is) -> do
+          yield $ showString "Feed " . shows fid $ " updated ok."
+          yield ""
           each . lines $ show fd
+          yield ""
+          showItems is
 
 pipeLine h =
       P.stdinLn
