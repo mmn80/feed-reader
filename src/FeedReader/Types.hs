@@ -52,7 +52,8 @@ data Content  = Text String | HTML String | XHTML String
   deriving (Show, Generic, Serialize, DBValue)
 
 data Cat = Cat
-  { catName :: Indexable String
+  { catName   :: Indexable String
+  , catParent :: Maybe (DocID Cat)
   } deriving (Show, Generic, Serialize)
 
 instance Document Cat
@@ -77,6 +78,7 @@ data Image = Image
 data Feed = Feed
   { feedCatID        :: DocID Cat
   , feedURL          :: Unique URL
+  , feedWebURL       :: URL
   , feedTitle        :: Indexable Content
   , feedDescription  :: Content
   , feedLanguage     :: Language

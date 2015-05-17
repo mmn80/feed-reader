@@ -18,8 +18,8 @@ module FeedReader.Convert
   () where
 
 import           Control.Applicative   ((<|>))
-import           Data.List             (find)
-import           Data.Maybe            (fromMaybe)
+import           Data.List             (find, isPrefixOf)
+import           Data.Maybe            (fromMaybe, listToMaybe)
 import           FeedReader.DocDB      (Transaction, intValUnique, updateUnique)
 import           FeedReader.Types
 import           FeedReader.Utils      (text2UTCTime)
@@ -74,12 +74,24 @@ instance ToPerson A.Person where
     pid <- updateUnique "personName" (intValUnique name) p'
     return (pid, p')
 
+toStr Nothing = ""
+toStr (Just (Left x)) = x
+toStr (Just (Right x)) = x
+
+isSelf lr = toStr (A.linkRel lr) == "alternate" && isHTMLType (A.linkType lr)
+
+isHTMLType :: Maybe String -> Bool
+isHTMLType (Just str) = "lmth" `isPrefixOf` reverse str
+isHTMLType _ = True
+
 instance ToFeed A.Feed where
   toFeed f c u df = do
     as <- mapM toPerson $ A.feedAuthors f
     cs <- mapM toPerson $ A.feedContributors f
     let f' = Feed { feedCatID        = c
                   , feedURL          = Unique u
+                  , feedWebURL       = maybe "" A.linkHref . listToMaybe .
+                                       filter isSelf $ A.feedLinks f
                   , feedTitle        = Indexable . content2DB $ A.feedTitle f
                   , feedDescription  = tryContent2DB $ A.feedSubtitle f
                   , feedLanguage     = ""
@@ -149,6 +161,7 @@ instance ToFeed R.RSSChannel where
     cs <- mapM toPerson . rssPersonToPerson $ R.rssWebMaster f
     let f' = Feed { feedCatID        = c
                   , feedURL          = Unique u
+                  , feedWebURL       = R.rssLink f
                   , feedTitle        = Indexable . Text $ R.rssTitle f
                   , feedDescription  = HTML $ R.rssDescription f
                   , feedLanguage     = fromMaybe "" $ R.rssLanguage f
@@ -209,6 +222,7 @@ instance ToFeed R1.Feed where
     cs <- mapM toPerson $ extractDcPersons dcs DC.DC_Contributor
     let f' = Feed { feedCatID        = c
                   , feedURL          = Unique u
+                  , feedWebURL       = R1.channelURI ch
                   , feedTitle        = Indexable . Text $ R1.channelTitle ch
                   , feedDescription  = HTML $ R1.channelDesc ch
                   , feedLanguage     = extractDcInfo dcs DC.DC_Language

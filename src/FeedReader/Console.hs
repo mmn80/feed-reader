@@ -43,6 +43,9 @@ helpMessage = do
   yield "  filter p t c k o s"
   yield "          : SELECT TOP p * FROM t WHERE c = k AND o < s ORDER BY o DESC"
   yield "  add n t : inserts n random records into the DB (t as above)"
+  yield "  cat n p : inserts a category"
+  yield "          : n: name"
+  yield "          : p: parent ID"
   yield "  del k   : deletes document with ID = k"
   yield "  range_del p t c s"
   yield "          : deletes a range of documents starting at k"
@@ -68,6 +71,7 @@ processCommand h = do
       "range"     -> doAbortable 4 args h cmdRange
       "filter"    -> doAbortable 6 args h cmdFilter
       "add"       -> doAbortable 2 args h cmdAdd
+      "cat"       -> doAbortable 2 args h cmdAddCat
       "del"       -> doAbortable 1 args h cmdDel
       "range_del" -> doAbortable 4 args h cmdRangeDel
       "gc"        -> doAbortable 0 args h cmdGC
@@ -80,12 +84,17 @@ processCommand h = do
 
 doAbortable n args h f =
   if n == length args - 1
-  then catch (f h args) (yield . showErr)
+  then f h args `catches` [ Handler (each . lines . transErr)
+                          , Handler (each . lines . dbErr) ]
   else yields' "Command '" $ showString (head args) . showString "' requires " .
          shows n . showString " arguments but " .
          shows (length args - 1) . showString " were supplied."
-  where showErr (DB.AbortUnique s)   = s
-        showErr (DB.AbortConflict s) = s
+  where transErr (DB.AbortUnique s)   = s
+        transErr (DB.AbortConflict s) = s
+        dbErr (DB.LogParseError pos s) =
+          showString s . showString "\nPosition: " $ shows pos ""
+        dbErr (DB.DataParseError pos sz s) = showString s . showString
+          "\nPosition: " . shows pos . showString "\nSize: " $ shows sz ""
 
 ------------------------------------------------------------------------------
 -- Random Utilities
@@ -112,10 +121,12 @@ randomTimeIx = Indexable <$> randomTime
 
 randomCat =
   Cat <$> randomStringIx 10 30
+      <*> pure Nothing
 
 randomFeed c =
   Feed <$> pure c
           <*> (Unique <$> randomString 100 300)
+          <*> randomString 100 300
           <*> randomContentIx 100 300
           <*> (Text <$> randomString 100 300)
           <*> randomString 2 10
@@ -220,11 +231,10 @@ cmdPage h args s k o = do
   let t = args !! 2
   let c = args !! 3
   let sCat (iid, i) = formats (shows iid) . showString (unIndexable $ catName i) $ ""
-  let sFeed (iid, i) = formats (shows iid) .
-                       formats (shows $ feedCatID i) .
+  let sFeed (iid, i) = formats (shows iid) . formats (shows $ feedCatID i) .
                        shows (feedUpdated i) $ ""
   let sPerson (iid, i) = formats (shows iid) . showString (unIndexable .
-                           unUnique $ personName i) $ ""
+                         unUnique $ personName i) $ ""
   now <- liftBase getCurrentTime
   case t of
     "cat"    -> do
@@ -307,6 +317,13 @@ cmdAdd h args = timed $ do
       showIDs is
       return ()
     _      -> yield . shows t $ " is not a valid table name."
+
+cmdAddCat h args = timed $ do
+  let n = args !! 1
+  let p = (read $ args !! 2) :: Int
+  let cat = Cat (Indexable n) (if p == 0 then Nothing else Just $ fromIntegral p)
+  cid <- handleAbort $ DB.runInsert h cat
+  yields' "Category " $ shows cid . showString " inserted."
 
 cmdDel h args = timed $ do
   let k = (read $ args !! 1) :: Int

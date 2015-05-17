@@ -43,9 +43,8 @@ downloadFeed url = do
     withManager tlsManagerSettings $ \m ->
       withHTTP req m $ \resp ->
         let st = responseStatus resp in
-        if statusIsSuccessful st then do
-          bs <- P.toListM $ responseBody resp
-          return $ mconcat bs
+        if statusIsSuccessful st
+        then liftM mconcat (P.toListM $ responseBody resp)
         else throw $ StatusCodeException st (responseHeaders resp) mempty
   return $ case res of
     Left  err -> Left $ case err of

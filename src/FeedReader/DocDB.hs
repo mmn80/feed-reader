@@ -28,6 +28,7 @@ module FeedReader.DocDB
   , Transaction
   , runTransaction
   , TransactionAbort (..)
+  , DatabaseError (..)
   , Property
   , DocID
   , IntVal
@@ -53,7 +54,7 @@ module FeedReader.DocDB
 import           Control.Arrow         ((&&&))
 import           Control.Concurrent    (MVar, ThreadId, forkIO, newMVar,
                                         putMVar, takeMVar, threadDelay)
-import           Control.Exception     (Exception, bracket, bracketOnError)
+import           Control.Exception     (Exception, bracket, bracketOnError, throw)
 import           Control.Monad         (forM, forM_, liftM, mplus, replicateM,
                                         unless, when)
 import           Control.Monad.State   (StateT)
@@ -193,6 +194,12 @@ data TransactionAbort = AbortUnique String | AbortConflict String
   deriving (Show)
 
 instance Exception TransactionAbort
+
+data DatabaseError = LogParseError Int String
+                   | DataParseError Int Int String
+  deriving (Show)
+
+instance Exception DatabaseError
 
 -- Properties ------------------------------------------------------------------
 
@@ -685,8 +692,8 @@ writeLogPos h p = do
 logError :: MonadIO m => IO.Handle -> ShowS -> m a
 logError h err = do
   pos <- liftIO $ IO.hTell h
-  liftIO . ioError . userError . showString "Corrupted log. " . err .
-    showString " Position: " . shows pos $ ""
+  liftIO . throw . LogParseError (fromIntegral pos) . showString
+    "Corrupted log. " $ err ""
 
 mkNewTID :: MonadIO m => Handle -> m TID
 mkNewTID h = withMaster h $ \m -> return (m { newTID = newTID m + 1 }, newTID m)
@@ -930,9 +937,9 @@ readDocument h r =
     case Cache.lookup now k cache of
       Nothing -> do
         bs <- readDocumentFromFile hnd r
-        a <- either (liftIO . ioError . userError .
-               showString "Deserialization error: ") return $
-             decode bs
+        a <- either (liftIO . throw . DataParseError k (toInt $ docSize r) .
+                    showString "Deserialization Error: ")
+             return (decode bs)
         return (DataState hnd $ Cache.insert now k a (B.length bs) cache, a)
       Just (a, _, cache') -> return (DataState hnd cache', a)
 
