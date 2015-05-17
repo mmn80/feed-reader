@@ -96,7 +96,7 @@ data Item = Item
   , itemURL          :: Unique URL
   , itemTitle        :: Content
   , itemSummary      :: Content
-  , itemTags         :: [Tag]
+  , itemTags         :: [Indexable Tag]
   , itemAuthors      :: [DocID Person]
   , itemContributors :: [DocID Person]
   , itemRights       :: Content

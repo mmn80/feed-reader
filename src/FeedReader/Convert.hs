@@ -116,7 +116,7 @@ instance ToItem A.Entry where
                   , itemURL          = Unique url
                   , itemTitle        = content2DB $ A.entryTitle i
                   , itemSummary      = tryContent2DB $ A.entrySummary i
-                  , itemTags         = A.catTerm <$> A.entryCategories i
+                  , itemTags         = Indexable . A.catTerm <$> A.entryCategories i
                   , itemAuthors      = fst <$> as
                   , itemContributors = fst <$> cs
                   , itemRights       = tryContent2DB $ A.entryRights i
@@ -185,7 +185,8 @@ instance ToItem R.RSSItem where
                   , itemURL          = Unique url
                   , itemTitle        = Text . fromMaybe "" $ R.rssItemTitle i
                   , itemSummary      = Text ""
-                  , itemTags         = R.rssCategoryValue <$> R.rssItemCategories i
+                  , itemTags         = Indexable . R.rssCategoryValue <$>
+                                       R.rssItemCategories i
                   , itemAuthors      = fst <$> as
                   , itemContributors = []
                   , itemRights       = Text ""
@@ -247,7 +248,7 @@ instance ToItem R1.Item where
                   , itemURL          = Unique url
                   , itemTitle        = Text $ R1.itemTitle i
                   , itemSummary      = HTML . fromMaybe "" $ R1.itemDesc i
-                  , itemTags         = R1.itemTopics i
+                  , itemTags         = Indexable <$> R1.itemTopics i
                   , itemAuthors      = fst <$> as
                   , itemContributors = fst <$> cs
                   , itemRights       = Text $ extractDcInfo dcs DC.DC_Rights

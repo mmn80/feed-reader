@@ -212,13 +212,14 @@ cmdGetk h args = timed $ do
                :: LookupRet Item) >>= out . fmap (show . snd)
     _        -> yield . shows t $ " is not a valid table name."
 
-page h c p s k o now df = handleAbort $
-  if (k :: Int) == 0
-  then DB.runRange h (parseVal s now) (fromString fprop) p
-  else DB.runFilter h (fromIntegral k) (parseVal s now)
-         (fromString fprop) (fromString oprop) p
+page h c p s mk o now df = handleAbort $
+  maybe (DB.runRange h (parseVal s now) (fromString fprop) p)
+  (\k -> DB.runFilter h (nk k) (parseVal s now)
+         (fromString fprop) (fromString oprop) p)
+  mk
   where fprop = if c == "*" then df else c
         oprop = if o == "*" then df else o
+        nk k  = if k == 0 then Nothing else Just $ fromIntegral (k :: Int)
 
 parseVal s now
   | "D:" `isPrefixOf` s = Just . DB.intVal $ text2UTCTime (drop 2 s) now
@@ -226,7 +227,7 @@ parseVal s now
   | s == "*"            = Nothing
   | otherwise           = Just . DB.intVal $ (read s :: Int)
 
-cmdPage h args s k o = do
+cmdPage h args s mk o = do
   let p = (read $ args !! 1) :: Int
   let t = args !! 2
   let c = args !! 3
@@ -238,19 +239,19 @@ cmdPage h args s k o = do
   now <- liftBase getCurrentTime
   case t of
     "cat"    -> do
-      as <- page h c p s k o now "catName"
+      as <- page h c p s mk o now "catName"
       yields $ format "ID" . showString "Name"
       each $ sCat <$> as
     "feed"   -> do
-      as <- page h c p s k o now "feedUpdated"
+      as <- page h c p s mk o now "feedUpdated"
       yields $ format "ID" . format "CatID" . showString "Updated"
       each $ sFeed <$> as
     "person" -> do
-      as <- page h c p s k o now "personName"
+      as <- page h c p s mk o now "personName"
       yields $ format "ID" . showString "Name"
       each $ sPerson <$> as
     "item"   -> do
-      as <- page h c p s k o now "itemUpdated"
+      as <- page h c p s mk o now "itemUpdated"
       showItems as
     _        -> yield . shows t $ " is not a valid table name."
 
@@ -269,13 +270,13 @@ showItems as = do
 
 cmdRange h args = timed $ do
   let s = args !! 4
-  cmdPage h args s (0 :: Int) ""
+  cmdPage h args s Nothing ""
 
 cmdFilter h args = timed $ do
   let k = (read $ args !! 4) :: Int
   let o = args !! 5
   let s = args !! 6
-  cmdPage h args s k o
+  cmdPage h args s (Just k) o
 
 showIDs is = do
   let ids = map show is

@@ -259,7 +259,11 @@ class DBValue a where
   getUnique _ = Nothing
 
 instance DBValue (DocID a) where
-  getDBValues (DocID did) = [did]
+  getDBValues (DocID did) = [ did ]
+  isReference _ = True
+
+instance DBValue (Maybe (DocID a)) where
+  getDBValues mb = [ maybe 0 unDocID mb ]
   isReference _ = True
 
 instance {-# OVERLAPPABLE #-} (DBValue a, Foldable f) => DBValue (f a) where
@@ -559,13 +563,13 @@ range mst msti p pg = page_ f mst
                    ds <- Map.lookup (propI p) (intIdx m)
                    return $ getPage st (rval msti) pg ds
 
-filter :: (Document a, MonadIO m) => DocID c -> Maybe (IntVal b) ->
+filter :: (Document a, MonadIO m) => Maybe (DocID c) -> Maybe (IntVal b) ->
           Maybe (DocID a) -> Property a -> Property a -> Int ->
           Transaction m [(DocID a, a)]
-filter (DocID did) mst msti fprop sprop pg = page_ f mst
+filter mdid mst msti fprop sprop pg = page_ f mst
   where f _ m = fromMaybe [] . liftM (getPage (ival mst) (rval msti) pg) $
                   Map.lookup (toInt . fst . unProperty $ fprop) (refIdx m) >>=
-                  Map.lookup (toInt did) >>=
+                  Map.lookup (toInt $ maybe 0 unDocID mdid) >>=
                   Map.lookup (propI sprop)
 
 pageK_ :: MonadIO m => (Int -> MasterState -> [Int]) -> Maybe (IntVal b) ->

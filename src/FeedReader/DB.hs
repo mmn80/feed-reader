@@ -52,7 +52,7 @@ runRange :: (Document a, MonadIO m) => Handle -> Maybe (IntVal b) ->
             Property a -> Int -> m (Either TransactionAbort [(DocID a, a)])
 runRange h s prop pg = runTransaction h $ range s Nothing prop pg
 
-runFilter :: (Document a, MonadIO m) => Handle -> DocID b -> Maybe (IntVal c) ->
+runFilter :: (Document a, MonadIO m) => Handle -> Maybe (DocID b) -> Maybe (IntVal c) ->
              Property a -> Property a -> Int ->
              m (Either TransactionAbort [(DocID a, a)])
 runFilter h k s fprop sprop pg = runTransaction h $
