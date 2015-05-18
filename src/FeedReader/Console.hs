@@ -91,6 +91,7 @@ doAbortable n args h f =
          shows (length args - 1) . showString " were supplied."
   where transErr (DB.AbortUnique s)   = s
         transErr (DB.AbortConflict s) = s
+        transErr (DB.AbortDelete s)   = s
         dbErr (DB.LogParseError pos s) =
           showString s . showString "\nPosition: " $ shows pos ""
         dbErr (DB.DataParseError pos sz s) = showString s . showString
@@ -169,7 +170,12 @@ timed f = do
   t0 <- liftBase getCurrentTime
   f
   t1 <- liftBase getCurrentTime
-  yields' "Command: " $ shows (diffMs t0 t1) . showString " ms"
+  yields' "Command: " $ showsTimeDiff t0 t1
+
+showsTimeDiff t0 t1 =
+  if d >= 1 then shows d . showString " ms"
+  else shows (d * 1000) . showString " us"
+  where d = diffMs t0 t1
 
 handleAbort cmd = liftBase cmd >>= either throwM return
 
@@ -396,7 +402,7 @@ main = runSafeT . runEffect $ bracket
         putStrLn "  Opening DB..."
         h <- DB.open (Just "feeds.log") (Just "feeds.dat")
         t1 <- getCurrentTime
-        putStrLn . showString "  DB opened in " . shows (diffMs t0 t1) $ " ms."
+        putStrLn . showString "  DB opened in " $ showsTimeDiff t0 t1 ""
         return h )
     (\h -> do
         putStrLn "  Closing DB..."

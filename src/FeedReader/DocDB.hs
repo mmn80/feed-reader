@@ -201,7 +201,9 @@ newtype Transaction m a = Transaction { unTransaction :: StateT TransactionState
 instance MonadIO m => MonadIO (Transaction m) where
   liftIO = Transaction . liftIO
 
-data TransactionAbort = AbortUnique String | AbortConflict String
+data TransactionAbort = AbortUnique String
+                      | AbortConflict String
+                      | AbortDelete String
   deriving (Show)
 
 instance Exception TransactionAbort
@@ -431,9 +433,11 @@ runTransaction h (Transaction t) = do
   if null u then return $ Right a
   else withMaster h $ \m ->
     if | not $ checkUnique u (unqIdx m) (logPend m) -> return (m, Left $
-           AbortUnique "Transaction aborted. Uniqueness check failed.")
-       | not $ checkValid tid (logPend m) (logComp m) q u -> return (m, Left $
-           AbortConflict "Transaction aborted due to conflicts. Try again later.")
+           AbortUnique "Transaction aborted: uniqueness check failed.")
+       | not $ checkConflict tid (logPend m) (logComp m) q u -> return (m, Left $
+           AbortConflict "Transaction aborted: conflict with concurrent transactions.")
+       | not $ checkDelete m u -> return (m, Left $
+           AbortDelete "Document cannot be deleted. Other documents still point to it.")
        | otherwise -> do
            let tsz = sum $ (tRecSize . Pending . fst) <$> u
            let pos = toInt (logPos m) + tsz
@@ -467,7 +471,7 @@ runTransaction h (Transaction t) = do
               cku' did (findUnique pid val (concat $ Map.elems logp))
             cku' did = maybe True (== did)
 
-    checkValid tid logp logc q u = ck qs && ck us
+    checkConflict tid logp logc q u = ck qs && ck us
       where
         us = (\(d,_) -> (toInt (docID d), ())) <$> u
         qs = (\k -> (toInt k, ())) <$> q
@@ -476,6 +480,17 @@ runTransaction h (Transaction t) = do
           where ml = Map.fromList lst
         newPs = snd $ Map.split (toInt tid) logp
         newCs = snd $ Map.split (toInt tid) logc
+
+    checkDelete m u = all ck . L.filter docDel $ map fst u
+      where ck d = all (ckEmpty $ toInt did) lst && all (ckPnd did) rs
+              where did = docID d
+            lst = Map.elems $ refIdx m
+            ckEmpty did idx =
+              case Map.lookup did idx of
+                Nothing -> True
+                Just ss -> all null $ Map.elems ss
+            rs = L.filter (not . docDel) . map fst . concat . Map.elems $ logPend m
+            ckPnd did r = not . any ((did ==) . drefDID) $ docDRefs r
 
     allocFold (ts, gs) (r, bs) =
       if docDel r then ((r, bs):ts, gs)
@@ -941,7 +956,8 @@ updateIntIdx = L.foldl' f
                   where is' = case Map.lookup rval is of
                                 Nothing -> if del then is
                                            else Map.insert rval sng is
-                                Just ss -> Map.insert rval ss' is
+                                Just ss -> if Set.null ss' then Map.delete rval is
+                                           else Map.insert rval ss' is
                                   where ss' = if del then Set.delete did ss
                                               else Set.insert did ss
 
