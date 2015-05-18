@@ -95,6 +95,10 @@ doAbortable n args h f =
           showString s . showString "\nPosition: " $ shows pos ""
         dbErr (DB.DataParseError pos sz s) = showString s . showString
           "\nPosition: " . shows pos . showString "\nSize: " $ shows sz ""
+        dbErr (DB.IdAllocationError s) = s
+        dbErr (DB.DataAllocationError sz mbsz s) = showString s . showString
+          "\nSize requested: " . shows sz . showString
+          "\nLargest gap: " . maybe (showString "no gaps") shows mbsz $ ""
 
 ------------------------------------------------------------------------------
 -- Random Utilities
