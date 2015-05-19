@@ -32,17 +32,17 @@ module FeedReader.Types
   , Unique (..)
   ) where
 
-import           Control.Monad         (liftM)
-import           Control.Monad.Trans   (MonadIO)
-import           Data.Maybe            (fromMaybe)
-import           Data.Serialize        (Get (..), Serialize (..))
-import           Data.Time.Clock       (UTCTime)
-import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
-                                        utcTimeToPOSIXSeconds)
-import           Database.Muesli.DocDB (DBValue, DocID, Document (..),
-                                        Indexable (..), Transaction,
-                                        Unique (..))
-import           GHC.Generics          (Generic)
+import           Control.Monad               (liftM)
+import           Control.Monad.Trans         (MonadIO)
+import           Data.Maybe                  (fromMaybe)
+import           Data.Serialize              (Get (..), Serialize (..))
+import           Data.Time.Clock             (UTCTime (..))
+import           Data.Time.Clock.POSIX       (posixSecondsToUTCTime,
+                                              utcTimeToPOSIXSeconds)
+import           Data.Time.LocalTime         (LocalTime)
+import           Database.Muesli.Transaction
+import           Database.Muesli.Types
+import           GHC.Generics                (Generic)
 
 type URL      = String
 type Language = String

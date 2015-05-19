@@ -14,8 +14,8 @@
 ----------------------------------------------------------------------------
 
 module FeedReader.DB
-  ( module FeedReader.Types
-  , module Database.Muesli.DocDB
+  ( module All
+  , TransactionAbort (..)
   , runRange
   , runFilter
   , runLookup
@@ -29,15 +29,17 @@ module FeedReader.DB
   , runToFeed
   ) where
 
-import           Control.Monad       (forM_)
-import           Control.Monad.Trans (MonadIO (liftIO))
-import qualified Data.List           as L
-import           Data.Maybe          (fromMaybe)
-import           Data.Time.Clock     (getCurrentTime)
+import           Control.Monad               (forM_)
+import           Control.Monad.Trans         (MonadIO (liftIO))
+import qualified Data.List                   as L
+import           Data.Maybe                  (fromMaybe)
+import           Data.Time.Clock             (getCurrentTime)
+import           Database.Muesli.Handle      as All
+import           Database.Muesli.Transaction
+import           Database.Muesli.Types       as All
 import           FeedReader.Convert
-import           Database.Muesli.DocDB
-import           FeedReader.Types
-import           Prelude             hiding (filter, lookup)
+import           FeedReader.Types            as All
+import           Prelude                     hiding (filter, lookup)
 
 runLookup :: (Document a, MonadIO m) => Handle -> DocID a ->
              m (Either TransactionAbort (Maybe (DocID a, a)))
