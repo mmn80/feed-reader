@@ -39,7 +39,7 @@ import           Data.Serialize        (Get (..), Serialize (..))
 import           Data.Time.Clock       (UTCTime)
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
-import           FeedReader.DocDB      (DBValue, DocID, Document (..),
+import           Database.Muesli.DocDB (DBValue, DocID, Document (..),
                                         Indexable (..), Transaction,
                                         Unique (..))
 import           GHC.Generics          (Generic)

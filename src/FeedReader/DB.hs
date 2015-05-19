@@ -15,7 +15,7 @@
 
 module FeedReader.DB
   ( module FeedReader.Types
-  , module FeedReader.DocDB
+  , module Database.Muesli.DocDB
   , runRange
   , runFilter
   , runLookup
@@ -35,7 +35,7 @@ import qualified Data.List           as L
 import           Data.Maybe          (fromMaybe)
 import           Data.Time.Clock     (getCurrentTime)
 import           FeedReader.Convert
-import           FeedReader.DocDB
+import           Database.Muesli.DocDB
 import           FeedReader.Types
 import           Prelude             hiding (filter, lookup)
 

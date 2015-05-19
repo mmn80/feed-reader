@@ -20,7 +20,7 @@ module FeedReader.Convert
 import           Control.Applicative   ((<|>))
 import           Data.List             (find, isPrefixOf)
 import           Data.Maybe            (fromMaybe, listToMaybe)
-import           FeedReader.DocDB      (Transaction, intValUnique, updateUnique)
+import           Database.Muesli.DocDB (Transaction, intValUnique, updateUnique)
 import           FeedReader.Types
 import           FeedReader.Utils      (text2UTCTime)
 import qualified Text.Atom.Feed        as A

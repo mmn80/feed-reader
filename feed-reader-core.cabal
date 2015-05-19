@@ -19,31 +19,26 @@ library
   build-depends:
     base,
     time,
-    containers,
     mtl,
+    containers,
     bytestring,
     cereal,
-    filepath,
-    directory,
-    hashable,
-    psqueues,
     xml,
     feed,
+    filepath,
+    directory,
     pipes,
     pipes-http,
-    http-types
+    http-types,
+    muesli
 
   exposed-modules:
     FeedReader.Types,
-    FeedReader.Cache,
-    FeedReader.DocDB,
     FeedReader.DB,
     FeedReader.Convert,
     FeedReader.Import,
     FeedReader.Utils
 
-  -- other-modules:
-  -- other-extensions:
   hs-source-dirs:      src
   default-language:    Haskell2010
 
@@ -54,18 +49,17 @@ executable feeds-console
   build-depends:
     base,
     time,
-    hashable,
-    random,
-    containers,
     mtl,
+    containers,
+    bytestring,
+    cereal,
+    xml,
+    feed,
+    random,
     filepath,
     directory,
     pipes,
     pipes-safe,
     pipes-http,
     http-types,
-    bytestring,
-    cereal,
-    psqueues,
-    xml,
-    feed
+    muesli
