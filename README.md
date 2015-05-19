@@ -8,12 +8,8 @@ Features / TODO
 
 ### DB
 
-* ~~acid-state based document DB~~
-* ~~sharding system for fast initial loading and constant memory operation~~
-* ~~all combined master+shard operations are ACID~~
-* ~~O(p*log(n)) queries, with p = result set size ('infinite scroll', etc.)~~
-* new scalable, indexable, ACID, MVCC, GC'd document DB engine in the works
-* see the [spec](https://github.com/clnx/feed-reader/blob/master/src/FeedReader/DB_info.md)
+* uses [Muesli](https://github.com/clnx/muesli/), a MVCC document-oriented
+database with automatic index management implemented in Haskell.
 
 ### Backend
 
