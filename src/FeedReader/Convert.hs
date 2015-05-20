@@ -17,17 +17,16 @@
 module FeedReader.Convert
   () where
 
-import           Control.Applicative         ((<|>))
-import           Data.List                   (find, isPrefixOf)
-import           Data.Maybe                  (fromMaybe, listToMaybe)
-import           Database.Muesli.Transaction (Transaction, updateUnique)
-import           Database.Muesli.Types
+import           Control.Applicative   ((<|>))
+import           Data.List             (find, isPrefixOf)
+import           Data.Maybe            (fromMaybe, listToMaybe)
+import           Database.Muesli.Query hiding (filter)
 import           FeedReader.Types
-import           FeedReader.Utils            (text2UTCTime)
-import qualified Text.Atom.Feed              as A
-import qualified Text.DublinCore.Types       as DC
-import qualified Text.RSS.Syntax             as R
-import qualified Text.RSS1.Syntax            as R1
+import           FeedReader.Utils      (text2UTCTime)
+import qualified Text.Atom.Feed        as A
+import qualified Text.DublinCore.Types as DC
+import qualified Text.RSS.Syntax       as R
+import qualified Text.RSS1.Syntax      as R1
 
 ------------------------------------------------------------------------------
 -- Conversion transactions for Atom

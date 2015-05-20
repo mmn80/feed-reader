@@ -18,24 +18,24 @@ module FeedReader.Import
   , updateFeed
   ) where
 
-import           Control.Exception           (throw, try)
-import           Control.Monad               (liftM)
-import           Control.Monad.Trans         (MonadIO (liftIO))
-import           Data.ByteString             (ByteString)
-import           Data.ByteString.Char8       (unpack)
-import           Database.Muesli.Transaction (TransactionAbort (..))
+import           Control.Exception         (throw, try)
+import           Control.Monad             (liftM)
+import           Control.Monad.Trans       (MonadIO (liftIO))
+import           Data.ByteString           (ByteString)
+import           Data.ByteString.Char8     (unpack)
+import           Database.Muesli.Query     (TransactionAbort (..))
 import           FeedReader.DB
-import           Network.HTTP.Types.Status   (Status (..), statusIsSuccessful,
-                                              statusMessage)
+import           Network.HTTP.Types.Status (Status (..), statusIsSuccessful,
+                                            statusMessage)
 import           Pipes
 import           Pipes.HTTP
-import qualified Pipes.Prelude               as P
-import qualified Text.Atom.Feed              as A
-import           Text.Feed.Import            (readAtom, readRSS1, readRSS2)
-import qualified Text.Feed.Types             as F
-import qualified Text.RSS.Syntax             as R
-import qualified Text.RSS1.Syntax            as R1
-import           Text.XML.Light              as XML
+import qualified Pipes.Prelude             as P
+import qualified Text.Atom.Feed            as A
+import           Text.Feed.Import          (readAtom, readRSS1, readRSS2)
+import qualified Text.Feed.Types           as F
+import qualified Text.RSS.Syntax           as R
+import qualified Text.RSS1.Syntax          as R1
+import           Text.XML.Light            as XML
 
 downloadFeed :: MonadIO m => URL -> m (Either String F.Feed)
 downloadFeed url = do
