@@ -66,12 +66,12 @@ imageFromURL u = Image
 
 instance ToPerson A.Person where
   toPerson p = do
-    let name = Indexable $ A.personName p
+    let name = Sortable $ A.personName p
     let p' = Person { personName  = Unique name
                     , personURL   = fromMaybe "" $ A.personURI p
                     , personEmail = fromMaybe "" $ A.personEmail p
                     }
-    pid <- updateUnique "personName" (intValUnique name) p'
+    pid <- updateUnique "personName" (Unique name) p'
     return (pid, p')
 
 toStr Nothing = ""
@@ -92,16 +92,16 @@ instance ToFeed A.Feed where
                   , feedURL          = Unique u
                   , feedWebURL       = maybe "" A.linkHref . listToMaybe .
                                        filter isSelf $ A.feedLinks f
-                  , feedTitle        = Indexable . content2DB $ A.feedTitle f
+                  , feedTitle        = Sortable . content2DB $ A.feedTitle f
                   , feedDescription  = tryContent2DB $ A.feedSubtitle f
                   , feedLanguage     = ""
                   , feedAuthors      = fst <$> as
                   , feedContributors = fst <$> cs
                   , feedRights       = tryContent2DB $ A.feedRights f
                   , feedImage        = imageFromURL <$> (A.feedLogo f <|> A.feedIcon f)
-                  , feedUpdated      = Indexable $ text2UTCTime (A.feedUpdated f) df
+                  , feedUpdated      = Sortable $ text2UTCTime (A.feedUpdated f) df
                   }
-    fid <- updateUnique "feedURL" (intValUnique u) f'
+    fid <- updateUnique "feedURL" (Unique u) f'
     return (fid, f')
 
 instance ToItem A.Entry where
@@ -116,16 +116,16 @@ instance ToItem A.Entry where
                   , itemURL          = Unique url
                   , itemTitle        = content2DB $ A.entryTitle i
                   , itemSummary      = tryContent2DB $ A.entrySummary i
-                  , itemTags         = Indexable . A.catTerm <$> A.entryCategories i
+                  , itemTags         = Sortable . A.catTerm <$> A.entryCategories i
                   , itemAuthors      = fst <$> as
                   , itemContributors = fst <$> cs
                   , itemRights       = tryContent2DB $ A.entryRights i
                   , itemContent      = tryEContent2DB $ A.entryContent i
-                  , itemPublished    = Indexable $ text2UTCTime
+                  , itemPublished    = Sortable $ text2UTCTime
                                          (fromMaybe "" $ A.entryPublished i) df
-                  , itemUpdated      = Indexable date
+                  , itemUpdated      = Sortable date
                   }
-    iid <- updateUnique "itemURL" (intValUnique url) i'
+    iid <- updateUnique "itemURL" (Unique url) i'
     return (iid, i')
 
 ------------------------------------------------------------------------------
@@ -136,12 +136,12 @@ data RSSPerson = RSSPerson { rssPersonName :: String }
 
 instance ToPerson RSSPerson where
   toPerson p = do
-    let name = Indexable $ rssPersonName p
+    let name = Sortable $ rssPersonName p
     let p' = Person { personName  = Unique name
                     , personURL   = ""
                     , personEmail = ""
                     }
-    pid <- updateUnique "personName" (intValUnique name) p'
+    pid <- updateUnique "personName" (Unique name) p'
     return (pid, p')
 
 rssImageToImage i = Image
@@ -162,30 +162,30 @@ instance ToFeed R.RSSChannel where
     let f' = Feed { feedCatID        = c
                   , feedURL          = Unique u
                   , feedWebURL       = R.rssLink f
-                  , feedTitle        = Indexable . Text $ R.rssTitle f
+                  , feedTitle        = Sortable . Text $ R.rssTitle f
                   , feedDescription  = HTML $ R.rssDescription f
                   , feedLanguage     = fromMaybe "" $ R.rssLanguage f
                   , feedAuthors      = fst <$> as
                   , feedContributors = fst <$> cs
                   , feedRights       = Text . fromMaybe "" $ R.rssCopyright f
                   , feedImage        = rssImageToImage <$> R.rssImage f
-                  , feedUpdated      = Indexable $ case R.rssLastUpdate f of
+                  , feedUpdated      = Sortable $ case R.rssLastUpdate f of
                                          Nothing -> df
                                          Just d  -> text2UTCTime d df
                   }
-    fid <- updateUnique "feedURL" (intValUnique u) f'
+    fid <- updateUnique "feedURL" (Unique u) f'
     return (fid, f')
 
 instance ToItem R.RSSItem where
   toItem i f df = do
     as <- mapM toPerson . rssPersonToPerson $ R.rssItemAuthor i
     let url = fromMaybe "" $ R.rssItemLink i
-    let date = Indexable $ text2UTCTime (fromMaybe "" $ R.rssItemPubDate i) df
+    let date = Sortable $ text2UTCTime (fromMaybe "" $ R.rssItemPubDate i) df
     let i' = Item { itemFeedID       = f
                   , itemURL          = Unique url
                   , itemTitle        = Text . fromMaybe "" $ R.rssItemTitle i
                   , itemSummary      = Text ""
-                  , itemTags         = Indexable . R.rssCategoryValue <$>
+                  , itemTags         = Sortable . R.rssCategoryValue <$>
                                        R.rssItemCategories i
                   , itemAuthors      = fst <$> as
                   , itemContributors = []
@@ -194,7 +194,7 @@ instance ToItem R.RSSItem where
                   , itemPublished    = date
                   , itemUpdated      = date
                   }
-    iid <- updateUnique "itemURL" (intValUnique url) i'
+    iid <- updateUnique "itemURL" (Unique url) i'
     return (iid, i')
 
 ------------------------------------------------------------------------------
@@ -224,17 +224,17 @@ instance ToFeed R1.Feed where
     let f' = Feed { feedCatID        = c
                   , feedURL          = Unique u
                   , feedWebURL       = R1.channelURI ch
-                  , feedTitle        = Indexable . Text $ R1.channelTitle ch
+                  , feedTitle        = Sortable . Text $ R1.channelTitle ch
                   , feedDescription  = HTML $ R1.channelDesc ch
                   , feedLanguage     = extractDcInfo dcs DC.DC_Language
                   , feedAuthors      = fst <$> as
                   , feedContributors = fst <$> cs
                   , feedRights       = Text $ extractDcInfo dcs DC.DC_Rights
                   , feedImage        = rss1ImageToImage <$> R1.feedImage f
-                  , feedUpdated      = Indexable $ text2UTCTime
+                  , feedUpdated      = Sortable $ text2UTCTime
                                          (extractDcInfo dcs DC.DC_Date) df
                   }
-    fid <- updateUnique "feedURL" (intValUnique u) f'
+    fid <- updateUnique "feedURL" (Unique u) f'
     return (fid, f')
 
 instance ToItem R1.Item where
@@ -243,12 +243,12 @@ instance ToItem R1.Item where
     as <- mapM toPerson $ extractDcPersons dcs DC.DC_Creator
     cs <- mapM toPerson $ extractDcPersons dcs DC.DC_Contributor
     let url = if null $ R1.itemLink i then R1.itemURI i else R1.itemLink i
-    let date = Indexable $ text2UTCTime (extractDcInfo dcs DC.DC_Date) df
+    let date = Sortable $ text2UTCTime (extractDcInfo dcs DC.DC_Date) df
     let i' = Item { itemFeedID       = f
                   , itemURL          = Unique url
                   , itemTitle        = Text $ R1.itemTitle i
                   , itemSummary      = HTML . fromMaybe "" $ R1.itemDesc i
-                  , itemTags         = Indexable <$> R1.itemTopics i
+                  , itemTags         = Sortable <$> R1.itemTopics i
                   , itemAuthors      = fst <$> as
                   , itemContributors = fst <$> cs
                   , itemRights       = Text $ extractDcInfo dcs DC.DC_Rights
@@ -257,5 +257,5 @@ instance ToItem R1.Item where
                   , itemPublished    = date
                   , itemUpdated      = date
                   }
-    iid <- updateUnique "itemURL" (intValUnique url) i'
+    iid <- updateUnique "itemURL" (Unique url) i'
     return (iid, i')

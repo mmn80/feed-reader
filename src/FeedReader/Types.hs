@@ -28,7 +28,7 @@ module FeedReader.Types
   , ToFeed (..)
   , ToPerson (..)
   , ToItem (..)
-  , Indexable (..)
+  , Sortable (..)
   , Unique (..)
   ) where
 
@@ -48,17 +48,17 @@ type Language = String
 type Tag      = String
 
 data Content  = Text String | HTML String | XHTML String
-  deriving (Show, Generic, Serialize, DBValue)
+  deriving (Show, Generic, Serialize, Indexable)
 
 data Cat = Cat
-  { catName   :: Indexable String
-  , catParent :: Maybe (DocID Cat)
+  { catName   :: Sortable String
+  , catParent :: Maybe (Reference Cat)
   } deriving (Show, Generic, Serialize)
 
 instance Document Cat
 
 data Person = Person
-  { personName  :: Unique (Indexable String)
+  { personName  :: Unique (Sortable String)
   , personURL   :: URL
   , personEmail :: String
   } deriving (Show, Generic, Serialize)
@@ -72,36 +72,36 @@ data Image = Image
   , imageLink        :: URL
   , imageWidth       :: Int
   , imageHeight      :: Int
-  } deriving (Show, Generic, Serialize, DBValue)
+  } deriving (Show, Generic, Serialize, Indexable)
 
 data Feed = Feed
-  { feedCatID        :: DocID Cat
+  { feedCatID        :: Reference Cat
   , feedURL          :: Unique URL
   , feedWebURL       :: URL
-  , feedTitle        :: Indexable Content
+  , feedTitle        :: Sortable Content
   , feedDescription  :: Content
   , feedLanguage     :: Language
-  , feedAuthors      :: [DocID Person]
-  , feedContributors :: [DocID Person]
+  , feedAuthors      :: [Reference Person]
+  , feedContributors :: [Reference Person]
   , feedRights       :: Content
   , feedImage        :: Maybe Image
-  , feedUpdated      :: Indexable UTCTime
+  , feedUpdated      :: Sortable UTCTime
   } deriving (Show, Generic, Serialize)
 
 instance Document Feed
 
 data Item = Item
-  { itemFeedID       :: DocID Feed
+  { itemFeedID       :: Reference Feed
   , itemURL          :: Unique URL
   , itemTitle        :: Content
   , itemSummary      :: Content
-  , itemTags         :: [Indexable Tag]
-  , itemAuthors      :: [DocID Person]
-  , itemContributors :: [DocID Person]
+  , itemTags         :: [Sortable Tag]
+  , itemAuthors      :: [Reference Person]
+  , itemContributors :: [Reference Person]
   , itemRights       :: Content
   , itemContent      :: Content
-  , itemPublished    :: Indexable UTCTime
-  , itemUpdated      :: Indexable UTCTime
+  , itemPublished    :: Sortable UTCTime
+  , itemUpdated      :: Sortable UTCTime
   } deriving (Show, Generic, Serialize)
 
 instance Document Item
@@ -111,12 +111,12 @@ instance Serialize UTCTime where
   get = liftM (posixSecondsToUTCTime . fromRational) get
 
 class ToFeed f where
-  toFeed :: MonadIO m => f -> DocID Cat -> URL -> UTCTime ->
-            Transaction m (DocID Feed, Feed)
+  toFeed :: MonadIO m => f -> Reference Cat -> URL -> UTCTime ->
+            Transaction m (Reference Feed, Feed)
 
 class ToPerson p where
-  toPerson :: MonadIO m => p -> Transaction m (DocID Person, Person)
+  toPerson :: MonadIO m => p -> Transaction m (Reference Person, Person)
 
 class ToItem i where
-  toItem :: MonadIO m => i -> DocID Feed -> UTCTime ->
-            Transaction m (DocID Item, Item)
+  toItem :: MonadIO m => i -> Reference Feed -> UTCTime ->
+            Transaction m (Reference Item, Item)

@@ -10,7 +10,7 @@ import           Data.String           (fromString)
 import           Data.Time.Clock       (UTCTime, getCurrentTime)
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
-import           FeedReader.DB         (DocID, Property)
+import           FeedReader.DB         (Property, Reference)
 import qualified FeedReader.DB         as DB
 import           FeedReader.Import     (downloadFeed, updateFeed)
 import           FeedReader.Types
@@ -109,9 +109,9 @@ randomString l r = do
   ln <- randomRIO (l, r)
   replicateM ln $ randomRIO (' ', '~')
 
-randomStringIx l r = Indexable <$> randomString l r
+randomStringIx l r = Sortable <$> randomString l r
 
-randomContentIx l r = Indexable . Text <$> randomString l r
+randomContentIx l r = Sortable . Text <$> randomString l r
 
 time2Int str = fromInteger . round . utcTimeToPOSIXSeconds . text2UTCTime str
 
@@ -122,7 +122,7 @@ randomTime = do
   ti <- randomRIO (l, r)
   return . posixSecondsToUTCTime $ fromInteger ti
 
-randomTimeIx = Indexable <$> randomTime
+randomTimeIx = Sortable <$> randomTime
 
 randomCat =
   Cat <$> randomStringIx 10 30
@@ -186,7 +186,7 @@ cmdStats h _ = timed $ do
   yields' "Person count  : " $ shows (DB.countPersons s)
   yields' "Entry count   : " $ shows (DB.countItems s)
 
-type LookupRet a = IO (Either DB.TransactionAbort (Maybe (DocID a, a)))
+type LookupRet a = IO (Either DB.TransactionAbort (Maybe (Reference a, a)))
 
 cmdGet h args = timed $ do
   let t = args !! 1
@@ -212,13 +212,13 @@ cmdGetk h args = timed $ do
                   (each . lines)
   case t of
     "feed"   ->
-      handleAbort (DB.runLookupUnique h "feedURL" (DB.intValUnique k)
+      handleAbort (DB.runLookupUnique h "feedURL" (DB.Unique k)
                :: LookupRet Feed) >>= out . fmap (show . snd)
     "person" ->
-      handleAbort (DB.runLookupUnique h "personName" (DB.intValUnique k)
+      handleAbort (DB.runLookupUnique h "personName" (DB.Unique k)
                :: LookupRet Person) >>= out . fmap (show . snd)
     "item"   ->
-      handleAbort (DB.runLookupUnique h "itemURL" (DB.intValUnique k)
+      handleAbort (DB.runLookupUnique h "itemURL" (DB.Unique k)
                :: LookupRet Item) >>= out . fmap (show . snd)
     _        -> yield . shows t $ " is not a valid table name."
 
@@ -232,19 +232,19 @@ page h c p s mk o now df = handleAbort $
         nk k  = if k == 0 then Nothing else Just $ fromIntegral (k :: Int)
 
 parseVal s now
-  | "D:" `isPrefixOf` s = Just . DB.intVal $ text2UTCTime (drop 2 s) now
-  | "S:" `isPrefixOf` s = Just . DB.intVal $ drop 2 s
+  | "D:" `isPrefixOf` s = Just . DB.Sortable . DB.toDBWord . DB.Sortable $ text2UTCTime (drop 2 s) now
+  | "S:" `isPrefixOf` s = Just . DB.Sortable . DB.toDBWord . DB.Sortable $ drop 2 s
   | s == "*"            = Nothing
-  | otherwise           = Just . DB.intVal $ (read s :: Int)
+  | otherwise           = Just . DB.Sortable . DB.toDBWord . DB.Sortable $ (read s :: Int)
 
 cmdPage h args s mk o = do
   let p = (read $ args !! 1) :: Int
   let t = args !! 2
   let c = args !! 3
-  let sCat (iid, i) = formats (shows iid) . showString (unIndexable $ catName i) $ ""
+  let sCat (iid, i) = formats (shows iid) . showString (unSortable $ catName i) $ ""
   let sFeed (iid, i) = formats (shows iid) . formats (shows $ feedCatID i) .
                        shows (feedUpdated i) $ ""
-  let sPerson (iid, i) = formats (shows iid) . showString (unIndexable .
+  let sPerson (iid, i) = formats (shows iid) . showString (unSortable .
                          unUnique $ personName i) $ ""
   now <- liftBase getCurrentTime
   case t of
@@ -297,6 +297,8 @@ showIDs is = do
   yields $ shows l . showString " records generated."
   yields $ prefix . showString (intercalate ", " (take 10 ids)) . suffix
 
+nothing = Nothing :: Maybe (Sortable DB.DBWord)
+
 cmdAdd h args = timed $ do
   let n = (read $ args !! 1) :: Int
   let t = args !! 2
@@ -309,7 +311,7 @@ cmdAdd h args = timed $ do
                   randomPerson >>= DB.runInsert h)
                 >>= showIDs
     "feed" -> do
-      cs' <- handleAbort $ DB.runRange h Nothing "catName" 100
+      cs' <- handleAbort $ DB.runRange h nothing "catName" 100
       let cs = S.fromList cs'
       let rs = take n $ randomRs (0, S.length cs - 1) g
       fs <- handleAbort $ liftM sequence . P.toListM . for (each rs) $ \r ->
@@ -318,7 +320,7 @@ cmdAdd h args = timed $ do
         yield
       showIDs fs
     "item" -> do
-      fs' <- handleAbort $ DB.runRange h Nothing "feedUpdated" 1000
+      fs' <- handleAbort $ DB.runRange h nothing "feedUpdated" 1000
       let fs = S.fromList fs'
       let rfids = (fst . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
       is <- handleAbort $ liftM sequence . P.toListM . for (each rfids) $ \fid ->
@@ -332,7 +334,7 @@ cmdAdd h args = timed $ do
 cmdAddCat h args = timed $ do
   let n = args !! 1
   let p = (read $ args !! 2) :: Int
-  let cat = Cat (Indexable n) (if p == 0 then Nothing else Just $ fromIntegral p)
+  let cat = Cat (Sortable n) (if p == 0 then Nothing else Just $ fromIntegral p)
   cid <- handleAbort $ DB.runInsert h cat
   yields' "Category " $ shows cid . showString " inserted."
 
