@@ -253,11 +253,11 @@ page h c p s mk o now df = handleAbort $
         nk k  = if k == 0 then Nothing else Just $ fromIntegral (k :: Int)
 
 parseVal s now
-  | "D:" `isPrefixOf` s = Just . DB.Sortable . DB.toDBWord . DB.Sortable $
+  | "D:" `isPrefixOf` s = Just . DB.Sortable . DB.toKey . DB.Sortable $
                             text2UTCTime (drop 2 s) now
-  | "S:" `isPrefixOf` s = Just . DB.Sortable . DB.toDBWord . DB.Sortable $ drop 2 s
+  | "S:" `isPrefixOf` s = Just . DB.Sortable . DB.toKey . DB.Sortable $ drop 2 s
   | s == "*"            = Nothing
-  | otherwise           = Just . DB.Sortable . DB.toDBWord . DB.Sortable $
+  | otherwise           = Just . DB.Sortable . DB.toKey . DB.Sortable $
                             (read s :: Int)
 
 cmdPage h args s mk o = do
@@ -324,7 +324,7 @@ showIDs is = do
   yields $ shows l . showString " records generated."
   yields $ prefix . showString (intercalate ", " (take 10 ids)) . suffix
 
-nothing = Nothing :: Maybe (Sortable DB.DBWord)
+nothing = Nothing :: Maybe (Sortable DB.IxKey)
 
 cmdAdd h args = timed $ do
   let n = (read $ args !! 1) :: Int

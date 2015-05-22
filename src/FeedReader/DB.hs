@@ -45,18 +45,18 @@ runLookup :: (Document a, MonadIO m) => Handle -> Reference a ->
              m (Either TransactionAbort (Maybe (Reference a, a)))
 runLookup h k = runQuery h (lookup k)
 
-runLookupUnique :: (Document a, ToDBWord (Unique b), MonadIO m) =>
+runLookupUnique :: (Document a, ToKey (Unique b), MonadIO m) =>
                    Handle -> Property a -> Unique b ->
                    m (Either TransactionAbort (Maybe (Reference a, a)))
 runLookupUnique h p k = runQuery h $
   lookupUnique p k >>= maybe (return Nothing) lookup
 
-runRange :: (Document a, ToDBWord (Sortable b), MonadIO m) => Handle ->
+runRange :: (Document a, ToKey (Sortable b), MonadIO m) => Handle ->
             Maybe (Sortable b) -> Property a -> Int ->
             m (Either TransactionAbort [(Reference a, a)])
 runRange h s prop pg = runQuery h $ range s Nothing prop pg
 
-runFilter :: (Document a, ToDBWord (Sortable c), MonadIO m) => Handle ->
+runFilter :: (Document a, ToKey (Sortable c), MonadIO m) => Handle ->
              Maybe (Reference b) -> Maybe (Sortable c) -> Property a ->
              Property a -> Int -> m (Either TransactionAbort [(Reference a, a)])
 runFilter h k s fprop sprop pg = runQuery h $
@@ -69,14 +69,14 @@ runInsert h a = runQuery h $ insert a
 runDelete :: MonadIO m => Handle -> Reference a -> m (Either TransactionAbort ())
 runDelete h did = runQuery h (delete did)
 
-deleteRange :: (Document a, ToDBWord (Sortable b), MonadIO m) =>
+deleteRange :: (Document a, ToKey (Sortable b), MonadIO m) =>
                Sortable b -> Property a -> Int -> Transaction m Int
 deleteRange did prop pg = do
   ks <- rangeK (Just did) Nothing prop pg
   forM_ ks $ \k -> delete k
   return $ length ks
 
-runDeleteRange :: (Document a, ToDBWord (Sortable b), MonadIO m) =>
+runDeleteRange :: (Document a, ToKey (Sortable b), MonadIO m) =>
                   Handle -> Sortable b -> Property a -> Int ->
                   m (Either TransactionAbort Int)
 runDeleteRange h did prop pg = runQuery h (deleteRange did prop pg)
