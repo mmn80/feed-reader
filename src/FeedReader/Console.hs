@@ -172,12 +172,21 @@ timed f = do
   t1 <- liftBase getCurrentTime
   yields' "Command: " $ showsTimeDiff t0 t1
 
-showsTimeDiff t0 t1 =
+timeOf f = do
+  t0 <- liftBase getCurrentTime
+  r  <- f
+  t1 <- liftBase getCurrentTime
+  return (r, diffMs t0 t1)
+
+showsTimeDiff t0 t1 = showsTimeDiff' $ diffMs t0 t1
+
+showsTimeDiff' d =
   if d >= 1 then shows d . showString " ms"
   else shows (d * 1000) . showString " us"
-  where d = diffMs t0 t1
 
 handleAbort cmd = liftBase cmd >>= either throwM return
+
+showTime dt = yields' "Command: " $ showsTimeDiff' dt
 
 cmdStats h _ = timed $ do
   s <- handleAbort (DB.getStats h)
@@ -188,21 +197,33 @@ cmdStats h _ = timed $ do
 
 type LookupRet a = IO (Either DB.TransactionAbort (Maybe (Reference a, a)))
 
-cmdGet h args = timed $ do
+cmdGet h args = do
   let t = args !! 1
   let kstr = args !! 2
   let k = read kstr :: Int
   let out = maybe (yields' "No record found with ID = " $ showString kstr)
                   (each . lines)
   case t of
-    "cat"    -> handleAbort (DB.runLookup h (fromIntegral k) :: LookupRet Cat)
-                  >>= out . fmap (show . snd)
-    "feed"   -> handleAbort (DB.runLookup h (fromIntegral k) :: LookupRet Feed)
-                  >>= out . fmap (show . snd)
-    "person" -> handleAbort (DB.runLookup h (fromIntegral k) :: LookupRet Person)
-                  >>= out . fmap (show . snd)
-    "item"   -> handleAbort (DB.runLookup h (fromIntegral k) :: LookupRet Item)
-                  >>= out . fmap (show . snd)
+    "cat"    -> do
+       (r, dt) <- timeOf $ handleAbort
+                    (DB.runLookup h (fromIntegral k) :: LookupRet Cat)
+       out $ fmap (show . snd) r
+       showTime dt
+    "feed"   -> do
+       (r, dt) <- timeOf $ handleAbort
+                    (DB.runLookup h (fromIntegral k) :: LookupRet Feed)
+       out $ fmap (show . snd) r
+       showTime dt
+    "person" -> do
+       (r, dt) <- timeOf $ handleAbort
+                    (DB.runLookup h (fromIntegral k) :: LookupRet Person)
+       out $ fmap (show . snd) r
+       showTime dt
+    "item"   -> do
+       (r, dt) <- timeOf $ handleAbort
+                    (DB.runLookup h (fromIntegral k) :: LookupRet Item)
+       out $ fmap (show . snd) r
+       showTime dt
     _        -> yield . shows t $ " is not a valid table name."
 
 cmdGetk h args = timed $ do
@@ -225,17 +246,19 @@ cmdGetk h args = timed $ do
 page h c p s mk o now df = handleAbort $
   maybe (DB.runRange h (parseVal s now) (fromString fprop) p)
   (\k -> DB.runFilter h (nk k) (parseVal s now)
-         (fromString fprop) (fromString oprop) p)
+                  (fromString fprop) (fromString oprop) p)
   mk
   where fprop = if c == "*" then df else c
         oprop = if o == "*" then df else o
         nk k  = if k == 0 then Nothing else Just $ fromIntegral (k :: Int)
 
 parseVal s now
-  | "D:" `isPrefixOf` s = Just . DB.Sortable . DB.toDBWord . DB.Sortable $ text2UTCTime (drop 2 s) now
+  | "D:" `isPrefixOf` s = Just . DB.Sortable . DB.toDBWord . DB.Sortable $
+                            text2UTCTime (drop 2 s) now
   | "S:" `isPrefixOf` s = Just . DB.Sortable . DB.toDBWord . DB.Sortable $ drop 2 s
   | s == "*"            = Nothing
-  | otherwise           = Just . DB.Sortable . DB.toDBWord . DB.Sortable $ (read s :: Int)
+  | otherwise           = Just . DB.Sortable . DB.toDBWord . DB.Sortable $
+                            (read s :: Int)
 
 cmdPage h args s mk o = do
   let p = (read $ args !! 1) :: Int
@@ -249,20 +272,24 @@ cmdPage h args s mk o = do
   now <- liftBase getCurrentTime
   case t of
     "cat"    -> do
-      as <- page h c p s mk o now "catName"
+      (as, dt) <- timeOf $ page h c p s mk o now "catName"
       yields $ format "ID" . showString "Name"
       each $ sCat <$> as
+      showTime dt
     "feed"   -> do
-      as <- page h c p s mk o now "feedUpdated"
+      (as, dt) <- timeOf $ page h c p s mk o now "feedUpdated"
       yields $ format "ID" . format "CatID" . showString "Updated"
       each $ sFeed <$> as
+      showTime dt
     "person" -> do
-      as <- page h c p s mk o now "personName"
+      (as, dt) <- timeOf $ page h c p s mk o now "personName"
       yields $ format "ID" . showString "Name"
       each $ sPerson <$> as
+      showTime dt
     "item"   -> do
-      as <- page h c p s mk o now "itemUpdated"
+      (as, dt) <- timeOf $ page h c p s mk o now "itemUpdated"
       showItems as
+      showTime dt
     _        -> yield . shows t $ " is not a valid table name."
 
 formatsK k i = i . showString (replicate (k - length (i "")) ' ')
@@ -278,11 +305,11 @@ showItems as = do
                          formatsK 25 (shows $ itemUpdated i) .
                          shows (itemPublished i) $ ""
 
-cmdRange h args = timed $ do
+cmdRange h args = do
   let s = args !! 4
   cmdPage h args s Nothing ""
 
-cmdFilter h args = timed $ do
+cmdFilter h args = do
   let k = (read $ args !! 4) :: Int
   let o = args !! 5
   let s = args !! 6
