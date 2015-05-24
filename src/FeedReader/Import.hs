@@ -73,8 +73,8 @@ parseFeed bs =
       readRSS1 e `mplus`
       Nothing
 
-updateFeed :: (LogState l, DataHandle d, MonadIO m) =>
-               Handle l d -> F.Feed -> Reference Cat -> URL -> m (Either
+updateFeed :: (LogState l, MonadIO m) =>
+               Handle l -> F.Feed -> Reference Cat -> URL -> m (Either
                TransactionAbort (Reference Feed, Feed, [(Reference Item, Item)]))
 updateFeed h ff c u =
   case ff of

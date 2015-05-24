@@ -112,11 +112,11 @@ instance Serialize UTCTime where
 
 class ToFeed f where
   toFeed :: MonadIO m => f -> Reference Cat -> URL -> UTCTime ->
-            Transaction l d m (Reference Feed, Feed)
+            Transaction l m (Reference Feed, Feed)
 
 class ToPerson p where
-  toPerson :: MonadIO m => p -> Transaction l d m (Reference Person, Person)
+  toPerson :: MonadIO m => p -> Transaction l m (Reference Person, Person)
 
 class ToItem i where
   toItem :: MonadIO m => i -> Reference Feed -> UTCTime ->
-            Transaction l d m (Reference Item, Item)
+            Transaction l m (Reference Item, Item)

@@ -432,7 +432,7 @@ main = runSafeT . runEffect $ bracket
         h <- DB.open (Just "feeds.log") (Just "feeds.dat")
         t1 <- getCurrentTime
         putStrLn . showString "  DB opened in " $ showsTimeDiff t0 t1 ""
-        return (h :: DB.Handle DB.FileLog DB.FileHandle) )
+        return (h :: DB.Handle DB.FileLog) )
     (\h -> do
         putStrLn "  Closing DB..."
         DB.close h
