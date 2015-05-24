@@ -3,8 +3,8 @@
 -----------------------------------------------------------------------------
 -- |
 -- Module : FeedReader.Import
--- Copyright : (C) 2015 Călin Ardelean,
--- License : BSD-style (see the file LICENSE)
+-- Copyright : (c) 2015 Călin Ardelean
+-- License : BSD-style
 --
 -- Maintainer : Călin Ardelean <calinucs@gmail.com>
 -- Stability : experimental
@@ -73,8 +73,9 @@ parseFeed bs =
       readRSS1 e `mplus`
       Nothing
 
-updateFeed :: MonadIO m => Handle -> F.Feed -> Reference Cat -> URL ->
-              m (Either TransactionAbort (Reference Feed, Feed, [(Reference Item, Item)]))
+updateFeed :: (LogState l, DataHandle d, MonadIO m) =>
+               Handle l d -> F.Feed -> Reference Cat -> URL -> m (Either
+               TransactionAbort (Reference Feed, Feed, [(Reference Item, Item)]))
 updateFeed h ff c u =
   case ff of
     F.AtomFeed af -> runToFeed h af c u

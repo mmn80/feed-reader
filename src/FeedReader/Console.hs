@@ -92,8 +92,8 @@ doAbortable n args h f =
   where transErr (DB.AbortUnique s)   = s
         transErr (DB.AbortConflict s) = s
         transErr (DB.AbortDelete s)   = s
-        dbErr (DB.LogParseError pos s) =
-          showString s . showString "\nPosition: " $ shows pos ""
+
+        dbErr (DB.LogParseError s) = s
         dbErr (DB.DataParseError pos sz s) = showString s . showString
           "\nPosition: " . shows pos . showString "\nSize: " $ shows sz ""
         dbErr (DB.IdAllocationError s) = s
@@ -432,7 +432,7 @@ main = runSafeT . runEffect $ bracket
         h <- DB.open (Just "feeds.log") (Just "feeds.dat")
         t1 <- getCurrentTime
         putStrLn . showString "  DB opened in " $ showsTimeDiff t0 t1 ""
-        return h )
+        return (h :: DB.Handle DB.FileLog DB.FileHandle) )
     (\h -> do
         putStrLn "  Closing DB..."
         DB.close h

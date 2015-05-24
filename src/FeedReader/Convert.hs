@@ -4,8 +4,8 @@
 -----------------------------------------------------------------------------
 -- |
 -- Module : FeedReader.Import
--- Copyright : (C) 2015 Călin Ardelean,
--- License : BSD-style (see the file LICENSE)
+-- Copyright : (c) 2015 Călin Ardelean
+-- License : BSD-style
 --
 -- Maintainer : Călin Ardelean <calinucs@gmail.com>
 -- Stability : experimental

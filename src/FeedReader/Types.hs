@@ -5,8 +5,8 @@
 -----------------------------------------------------------------------------
 -- |
 -- Module : FeedReader.Data.DB
--- Copyright : (C) 2015 Călin Ardelean,
--- License : BSD-style (see the file LICENSE)
+-- Copyright : (c) 2015 Călin Ardelean
+-- License : BSD-style
 --
 -- Maintainer : Călin Ardelean <calinucs@gmail.com>
 -- Stability : experimental
@@ -112,11 +112,11 @@ instance Serialize UTCTime where
 
 class ToFeed f where
   toFeed :: MonadIO m => f -> Reference Cat -> URL -> UTCTime ->
-            Transaction m (Reference Feed, Feed)
+            Transaction l d m (Reference Feed, Feed)
 
 class ToPerson p where
-  toPerson :: MonadIO m => p -> Transaction m (Reference Person, Person)
+  toPerson :: MonadIO m => p -> Transaction l d m (Reference Person, Person)
 
 class ToItem i where
   toItem :: MonadIO m => i -> Reference Feed -> UTCTime ->
-            Transaction m (Reference Item, Item)
+            Transaction l d m (Reference Item, Item)
