@@ -25,21 +25,11 @@ module FeedReader.Types
   , Tag
   , Content (..)
   , Image (..)
-  , ToFeed (..)
-  , ToPerson (..)
-  , ToItem (..)
   , Sortable (..)
   , Unique (..)
   ) where
 
-import           Control.Monad         (liftM)
-import           Control.Monad.Trans   (MonadIO)
-import           Data.Maybe            (fromMaybe)
-import           Data.Serialize        (Get (..), Serialize (..))
-import           Data.Time.Clock       (UTCTime (..))
-import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
-                                        utcTimeToPOSIXSeconds)
-import           Data.Time.LocalTime   (LocalTime)
+import           Data.Serialize        (Serialize (..))
 import           Database.Muesli.Query
 import           GHC.Generics          (Generic)
 
@@ -85,7 +75,7 @@ data Feed = Feed
   , feedContributors :: [Reference Person]
   , feedRights       :: Content
   , feedImage        :: Maybe Image
-  , feedUpdated      :: Sortable UTCTime
+  , feedUpdated      :: Sortable DateTime
   } deriving (Show, Generic, Serialize)
 
 instance Document Feed
@@ -100,23 +90,8 @@ data Item = Item
   , itemContributors :: [Reference Person]
   , itemRights       :: Content
   , itemContent      :: Content
-  , itemPublished    :: Sortable UTCTime
-  , itemUpdated      :: Sortable UTCTime
+  , itemPublished    :: Sortable DateTime
+  , itemUpdated      :: Sortable DateTime
   } deriving (Show, Generic, Serialize)
 
 instance Document Item
-
-instance Serialize UTCTime where
-  put = put . toRational . utcTimeToPOSIXSeconds
-  get = liftM (posixSecondsToUTCTime . fromRational) get
-
-class ToFeed f where
-  toFeed :: MonadIO m => f -> Reference Cat -> URL -> UTCTime ->
-            Transaction l m (Reference Feed, Feed)
-
-class ToPerson p where
-  toPerson :: MonadIO m => p -> Transaction l m (Reference Person, Person)
-
-class ToItem i where
-  toItem :: MonadIO m => i -> Reference Feed -> UTCTime ->
-            Transaction l m (Reference Item, Item)

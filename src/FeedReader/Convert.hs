@@ -15,18 +15,33 @@
 ----------------------------------------------------------------------------
 
 module FeedReader.Convert
-  () where
+  ( ToFeed (..)
+  , ToPerson (..)
+  , ToItem (..)
+  ) where
 
 import           Control.Applicative   ((<|>))
+import           Control.Monad.Trans   (MonadIO)
 import           Data.List             (find, isPrefixOf)
 import           Data.Maybe            (fromMaybe, listToMaybe)
 import           Database.Muesli.Query hiding (filter)
 import           FeedReader.Types
-import           FeedReader.Utils      (text2UTCTime)
+import           FeedReader.Utils      (text2DateTime)
 import qualified Text.Atom.Feed        as A
 import qualified Text.DublinCore.Types as DC
 import qualified Text.RSS.Syntax       as R
 import qualified Text.RSS1.Syntax      as R1
+
+class ToFeed f where
+  toFeed :: MonadIO m => f -> Reference Cat -> URL -> DateTime ->
+            Transaction l m (Reference Feed, Feed)
+
+class ToPerson p where
+  toPerson :: MonadIO m => p -> Transaction l m (Reference Person, Person)
+
+class ToItem i where
+  toItem :: MonadIO m => i -> Reference Feed -> DateTime ->
+            Transaction l m (Reference Item, Item)
 
 ------------------------------------------------------------------------------
 -- Conversion transactions for Atom
@@ -74,10 +89,12 @@ instance ToPerson A.Person where
     pid <- updateUnique "personName" (Unique name) p'
     return (pid, p')
 
+toStr :: Maybe (Either String String) -> String
 toStr Nothing = ""
 toStr (Just (Left x)) = x
 toStr (Just (Right x)) = x
 
+isSelf :: A.Link -> Bool
 isSelf lr = toStr (A.linkRel lr) == "alternate" && isHTMLType (A.linkType lr)
 
 isHTMLType :: Maybe String -> Bool
@@ -99,7 +116,7 @@ instance ToFeed A.Feed where
                   , feedContributors = fst <$> cs
                   , feedRights       = tryContent2DB $ A.feedRights f
                   , feedImage        = imageFromURL <$> (A.feedLogo f <|> A.feedIcon f)
-                  , feedUpdated      = Sortable $ text2UTCTime (A.feedUpdated f) df
+                  , feedUpdated      = Sortable $ text2DateTime (A.feedUpdated f) df
                   }
     fid <- updateUnique "feedURL" (Unique u) f'
     return (fid, f')
@@ -108,7 +125,7 @@ instance ToItem A.Entry where
   toItem i f df = do
     as <- mapM toPerson $ A.entryAuthors i
     cs <- mapM toPerson $ A.entryContributor i
-    let date = text2UTCTime (A.entryUpdated i) df
+    let date = text2DateTime (A.entryUpdated i) df
     let url = case A.entryLinks i of
                 []    -> ""
                 (l:_) -> A.linkHref l
@@ -121,7 +138,7 @@ instance ToItem A.Entry where
                   , itemContributors = fst <$> cs
                   , itemRights       = tryContent2DB $ A.entryRights i
                   , itemContent      = tryEContent2DB $ A.entryContent i
-                  , itemPublished    = Sortable $ text2UTCTime
+                  , itemPublished    = Sortable $ text2DateTime
                                          (fromMaybe "" $ A.entryPublished i) df
                   , itemUpdated      = Sortable date
                   }
@@ -144,6 +161,7 @@ instance ToPerson RSSPerson where
     pid <- updateUnique "personName" (Unique name) p'
     return (pid, p')
 
+rssImageToImage :: R.RSSImage -> Image
 rssImageToImage i = Image
   { imageURL         = R.rssImageURL i
   , imageTitle       = R.rssImageTitle i
@@ -153,6 +171,7 @@ rssImageToImage i = Image
   , imageHeight      = fromIntegral . fromMaybe 0 $ R.rssImageHeight i
   }
 
+rssPersonToPerson :: Maybe String -> [RSSPerson]
 rssPersonToPerson = maybe [] (pure . RSSPerson)
 
 instance ToFeed R.RSSChannel where
@@ -171,7 +190,7 @@ instance ToFeed R.RSSChannel where
                   , feedImage        = rssImageToImage <$> R.rssImage f
                   , feedUpdated      = Sortable $ case R.rssLastUpdate f of
                                          Nothing -> df
-                                         Just d  -> text2UTCTime d df
+                                         Just d  -> text2DateTime d df
                   }
     fid <- updateUnique "feedURL" (Unique u) f'
     return (fid, f')
@@ -180,7 +199,7 @@ instance ToItem R.RSSItem where
   toItem i f df = do
     as <- mapM toPerson . rssPersonToPerson $ R.rssItemAuthor i
     let url = fromMaybe "" $ R.rssItemLink i
-    let date = Sortable $ text2UTCTime (fromMaybe "" $ R.rssItemPubDate i) df
+    let date = Sortable $ text2DateTime (fromMaybe "" $ R.rssItemPubDate i) df
     let i' = Item { itemFeedID       = f
                   , itemURL          = Unique url
                   , itemTitle        = Text . fromMaybe "" $ R.rssItemTitle i
@@ -201,11 +220,14 @@ instance ToItem R.RSSItem where
 -- Conversion transactions for RSS1
 ------------------------------------------------------------------------------
 
+extractDcPersons :: [DC.DCItem] -> DC.DCInfo -> [RSSPerson]
 extractDcPersons dcs con = map (RSSPerson . DC.dcText) $
                            filter (\d -> DC.dcElt d == con) dcs
 
+extractDcInfo :: [DC.DCItem] -> DC.DCInfo -> String
 extractDcInfo dcs con = maybe "" DC.dcText $ find (\d -> DC.dcElt d == con) dcs
 
+rss1ImageToImage :: R1.Image -> Image
 rss1ImageToImage i = Image
   { imageURL         = R1.imageURI i
   , imageTitle       = R1.imageTitle i
@@ -231,7 +253,7 @@ instance ToFeed R1.Feed where
                   , feedContributors = fst <$> cs
                   , feedRights       = Text $ extractDcInfo dcs DC.DC_Rights
                   , feedImage        = rss1ImageToImage <$> R1.feedImage f
-                  , feedUpdated      = Sortable $ text2UTCTime
+                  , feedUpdated      = Sortable $ text2DateTime
                                          (extractDcInfo dcs DC.DC_Date) df
                   }
     fid <- updateUnique "feedURL" (Unique u) f'
@@ -243,7 +265,7 @@ instance ToItem R1.Item where
     as <- mapM toPerson $ extractDcPersons dcs DC.DC_Creator
     cs <- mapM toPerson $ extractDcPersons dcs DC.DC_Contributor
     let url = if null $ R1.itemLink i then R1.itemURI i else R1.itemLink i
-    let date = Sortable $ text2UTCTime (extractDcInfo dcs DC.DC_Date) df
+    let date = Sortable $ text2DateTime (extractDcInfo dcs DC.DC_Date) df
     let i' = Item { itemFeedID       = f
                   , itemURL          = Unique url
                   , itemTitle        = Text $ R1.itemTitle i

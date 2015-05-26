@@ -20,13 +20,10 @@ module FeedReader.Import
 
 import           Control.Exception         (throw, try)
 import           Control.Monad             (liftM)
-import           Control.Monad.Trans       (MonadIO (liftIO))
 import           Data.ByteString           (ByteString)
 import           Data.ByteString.Char8     (unpack)
-import           Database.Muesli.Query     (TransactionAbort (..))
 import           FeedReader.DB
-import           Network.HTTP.Types.Status (Status (..), statusIsSuccessful,
-                                            statusMessage)
+import           Network.HTTP.Types.Status (Status (..), statusIsSuccessful)
 import           Pipes
 import           Pipes.HTTP
 import qualified Pipes.Prelude             as P

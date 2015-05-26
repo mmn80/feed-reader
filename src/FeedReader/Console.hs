@@ -1,20 +1,22 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies      #-}
 
+{-# OPTIONS_GHC -fno-warn-missing-signatures #-}
+
 module Main (main) where
 
 import           Control.Monad         (liftM, replicateM, unless)
 import           Data.List             (intercalate, isPrefixOf)
 import qualified Data.Sequence         as S
 import           Data.String           (fromString)
-import           Data.Time.Clock       (UTCTime, getCurrentTime)
+import           Data.Time.Clock       (getCurrentTime)
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
 import           FeedReader.DB         (Property, Reference)
 import qualified FeedReader.DB         as DB
 import           FeedReader.Import     (downloadFeed, updateFeed)
 import           FeedReader.Types
-import           FeedReader.Utils      (diffMs, text2UTCTime)
+import           FeedReader.Utils      (diffMs, text2DateTime)
 import           Pipes
 import qualified Pipes.Prelude         as P
 import           Pipes.Safe
@@ -113,14 +115,15 @@ randomStringIx l r = Sortable <$> randomString l r
 
 randomContentIx l r = Sortable . Text <$> randomString l r
 
-time2Int str = fromInteger . round . utcTimeToPOSIXSeconds . text2UTCTime str
+time2Int str = fromInteger . round . utcTimeToPOSIXSeconds .
+               DB.unDateTime . text2DateTime str
 
 randomTime = do
-  df <- getCurrentTime
+  df <- DB.DateTime <$> getCurrentTime
   let l = time2Int "2000-01-01" df
   let r = time2Int "2020-01-01" df
   ti <- randomRIO (l, r)
-  return . posixSecondsToUTCTime $ fromInteger ti
+  return . DB.DateTime . posixSecondsToUTCTime $ fromInteger ti
 
 randomTimeIx = Sortable <$> randomTime
 
@@ -254,7 +257,7 @@ page h c p s mk o now df = handleAbort $
 
 parseVal s now
   | "D:" `isPrefixOf` s = Just . DB.Sortable . DB.toKey . DB.Sortable $
-                            text2UTCTime (drop 2 s) now
+                            text2DateTime (drop 2 s) now
   | "S:" `isPrefixOf` s = Just . DB.Sortable . DB.toKey . DB.Sortable $ drop 2 s
   | s == "*"            = Nothing
   | otherwise           = Just . DB.Sortable . DB.toKey . DB.Sortable $
@@ -269,7 +272,7 @@ cmdPage h args s mk o = do
                        shows (feedUpdated i) $ ""
   let sPerson (iid, i) = formats (shows iid) . showString (unSortable .
                          unUnique $ personName i) $ ""
-  now <- liftBase getCurrentTime
+  now <- DB.DateTime <$> liftBase getCurrentTime
   case t of
     "cat"    -> do
       (as, dt) <- timeOf $ page h c p s mk o now "catName"
@@ -361,8 +364,8 @@ cmdAdd h args = timed $ do
 cmdAddCat h args = timed $ do
   let n = args !! 1
   let p = (read $ args !! 2) :: Int
-  let cat = Cat (Sortable n) (if p == 0 then Nothing else Just $ fromIntegral p)
-  cid <- handleAbort $ DB.runInsert h cat
+  let c = Cat (Sortable n) (if p == 0 then Nothing else Just $ fromIntegral p)
+  cid <- handleAbort $ DB.runInsert h c
   yields' "Category " $ shows cid . showString " inserted."
 
 cmdDel h args = timed $ do
@@ -377,7 +380,7 @@ cmdRangeDel h args = timed $ do
   let p = (read $ args !! 1) :: Int
   let c = args !! 3
   let s = args !! 4
-  now <- liftBase getCurrentTime
+  now <- DB.DateTime <$> liftBase getCurrentTime
   sz <- maybe (yield "Explicit value required." >> return 0)
     (\k -> case t of
       "cat"    ->
@@ -429,7 +432,7 @@ main :: IO ()
 main = runSafeT . runEffect $ bracket
     (do t0 <- getCurrentTime
         putStrLn "  Opening DB..."
-        h <- DB.open (Just "feeds.log") (Just "feeds.dat")
+        h <- DB.open (Just "feeds.log") (Just "feeds.dat") Nothing Nothing
         t1 <- getCurrentTime
         putStrLn . showString "  DB opened in " $ showsTimeDiff t0 t1 ""
         return (h :: DB.Handle DB.FileLogState) )

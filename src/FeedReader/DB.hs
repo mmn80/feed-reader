@@ -31,14 +31,11 @@ module FeedReader.DB
 
 import           Control.Monad                (forM_)
 import           Control.Monad.Trans          (MonadIO (liftIO))
-import qualified Data.List                    as L
-import           Data.Maybe                   (fromMaybe)
 import           Data.Time.Clock              (getCurrentTime)
-import           Database.Muesli.Backend.File as Exports
 import           Database.Muesli.Handle       as Exports
 import           Database.Muesli.Query        as Exports
-import           FeedReader.Convert
 import           FeedReader.Types             as Exports
+import           FeedReader.Convert           as Exports
 import           Prelude                      hiding (filter, lookup)
 
 runLookup :: (Document a, LogState l, MonadIO m) => Handle l -> Reference a ->
@@ -101,10 +98,10 @@ runToItem :: (ToItem i, LogState l, MonadIO m) =>
               Handle l -> i -> Reference Feed ->
               m (Either TransactionAbort (Reference Item, Item))
 runToItem h it fid =
-  liftIO getCurrentTime >>= runQuery h . toItem it fid
+  liftIO getCurrentTime >>= runQuery h . toItem it fid . DateTime
 
 runToFeed :: (ToFeed f, LogState l, MonadIO m) =>
               Handle l -> f -> Reference Cat -> URL ->
               m (Either TransactionAbort (Reference Feed, Feed))
 runToFeed h it cid u =
-  liftIO getCurrentTime >>= runQuery h . toFeed it cid u
+  liftIO getCurrentTime >>= runQuery h . toFeed it cid u . DateTime

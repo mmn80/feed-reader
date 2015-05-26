@@ -12,7 +12,7 @@
 ----------------------------------------------------------------------------
 
 module FeedReader.Utils
-  ( text2UTCTime
+  ( text2DateTime
   , diffMs
   ) where
 
@@ -21,9 +21,10 @@ import           Data.Maybe            (fromMaybe)
 import           Data.Time.Clock       (UTCTime, diffUTCTime)
 import           Data.Time.Format      (defaultTimeLocale, iso8601DateFormat,
                                         parseTimeM, rfc822DateFormat)
+import           Database.Muesli.Types (DateTime)
 
-text2UTCTime :: String -> UTCTime -> UTCTime
-text2UTCTime t df = fromMaybe df $ iso <|> iso' <|> rfc
+text2DateTime :: String -> DateTime -> DateTime
+text2DateTime t df = fromMaybe df $ iso <|> iso' <|> rfc
   where
     iso  = tryParse . iso8601DateFormat $ Just "%H:%M:%S"
     iso' = tryParse $ iso8601DateFormat Nothing
