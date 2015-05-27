@@ -33,8 +33,8 @@ import qualified Text.RSS.Syntax       as R
 import qualified Text.RSS1.Syntax      as R1
 
 class ToFeed f where
-  toFeed :: MonadIO m => f -> Maybe (Reference Cat) -> URL -> DateTime ->
-            Transaction l m (Reference Feed, Feed)
+  toFeed :: MonadIO m => f -> Reference Feed -> Feed -> DateTime ->
+            Transaction l m Feed
 
 class ToPerson p where
   toPerson :: MonadIO m => p -> Transaction l m (Reference Person, Person)
@@ -102,12 +102,10 @@ isHTMLType (Just str) = "lmth" `isPrefixOf` reverse str
 isHTMLType _ = True
 
 instance ToFeed A.Feed where
-  toFeed f c u df = do
+  toFeed f fid feed df = do
     as <- mapM toPerson $ A.feedAuthors f
     cs <- mapM toPerson $ A.feedContributors f
-    let f' = Feed { feedCat          = c
-                  , feedURL          = Unique u
-                  , feedWebURL       = maybe "" A.linkHref . listToMaybe .
+    let f' = feed { feedWebURL       = maybe "" A.linkHref . listToMaybe .
                                        filter isSelf $ A.feedLinks f
                   , feedTitle        = Sortable . content2DB $ A.feedTitle f
                   , feedDescription  = tryContent2DB $ A.feedSubtitle f
@@ -117,9 +115,10 @@ instance ToFeed A.Feed where
                   , feedRights       = tryContent2DB $ A.feedRights f
                   , feedImage        = imageFromURL <$> (A.feedLogo f <|> A.feedIcon f)
                   , feedUpdated      = Sortable $ text2DateTime (A.feedUpdated f) df
+                  , feedLastError    = Nothing
                   }
-    fid <- updateUnique "feedURL" (Unique u) f'
-    return (fid, f')
+    update fid f'
+    return f'
 
 instance ToItem A.Entry where
   toItem i f df = do
@@ -175,12 +174,10 @@ rssPersonToPerson :: Maybe String -> [RSSPerson]
 rssPersonToPerson = maybe [] (pure . RSSPerson)
 
 instance ToFeed R.RSSChannel where
-  toFeed f c u df = do
+  toFeed f fid feed df = do
     as <- mapM toPerson . rssPersonToPerson $ R.rssEditor f
     cs <- mapM toPerson . rssPersonToPerson $ R.rssWebMaster f
-    let f' = Feed { feedCat          = c
-                  , feedURL          = Unique u
-                  , feedWebURL       = R.rssLink f
+    let f' = feed { feedWebURL       = R.rssLink f
                   , feedTitle        = Sortable . Text $ R.rssTitle f
                   , feedDescription  = HTML $ R.rssDescription f
                   , feedLanguage     = fromMaybe "" $ R.rssLanguage f
@@ -191,9 +188,10 @@ instance ToFeed R.RSSChannel where
                   , feedUpdated      = Sortable $ case R.rssLastUpdate f of
                                          Nothing -> df
                                          Just d  -> text2DateTime d df
+                  , feedLastError    = Nothing
                   }
-    fid <- updateUnique "feedURL" (Unique u) f'
-    return (fid, f')
+    update fid f'
+    return f'
 
 instance ToItem R.RSSItem where
   toItem i f df = do
@@ -238,14 +236,12 @@ rss1ImageToImage i = Image
   }
 
 instance ToFeed R1.Feed where
-  toFeed f c u df = do
+  toFeed f fid feed df = do
     let ch  = R1.feedChannel f
     let dcs = R1.channelDC ch
     as <- mapM toPerson $ extractDcPersons dcs DC.DC_Creator
     cs <- mapM toPerson $ extractDcPersons dcs DC.DC_Contributor
-    let f' = Feed { feedCat          = c
-                  , feedURL          = Unique u
-                  , feedWebURL       = R1.channelURI ch
+    let f' = feed { feedWebURL       = R1.channelURI ch
                   , feedTitle        = Sortable . Text $ R1.channelTitle ch
                   , feedDescription  = HTML $ R1.channelDesc ch
                   , feedLanguage     = extractDcInfo dcs DC.DC_Language
@@ -255,9 +251,10 @@ instance ToFeed R1.Feed where
                   , feedImage        = rss1ImageToImage <$> R1.feedImage f
                   , feedUpdated      = Sortable $ text2DateTime
                                          (extractDcInfo dcs DC.DC_Date) df
+                  , feedLastError    = Nothing
                   }
-    fid <- updateUnique "feedURL" (Unique u) f'
-    return (fid, f')
+    update fid f'
+    return f'
 
 instance ToItem R1.Item where
   toItem i f df = do

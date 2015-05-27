@@ -79,30 +79,45 @@ parseFeed bs =
       readRSS1 e `mplus`
       Nothing
 
-updateFeed :: (LogState l, MonadIO m) =>
-               Handle l -> F.Feed -> Maybe (Reference Cat) -> URL -> m (Either
-               TransactionAbort (Reference Feed, Feed, [(Reference Item, Item)]))
-updateFeed h ff c u =
-  case ff of
-    F.AtomFeed af -> runToFeed h af c u
-    F.RSSFeed rss -> runToFeed h (R.rssChannel rss) c u
-    F.RSS1Feed rf -> runToFeed h rf c u
+writeFeed :: (LogState l, MonadIO m) => Handle l -> F.Feed -> Reference Feed ->
+              Feed -> m (Either TransactionAbort (Maybe Feed,
+              [(Reference Item, Item)]))
+writeFeed h f fid feed =
+  case f of
+    F.AtomFeed af -> runToFeed h af fid feed
+    F.RSSFeed rss -> runToFeed h (R.rssChannel rss) fid feed
+    F.RSS1Feed rf -> runToFeed h rf fid feed
   >>=
-  either (return . Left) (\(fid, f) -> liftM (liftM (fid, f,) . sequence) $
-    case ff of
-      F.AtomFeed af -> addItems fid $ A.feedEntries af
-      F.RSSFeed rss -> addItems fid . R.rssItems $ R.rssChannel rss
-      F.RSS1Feed rf -> addItems fid $ R1.feedItems rf)
-  where addItems fid is = P.toListM $ for (each is) $ \i ->
+  either (return . Left) (\feed' -> liftM (liftM (Just feed',) . sequence) $
+    case f of
+      F.AtomFeed af -> addItems $ A.feedEntries af
+      F.RSSFeed rss -> addItems . R.rssItems $ R.rssChannel rss
+      F.RSS1Feed rf -> addItems $ R1.feedItems rf)
+  where addItems is = P.toListM $ for (each is) $ \i ->
           lift (runToItem h i fid) >>= yield
+
+updateFeed :: (LogState l, MonadIO m) => Handle l -> Reference Feed ->
+               m (Either TransactionAbort (Maybe Feed, [(Reference Item, Item)]))
+updateFeed h fid =
+  runLookup h fid >>=
+  either (return . Left) (
+    maybe (return $ Right (Nothing, [])) (\(_, feed) ->
+      downloadFeed (unUnique $ feedURL feed) >>=
+      either (\err -> let f' = feed { feedLastError = Just err } in
+                      runUpdate h fid f' >>=
+                      either (return . Left)
+                             (return . const (Right (Just f', []))) )
+             (\f   -> writeFeed h f fid feed )
+    )
+  )
 
 nullDate :: DateTime
 nullDate = DateTime $ posixSecondsToUTCTime 0
 
 importOPML :: (LogState l, MonadIO m) => Handle l -> FilePath ->
                m (Either String [(Reference Feed, Feed)])
-importOPML h path = do
-  str <- liftIO $ readFile path
+importOPML h p = do
+  str <- liftIO $ readFile p
   case parseXMLDoc str of
     Nothing -> return $ Left "XML parsing error."
     Just el ->
@@ -129,6 +144,7 @@ opmlToDb pcat os = do
         Nothing -> do
           let f' = Feed { feedCat          = pcat
                         , feedURL          = Unique xmlUrl
+                        , feedHTTPAuth     = Nothing
                         , feedWebURL       = fromMaybe "" htmlUrl
                         , feedTitle        = Sortable $ Text ti
                         , feedDescription  = Text ""
@@ -138,6 +154,7 @@ opmlToDb pcat os = do
                         , feedRights       = Text ""
                         , feedImage        = Nothing
                         , feedUpdated      = Sortable nullDate
+                        , feedLastError    = Nothing
                         }
           fid <- insert f'
           return [(fid, f')]

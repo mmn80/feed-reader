@@ -58,7 +58,7 @@ helpMessage = do
   yield "          : i: if '1' will show all indexes"
   yield "          : c: if '1' will show the contents of the cache"
   yield "  curl u  : downloads and parses feed at URL = u"
-  yield "  feed u c: downloads, parses and uploads feed at URL = u"
+  yield "  feed k  : downloads, parses and updates feed with ID = k"
   yield "          : c: category ID"
   yield "  opml p  : imports OPML file at path p"
   yield "  quit    : quits the program"
@@ -80,7 +80,7 @@ processCommand h = do
       "gc"        -> doAbortable 0 args h cmdGC
       "debug"     -> doAbortable 2 args h cmdDebug
       "curl"      -> doAbortable 1 args h cmdCurl
-      "feed"      -> doAbortable 2 args h cmdFeed
+      "feed"      -> doAbortable 1 args h cmdFeed
       "opml"      -> doAbortable 1 args h cmdOPML
       _           -> yield . showString "Command '" . showString (head args) $
                        "' not understood."
@@ -121,9 +121,9 @@ time2Int str = fromInteger . round . utcTimeToPOSIXSeconds .
                DB.unDateTime . text2DateTime str
 
 randomTime = do
-  df <- DB.DateTime <$> getCurrentTime
-  let l = time2Int "2000-01-01" df
-  let r = time2Int "2020-01-01" df
+  now <- DB.DateTime <$> getCurrentTime
+  let l = time2Int "2000-01-01" now
+  let r = time2Int "2020-01-01" now
   ti <- randomRIO (l, r)
   return . DB.DateTime . posixSecondsToUTCTime $ fromInteger ti
 
@@ -134,17 +134,19 @@ randomCat =
       <*> pure Nothing
 
 randomFeed c =
-  Feed <$> pure (Just c)
-          <*> (Unique <$> randomString 100 300)
-          <*> randomString 100 300
-          <*> randomContentIx 100 300
-          <*> (Text <$> randomString 100 300)
-          <*> randomString 2 10
-          <*> pure []
-          <*> pure []
-          <*> (Text <$> randomString 10 50)
-          <*> pure Nothing
-          <*> randomTimeIx
+   Feed <$> pure (Just c)
+        <*> (Unique <$> randomString 100 300)
+        <*> pure Nothing
+        <*> randomString 100 300
+        <*> randomContentIx 100 300
+        <*> (Text <$> randomString 100 300)
+        <*> randomString 2 10
+        <*> pure []
+        <*> pure []
+        <*> (Text <$> randomString 10 50)
+        <*> pure Nothing
+        <*> randomTimeIx
+        <*> pure Nothing
 
 randomPerson =
   Person <$> (Unique <$> randomStringIx 10 30)
@@ -152,7 +154,7 @@ randomPerson =
          <*> randomString 10 30
 
 randomItem f =
-  Item <$> pure f
+     Item <$> pure f
           <*> (Unique <$> randomString 100 300)
           <*> (Text <$> randomString 100 300)
           <*> (Text <$> randomString 100 300)
@@ -248,13 +250,13 @@ cmdGetk h args = timed $ do
                :: LookupRet Item) >>= out . fmap (show . snd)
     _        -> yield . shows t $ " is not a valid table name."
 
-page h c p s mk o now df = handleAbort $
+page h c p s mk o now dft = handleAbort $
   maybe (DB.runRange h (parseVal s now) (fromString fprop) p)
   (\k -> DB.runFilter h (nk k) (parseVal s now)
                   (fromString fprop) (fromString oprop) p)
   mk
-  where fprop = if c == "*" then df else c
-        oprop = if o == "*" then df else o
+  where fprop = if c == "*" then dft else c
+        oprop = if o == "*" then dft else o
         nk k  = if k == 0 then Nothing else Just $ fromIntegral (k :: Int)
 
 parseVal s now
@@ -297,18 +299,20 @@ cmdPage h args s mk o = do
       showTime dt
     _        -> yield . shows t $ " is not a valid table name."
 
-formatsK k i = i . showString (replicate (k - length (i "")) ' ')
+formatsK k i = let str = take (k - 1) $ i "" in
+               showString str .
+               showString (replicate (k - length str) ' ')
 formats = formatsK 12
 format = formats . showString
 
 showItems as = do
   yields $ format "ID" . format "FeedID" .
-    formatsK 25 (showString "Updated") . showString "Published"
+    formatsK 20 (showString "Updated") . showString "Published"
   each $ sItem <$> as
   where sItem (iid, i) = formats (shows iid) .
                          formats (shows $ itemFeed i) .
-                         formatsK 25 (shows $ itemUpdated i) .
-                         shows (itemPublished i) $ ""
+                         formatsK 20 (shows $ itemUpdated i) .
+                         (formatsK 20 . shows $ itemPublished i) $ ""
 
 cmdRange h args = do
   let s = args !! 4
@@ -375,7 +379,7 @@ cmdDel h args = timed $ do
   handleAbort . DB.runDelete h $ fromIntegral k
   yield "Record deleted."
 
-df c d = fromString $ if c == "*" then d else c
+def c d = fromString $ if c == "*" then d else c
 
 cmdRangeDel h args = timed $ do
   let t = args !! 2
@@ -386,13 +390,13 @@ cmdRangeDel h args = timed $ do
   sz <- maybe (yield "Explicit value required." >> return 0)
     (\k -> case t of
       "cat"    ->
-        handleAbort (DB.runDeleteRange h k (df c "catName"     :: Property Cat   ) p)
+        handleAbort (DB.runDeleteRange h k (def c "catName"     :: Property Cat   ) p)
       "feed"   ->
-        handleAbort (DB.runDeleteRange h k (df c "feedUpdated" :: Property Feed  ) p)
+        handleAbort (DB.runDeleteRange h k (def c "feedUpdated" :: Property Feed  ) p)
       "person" ->
-        handleAbort (DB.runDeleteRange h k (df c "personName"  :: Property Person) p)
+        handleAbort (DB.runDeleteRange h k (def c "personName"  :: Property Person) p)
       "item"   ->
-        handleAbort (DB.runDeleteRange h k (df c "itemUpdated" :: Property Item  ) p)
+        handleAbort (DB.runDeleteRange h k (def c "itemUpdated" :: Property Item  ) p)
       _        -> yield (shows t " is not a valid table name.") >> return 0)
     (parseVal s now)
   yields $ shows sz . showString " records deleted."
@@ -410,18 +414,16 @@ cmdCurl _ args = timed $ do
   let url = args !! 1
   liftBase (show <$> downloadFeed url) >>= each . lines
 
-cmdFeed h args =
-  let url = args !! 1 in
-  let c = (read $ args !! 2) :: Int in
-  let mbc = if c == 0 then Nothing else Just (fromIntegral c) in
-  timed $ liftBase (downloadFeed url) >>=
-  either yield (\f -> do
-    (fid, fd, is) <- handleAbort $ updateFeed h f mbc url
+cmdFeed h args = timed $ do
+  let f = (read $ args !! 1) :: Int
+  let fid = fromIntegral f
+  (mbf, is) <- handleAbort $ updateFeed h fid
+  maybe (yield "Feed not found.") (\feed -> do
     yield . showString "Feed " . shows fid $ " updated ok."
     yield ""
-    each . lines $ show fd
+    each . lines $ show feed
     yield ""
-    showItems is)
+    showItems is ) mbf
 
 showsFeedCat f = maybe (showString "-") shows $ feedCat f
 

@@ -24,6 +24,7 @@ module FeedReader.Types
   , Language
   , Tag
   , Content (..)
+  , HTTPAuth (..)
   , Image (..)
   , Sortable (..)
   , Unique (..)
@@ -64,9 +65,15 @@ data Image = Image
   , imageHeight      :: Int
   } deriving (Show, Generic, Serialize, Indexable)
 
+data HTTPAuth = HTTPAuth
+  { authUserName :: String
+  , authPassword :: String
+  } deriving (Show, Generic, Serialize, Indexable)
+
 data Feed = Feed
   { feedCat          :: Maybe (Reference Cat)
   , feedURL          :: Unique URL
+  , feedHTTPAuth     :: Maybe HTTPAuth
   , feedWebURL       :: URL
   , feedTitle        :: Sortable Content
   , feedDescription  :: Content
@@ -76,7 +83,11 @@ data Feed = Feed
   , feedRights       :: Content
   , feedImage        :: Maybe Image
   , feedUpdated      :: Sortable DateTime
+  , feedLastError    :: Maybe String
   } deriving (Show, Generic, Serialize)
+
+-- TODO: Sortable -> Sorted, Reference -> Ref
+-- TODO: filter on Sorted columns
 
 instance Document Feed
 

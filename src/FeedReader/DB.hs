@@ -21,6 +21,7 @@ module FeedReader.DB
   , runLookup
   , runLookupUnique
   , runInsert
+  , runUpdate
   , runDelete
   , runDeleteRange
   , getStats
@@ -63,6 +64,10 @@ runInsert :: (Document a, LogState l, MonadIO m) =>
               Handle l -> a -> m (Either TransactionAbort (Reference a))
 runInsert h a = runQuery h $ insert a
 
+runUpdate :: (Document a, LogState l, MonadIO m) =>
+              Handle l -> Reference a -> a -> m (Either TransactionAbort ())
+runUpdate h aid a = runQuery h $ update aid a
+
 runDelete :: (LogState l, MonadIO m) =>
               Handle l -> Reference a -> m (Either TransactionAbort ())
 runDelete h did = runQuery h (delete did)
@@ -101,7 +106,7 @@ runToItem h it fid =
   liftIO getCurrentTime >>= runQuery h . toItem it fid . DateTime
 
 runToFeed :: (ToFeed f, LogState l, MonadIO m) =>
-              Handle l -> f -> Maybe (Reference Cat) -> URL ->
-              m (Either TransactionAbort (Reference Feed, Feed))
-runToFeed h it cid u =
-  liftIO getCurrentTime >>= runQuery h . toFeed it cid u . DateTime
+              Handle l -> f -> Reference Feed -> Feed ->
+              m (Either TransactionAbort Feed)
+runToFeed h it fid feed =
+  liftIO getCurrentTime >>= runQuery h . toFeed it fid feed . DateTime
