@@ -33,7 +33,7 @@ import qualified Text.RSS.Syntax       as R
 import qualified Text.RSS1.Syntax      as R1
 
 class ToFeed f where
-  toFeed :: MonadIO m => f -> Reference Cat -> URL -> DateTime ->
+  toFeed :: MonadIO m => f -> Maybe (Reference Cat) -> URL -> DateTime ->
             Transaction l m (Reference Feed, Feed)
 
 class ToPerson p where
@@ -105,7 +105,7 @@ instance ToFeed A.Feed where
   toFeed f c u df = do
     as <- mapM toPerson $ A.feedAuthors f
     cs <- mapM toPerson $ A.feedContributors f
-    let f' = Feed { feedCatID        = c
+    let f' = Feed { feedCat          = c
                   , feedURL          = Unique u
                   , feedWebURL       = maybe "" A.linkHref . listToMaybe .
                                        filter isSelf $ A.feedLinks f
@@ -129,7 +129,7 @@ instance ToItem A.Entry where
     let url = case A.entryLinks i of
                 []    -> ""
                 (l:_) -> A.linkHref l
-    let i' = Item { itemFeedID       = f
+    let i' = Item { itemFeed         = f
                   , itemURL          = Unique url
                   , itemTitle        = content2DB $ A.entryTitle i
                   , itemSummary      = tryContent2DB $ A.entrySummary i
@@ -178,7 +178,7 @@ instance ToFeed R.RSSChannel where
   toFeed f c u df = do
     as <- mapM toPerson . rssPersonToPerson $ R.rssEditor f
     cs <- mapM toPerson . rssPersonToPerson $ R.rssWebMaster f
-    let f' = Feed { feedCatID        = c
+    let f' = Feed { feedCat          = c
                   , feedURL          = Unique u
                   , feedWebURL       = R.rssLink f
                   , feedTitle        = Sortable . Text $ R.rssTitle f
@@ -200,7 +200,7 @@ instance ToItem R.RSSItem where
     as <- mapM toPerson . rssPersonToPerson $ R.rssItemAuthor i
     let url = fromMaybe "" $ R.rssItemLink i
     let date = Sortable $ text2DateTime (fromMaybe "" $ R.rssItemPubDate i) df
-    let i' = Item { itemFeedID       = f
+    let i' = Item { itemFeed         = f
                   , itemURL          = Unique url
                   , itemTitle        = Text . fromMaybe "" $ R.rssItemTitle i
                   , itemSummary      = Text ""
@@ -243,7 +243,7 @@ instance ToFeed R1.Feed where
     let dcs = R1.channelDC ch
     as <- mapM toPerson $ extractDcPersons dcs DC.DC_Creator
     cs <- mapM toPerson $ extractDcPersons dcs DC.DC_Contributor
-    let f' = Feed { feedCatID        = c
+    let f' = Feed { feedCat          = c
                   , feedURL          = Unique u
                   , feedWebURL       = R1.channelURI ch
                   , feedTitle        = Sortable . Text $ R1.channelTitle ch
@@ -266,7 +266,7 @@ instance ToItem R1.Item where
     cs <- mapM toPerson $ extractDcPersons dcs DC.DC_Contributor
     let url = if null $ R1.itemLink i then R1.itemURI i else R1.itemLink i
     let date = Sortable $ text2DateTime (extractDcInfo dcs DC.DC_Date) df
-    let i' = Item { itemFeedID       = f
+    let i' = Item { itemFeed         = f
                   , itemURL          = Unique url
                   , itemTitle        = Text $ R1.itemTitle i
                   , itemSummary      = HTML . fromMaybe "" $ R1.itemDesc i

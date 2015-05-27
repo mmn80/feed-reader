@@ -65,7 +65,7 @@ data Image = Image
   } deriving (Show, Generic, Serialize, Indexable)
 
 data Feed = Feed
-  { feedCatID        :: Reference Cat
+  { feedCat          :: Maybe (Reference Cat)
   , feedURL          :: Unique URL
   , feedWebURL       :: URL
   , feedTitle        :: Sortable Content
@@ -81,7 +81,7 @@ data Feed = Feed
 instance Document Feed
 
 data Item = Item
-  { itemFeedID       :: Reference Feed
+  { itemFeed         :: Reference Feed
   , itemURL          :: Unique URL
   , itemTitle        :: Content
   , itemSummary      :: Content

@@ -14,7 +14,7 @@ import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
 import           FeedReader.DB         (Property, Reference)
 import qualified FeedReader.DB         as DB
-import           FeedReader.Import     (downloadFeed, updateFeed)
+import           FeedReader.Import     (downloadFeed, importOPML, updateFeed)
 import           FeedReader.Types
 import           FeedReader.Utils      (diffMs, text2DateTime)
 import           Pipes
@@ -60,6 +60,7 @@ helpMessage = do
   yield "  curl u  : downloads and parses feed at URL = u"
   yield "  feed u c: downloads, parses and uploads feed at URL = u"
   yield "          : c: category ID"
+  yield "  opml p  : imports OPML file at path p"
   yield "  quit    : quits the program"
 
 processCommand h = do
@@ -80,6 +81,7 @@ processCommand h = do
       "debug"     -> doAbortable 2 args h cmdDebug
       "curl"      -> doAbortable 1 args h cmdCurl
       "feed"      -> doAbortable 2 args h cmdFeed
+      "opml"      -> doAbortable 1 args h cmdOPML
       _           -> yield . showString "Command '" . showString (head args) $
                        "' not understood."
   processCommand h
@@ -132,7 +134,7 @@ randomCat =
       <*> pure Nothing
 
 randomFeed c =
-  Feed <$> pure c
+  Feed <$> pure (Just c)
           <*> (Unique <$> randomString 100 300)
           <*> randomString 100 300
           <*> randomContentIx 100 300
@@ -268,7 +270,7 @@ cmdPage h args s mk o = do
   let t = args !! 2
   let c = args !! 3
   let sCat (iid, i) = formats (shows iid) . showString (unSortable $ catName i) $ ""
-  let sFeed (iid, i) = formats (shows iid) . formats (shows $ feedCatID i) .
+  let sFeed (iid, i) = formats (shows iid) . formats (showsFeedCat i) .
                        shows (feedUpdated i) $ ""
   let sPerson (iid, i) = formats (shows iid) . showString (unSortable .
                          unUnique $ personName i) $ ""
@@ -281,7 +283,7 @@ cmdPage h args s mk o = do
       showTime dt
     "feed"   -> do
       (as, dt) <- timeOf $ page h c p s mk o now "feedUpdated"
-      yields $ format "ID" . format "CatID" . showString "Updated"
+      yields $ format "ID" . format "Category" . showString "Updated"
       each $ sFeed <$> as
       showTime dt
     "person" -> do
@@ -304,7 +306,7 @@ showItems as = do
     formatsK 25 (showString "Updated") . showString "Published"
   each $ sItem <$> as
   where sItem (iid, i) = formats (shows iid) .
-                         formats (shows $ itemFeedID i) .
+                         formats (shows $ itemFeed i) .
                          formatsK 25 (shows $ itemUpdated i) .
                          shows (itemPublished i) $ ""
 
@@ -411,14 +413,28 @@ cmdCurl _ args = timed $ do
 cmdFeed h args =
   let url = args !! 1 in
   let c = (read $ args !! 2) :: Int in
+  let mbc = if c == 0 then Nothing else Just (fromIntegral c) in
   timed $ liftBase (downloadFeed url) >>=
   either yield (\f -> do
-    (fid, fd, is) <- handleAbort $ updateFeed h f (fromIntegral c) url
-    yield $ showString "Feed " . shows fid $ " updated ok."
+    (fid, fd, is) <- handleAbort $ updateFeed h f mbc url
+    yield . showString "Feed " . shows fid $ " updated ok."
     yield ""
     each . lines $ show fd
     yield ""
     showItems is)
+
+showsFeedCat f = maybe (showString "-") shows $ feedCat f
+
+cmdOPML h args = timed $ do
+  let path = args !! 1
+  res <- importOPML h path
+  either yield (\rs -> do
+    yield $ shows (length rs) " feeds merged:"
+    yields $ format "ID" . format "Category" . showString "URL"
+    each $ map (\(fid, f) -> formats (shows fid) .
+                             formats (showsFeedCat f) .
+                             shows (feedURL f) $ "") rs )
+    res
 
 pipeLine h =
       P.stdinLn

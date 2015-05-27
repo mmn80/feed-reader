@@ -101,7 +101,7 @@ runToItem h it fid =
   liftIO getCurrentTime >>= runQuery h . toItem it fid . DateTime
 
 runToFeed :: (ToFeed f, LogState l, MonadIO m) =>
-              Handle l -> f -> Reference Cat -> URL ->
+              Handle l -> f -> Maybe (Reference Cat) -> URL ->
               m (Either TransactionAbort (Reference Feed, Feed))
 runToFeed h it cid u =
   liftIO getCurrentTime >>= runQuery h . toFeed it cid u . DateTime

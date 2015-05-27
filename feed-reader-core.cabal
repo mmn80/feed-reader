@@ -8,7 +8,7 @@ homepage:            https://github.com/clnx/feed-reader
 bug-reports:         https://github.com/clnx/feed-reader/issues
 author:              Călin Ardelean
 maintainer:          Călin Ardelean <calinucs@gmail.com>
-copyright:           Copyright (C) 2015 Călin Ardelean
+copyright:           Copyright (c) 2015 Călin Ardelean
 license:             BSD3
 license-file:        LICENSE
 stability:           experimental
@@ -20,9 +20,9 @@ source-repository head
   location: https://github.com/clnx/feed-reader.git
 
 library
-  ghc-options:       -O2 -Wall
+  ghc-options:       -Wall
   build-depends:
-    base,
+    base             >= 4.8 && < 5,
     time,
     mtl,
     containers,
@@ -30,6 +30,7 @@ library
     cereal,
     xml,
     feed,
+    opml,
     filepath,
     directory,
     pipes,
@@ -42,15 +43,15 @@ library
     FeedReader.Convert,
     FeedReader.Import,
     FeedReader.Utils
-  hs-source-dirs:      src
-  default-language:    Haskell2010
+  hs-source-dirs:    src
+  default-language:  Haskell2010
 
 executable feeds-console
   main-is: FeedReader/Console.hs
-  hs-source-dirs:      src
-  default-language:    Haskell2010
+  hs-source-dirs:    src
+  default-language:  Haskell2010
   build-depends:
-    base,
+    base             >= 4.8 && < 5,
     time,
     mtl,
     containers,
@@ -58,6 +59,7 @@ executable feeds-console
     cereal,
     xml,
     feed,
+    opml,
     random,
     filepath,
     directory,
