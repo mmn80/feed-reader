@@ -28,6 +28,7 @@ module FeedReader.DB
   , DBStats (..)
   , runToItem
   , runToFeed
+  , runUpdateItemStatus
   ) where
 
 import           Control.Monad                (forM_)
@@ -110,3 +111,11 @@ runToFeed :: (ToFeed f, LogState l, MonadIO m) =>
               m (Either TransactionAbort Feed)
 runToFeed h it fid feed =
   liftIO getCurrentTime >>= runQuery h . toFeed it fid feed . DateTime
+
+runUpdateItemStatus :: (LogState l, MonadIO m) => Handle l -> Reference Item ->
+                        ItemStatusKey -> m (Either TransactionAbort ())
+runUpdateItemStatus h k stk = runQuery h $
+  lookup k >>= maybe (return ()) (\(_, it) -> do
+    st <- itemStatusByKey stk
+    update k it { itemStatus = st }
+    return ())

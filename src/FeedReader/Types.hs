@@ -20,6 +20,8 @@ module FeedReader.Types
   , Feed (..)
   , Person (..)
   , Item (..)
+  , ItemStatus (..)
+  , ItemStatusKey (..)
   , URL
   , Language
   , Tag
@@ -30,8 +32,9 @@ module FeedReader.Types
   , Unique (..)
   ) where
 
+import           Data.Hashable         (Hashable (..))
 import           Data.Serialize        (Serialize (..))
-import           Database.Muesli.Query
+import           Database.Muesli.Types
 import           GHC.Generics          (Generic)
 
 type URL      = String
@@ -91,6 +94,15 @@ data Feed = Feed
 
 instance Document Feed
 
+data ItemStatusKey = StatusNew | StatusUnread | StatusRead
+  deriving (Show, Generic, Serialize, Indexable, Hashable)
+
+data ItemStatus = ItemStatus
+  { statusKey :: Unique ItemStatusKey
+  } deriving (Show, Generic, Serialize)
+
+instance Document ItemStatus
+
 data Item = Item
   { itemFeed         :: Reference Feed
   , itemURL          :: Unique URL
@@ -103,6 +115,7 @@ data Item = Item
   , itemContent      :: Content
   , itemPublished    :: Sortable DateTime
   , itemUpdated      :: Sortable DateTime
+  , itemStatus       :: Reference ItemStatus
   } deriving (Show, Generic, Serialize)
 
 instance Document Item

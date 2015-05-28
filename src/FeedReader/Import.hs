@@ -73,7 +73,7 @@ parseFeed :: ByteString -> Maybe F.Feed
 parseFeed bs =
   case XML.parseXMLDoc bs of
     Nothing -> Nothing
-    Just e ->
+    Just e  ->
       readAtom e `mplus`
       readRSS2 e `mplus`
       readRSS1 e `mplus`

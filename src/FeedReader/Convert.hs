@@ -1,5 +1,6 @@
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TupleSections     #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -18,15 +19,19 @@ module FeedReader.Convert
   ( ToFeed (..)
   , ToPerson (..)
   , ToItem (..)
+  , itemStatusByKey
+  , itemStatusToKey
   ) where
 
 import           Control.Applicative   ((<|>))
+import           Control.Monad         (liftM)
 import           Control.Monad.Trans   (MonadIO)
 import           Data.List             (find, isPrefixOf)
 import           Data.Maybe            (fromMaybe, listToMaybe)
 import           Database.Muesli.Query hiding (filter)
 import           FeedReader.Types
 import           FeedReader.Utils      (text2DateTime)
+import           Prelude               hiding (lookup)
 import qualified Text.Atom.Feed        as A
 import qualified Text.DublinCore.Types as DC
 import qualified Text.RSS.Syntax       as R
@@ -40,8 +45,19 @@ class ToPerson p where
   toPerson :: MonadIO m => p -> Transaction l m (Reference Person, Person)
 
 class ToItem i where
-  toItem :: MonadIO m => i -> Reference Feed -> DateTime ->
+  toItem :: (LogState l, MonadIO m) => i -> Reference Feed -> DateTime ->
             Transaction l m (Reference Item, Item)
+
+itemStatusByKey :: MonadIO m => ItemStatusKey ->
+                   Transaction l m (Reference ItemStatus)
+itemStatusByKey k =
+  lookupUnique "statusKey" (Unique k) >>=
+  maybe (insert $ ItemStatus (Unique k)) return
+
+itemStatusToKey :: (LogState l, MonadIO m) => Reference ItemStatus ->
+                    Transaction l m ItemStatusKey
+itemStatusToKey k =
+  liftM (maybe StatusNew (unUnique . statusKey . snd)) (lookup k)
 
 ------------------------------------------------------------------------------
 -- Conversion transactions for Atom
@@ -120,6 +136,22 @@ instance ToFeed A.Feed where
     update fid f'
     return f'
 
+updateItem :: (LogState l, MonadIO m) => URL -> Item -> Reference ItemStatus ->
+               Reference ItemStatus -> Transaction l m (Reference Item, Item)
+updateItem url it stNew stUnr =
+  let ins = liftM (,it) (insert it) in
+  lookupUnique "itemURL" (Unique url) >>=
+    maybe ins (\k -> lookup k >>=
+                     maybe ins (\(_, oit) ->
+                       let it' = it { itemStatus = stUpd $ itemStatus oit
+                                    , itemTags   = itemTags oit } in
+                       update k it' >> return (k, it')))
+  where stUpd st = if st == stNew then stUnr else st
+
+--TODO: lookup should return just Maybe a
+--TODO: specialized lookup without Maybe for the result of lookupUnique
+--TODO: File backend: process file locking
+
 instance ToItem A.Entry where
   toItem i f df = do
     as <- mapM toPerson $ A.entryAuthors i
@@ -128,7 +160,9 @@ instance ToItem A.Entry where
     let url = case A.entryLinks i of
                 []    -> ""
                 (l:_) -> A.linkHref l
-    let i' = Item { itemFeed         = f
+    stNew <- itemStatusByKey StatusNew
+    stUnr <- itemStatusByKey StatusUnread
+    let it = Item { itemFeed         = f
                   , itemURL          = Unique url
                   , itemTitle        = content2DB $ A.entryTitle i
                   , itemSummary      = tryContent2DB $ A.entrySummary i
@@ -140,9 +174,9 @@ instance ToItem A.Entry where
                   , itemPublished    = Sortable $ text2DateTime
                                          (fromMaybe "" $ A.entryPublished i) df
                   , itemUpdated      = Sortable date
+                  , itemStatus       = stNew
                   }
-    iid <- updateUnique "itemURL" (Unique url) i'
-    return (iid, i')
+    updateItem url it stNew stUnr
 
 ------------------------------------------------------------------------------
 -- Conversion transactions for RSS
@@ -198,7 +232,9 @@ instance ToItem R.RSSItem where
     as <- mapM toPerson . rssPersonToPerson $ R.rssItemAuthor i
     let url = fromMaybe "" $ R.rssItemLink i
     let date = Sortable $ text2DateTime (fromMaybe "" $ R.rssItemPubDate i) df
-    let i' = Item { itemFeed         = f
+    stNew <- itemStatusByKey StatusNew
+    stUnr <- itemStatusByKey StatusUnread
+    let it = Item { itemFeed         = f
                   , itemURL          = Unique url
                   , itemTitle        = Text . fromMaybe "" $ R.rssItemTitle i
                   , itemSummary      = Text ""
@@ -210,9 +246,9 @@ instance ToItem R.RSSItem where
                   , itemContent      = HTML . fromMaybe "" $ R.rssItemDescription i
                   , itemPublished    = date
                   , itemUpdated      = date
+                  , itemStatus       = stNew
                   }
-    iid <- updateUnique "itemURL" (Unique url) i'
-    return (iid, i')
+    updateItem url it stNew stUnr
 
 ------------------------------------------------------------------------------
 -- Conversion transactions for RSS1
@@ -263,7 +299,9 @@ instance ToItem R1.Item where
     cs <- mapM toPerson $ extractDcPersons dcs DC.DC_Contributor
     let url = if null $ R1.itemLink i then R1.itemURI i else R1.itemLink i
     let date = Sortable $ text2DateTime (extractDcInfo dcs DC.DC_Date) df
-    let i' = Item { itemFeed         = f
+    stNew <- itemStatusByKey StatusNew
+    stUnr <- itemStatusByKey StatusUnread
+    let it = Item { itemFeed         = f
                   , itemURL          = Unique url
                   , itemTitle        = Text $ R1.itemTitle i
                   , itemSummary      = HTML . fromMaybe "" $ R1.itemDesc i
@@ -275,6 +313,6 @@ instance ToItem R1.Item where
                                        R1.contentValue) $ R1.itemContent i
                   , itemPublished    = date
                   , itemUpdated      = date
+                  , itemStatus       = stNew
                   }
-    iid <- updateUnique "itemURL" (Unique url) i'
-    return (iid, i')
+    updateItem url it stNew stUnr

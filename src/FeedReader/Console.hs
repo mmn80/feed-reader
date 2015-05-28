@@ -58,9 +58,11 @@ helpMessage = do
   yield "          : i: if '1' will show all indexes"
   yield "          : c: if '1' will show the contents of the cache"
   yield "  curl u  : downloads and parses feed at URL = u"
-  yield "  feed k  : downloads, parses and updates feed with ID = k"
-  yield "          : c: category ID"
   yield "  opml p  : imports OPML file at path p"
+  yield "  feed k  : downloads, parses and updates feed with ID = k"
+  yield "  status i s"
+  yield "          : updates the status of item with ID = i to s"
+  yield "          : s: one of New, Unread, Read"
   yield "  quit    : quits the program"
 
 processCommand h = do
@@ -80,8 +82,9 @@ processCommand h = do
       "gc"        -> doAbortable 0 args h cmdGC
       "debug"     -> doAbortable 2 args h cmdDebug
       "curl"      -> doAbortable 1 args h cmdCurl
-      "feed"      -> doAbortable 1 args h cmdFeed
       "opml"      -> doAbortable 1 args h cmdOPML
+      "feed"      -> doAbortable 1 args h cmdFeed
+      "status"    -> doAbortable 2 args h cmdItemStatus
       _           -> yield . showString "Command '" . showString (head args) $
                        "' not understood."
   processCommand h
@@ -153,7 +156,7 @@ randomPerson =
          <*> randomString 100 300
          <*> randomString 10 30
 
-randomItem f =
+randomItem f s =
      Item <$> pure f
           <*> (Unique <$> randomString 100 300)
           <*> (Text <$> randomString 100 300)
@@ -165,6 +168,7 @@ randomItem f =
           <*> (Text <$> randomString 200 300)
           <*> randomTimeIx
           <*> randomTimeIx
+          <*> pure s
 
 ------------------------------------------------------------------------------
 -- Command Functions
@@ -295,7 +299,7 @@ cmdPage h args s mk o = do
       showTime dt
     "item"   -> do
       (as, dt) <- timeOf $ page h c p s mk o now "itemUpdated"
-      showItems as
+      showItems h as
       showTime dt
     _        -> yield . shows t $ " is not a valid table name."
 
@@ -305,14 +309,22 @@ formatsK k i = let str = take (k - 1) $ i "" in
 formats = formatsK 12
 format = formats . showString
 
-showItems as = do
+content2Str (Text str)  = take 24 str ++ "..."
+content2Str (HTML str)  = take 24 str ++ "..."
+content2Str (XHTML str) = take 24 str ++ "..."
+
+showItems h as = do
   yields $ format "ID" . format "FeedID" .
-    formatsK 20 (showString "Updated") . showString "Published"
-  each $ sItem <$> as
-  where sItem (iid, i) = formats (shows iid) .
-                         formats (shows $ itemFeed i) .
-                         formatsK 20 (shows $ itemUpdated i) .
-                         (formatsK 20 . shows $ itemPublished i) $ ""
+    formatsK 20 (showString "Updated") . showString "Status Title"
+  as' <- traverse (\(iid, i) -> do
+    st <- handleAbort . DB.runQuery h . DB.itemStatusToKey $ itemStatus i
+    return (iid, i, st)) as
+  each $ sItem <$> as'
+  where sItem (iid, i, st) = formats (shows iid) .
+                             formats (shows $ itemFeed i) .
+                             formatsK 20 (shows $ itemUpdated i) .
+                             formatsK 7 (showString . drop 6 $ show st) $
+                             content2Str (itemTitle i)
 
 cmdRange h args = do
   let s = args !! 4
@@ -359,8 +371,9 @@ cmdAdd h args = timed $ do
       fs' <- handleAbort $ DB.runRange h nothing "feedUpdated" 1000
       let fs = S.fromList fs'
       let rfids = (fst . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
+      stNew <- handleAbort . DB.runQuery h $ DB.itemStatusByKey StatusNew
       is <- handleAbort $ liftM sequence . P.toListM . for (each rfids) $ \fid ->
-        (lift . randomItem) fid >>=
+        lift (randomItem fid stNew) >>=
         lift . DB.runInsert h >>=
         yield
       showIDs is
@@ -423,7 +436,17 @@ cmdFeed h args = timed $ do
     yield ""
     each . lines $ show feed
     yield ""
-    showItems is ) mbf
+    showItems h is ) mbf
+
+cmdItemStatus h args = timed $ do
+  let i = (read $ args !! 1) :: Int
+  let s = args !! 2
+  let iid = fromIntegral i
+  case s of
+    "New"    -> handleAbort $ DB.runUpdateItemStatus h iid StatusNew
+    "Unread" -> handleAbort $ DB.runUpdateItemStatus h iid StatusUnread
+    "Read"   -> handleAbort $ DB.runUpdateItemStatus h iid StatusRead
+    _        -> yield "Status unknown."
 
 showsFeedCat f = maybe (showString "-") shows $ feedCat f
 
