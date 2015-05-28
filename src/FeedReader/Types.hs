@@ -86,6 +86,7 @@ data Feed = Feed
   , feedRights       :: Content
   , feedImage        :: Maybe Image
   , feedUpdated      :: Sortable DateTime
+  , feedUnsubscribed :: Bool
   , feedLastError    :: Maybe String
   } deriving (Show, Generic, Serialize)
 

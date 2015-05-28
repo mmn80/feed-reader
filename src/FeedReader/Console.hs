@@ -149,6 +149,7 @@ randomFeed c =
         <*> (Text <$> randomString 10 50)
         <*> pure Nothing
         <*> randomTimeIx
+        <*> pure False
         <*> pure Nothing
 
 randomPerson =
@@ -316,7 +317,7 @@ content2Str (XHTML str) = take 27 str ++ "..."
 showStatus StatusNew     = "(?)"
 showStatus StatusUnread  = " ?"
 showStatus StatusRead    = " ~"
-showStatus StatusStarred = "{*}"
+showStatus StatusStarred = "{★}"
 
 showItems h as = do
   yields $ format "Id" . format "Feed" .

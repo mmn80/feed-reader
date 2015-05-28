@@ -154,6 +154,7 @@ opmlToDb pcat os = do
                         , feedRights       = Text ""
                         , feedImage        = Nothing
                         , feedUpdated      = Sortable nullDate
+                        , feedUnsubscribed = False
                         , feedLastError    = Nothing
                         }
           fid <- insert f'
