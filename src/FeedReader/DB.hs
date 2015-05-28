@@ -17,7 +17,7 @@
 module FeedReader.DB
   ( module Exports
   , runRange
-  , runFilter
+  , runRangeF
   , runLookup
   , runLookupUnique
   , runInsert
@@ -41,25 +41,25 @@ import           FeedReader.Convert           as Exports
 import           Prelude                      hiding (filter, lookup)
 
 runLookup :: (Document a, LogState l, MonadIO m) => Handle l -> Reference a ->
-              m (Either TransactionAbort (Maybe (Reference a, a)))
+              m (Either TransactionAbort (Maybe a))
 runLookup h k = runQuery h (lookup k)
 
 runLookupUnique :: (Document a, ToKey (Unique b), LogState l, MonadIO m) =>
                    Handle l -> Property a -> Unique b ->
                    m (Either TransactionAbort (Maybe (Reference a, a)))
-runLookupUnique h p k = runQuery h $
-  lookupUnique p k >>= maybe (return Nothing) lookup
+runLookupUnique h p k = runQuery h $ lookupUnique p k
 
 runRange :: (Document a, ToKey (Sortable b), LogState l, MonadIO m) =>
-             Handle l -> Maybe (Sortable b) -> Property a -> Int ->
+             Handle l -> Int -> Property a -> Maybe (Sortable b) ->
              m (Either TransactionAbort [(Reference a, a)])
-runRange h s prop pg = runQuery h $ range s Nothing prop pg
+runRange h pg prop s = runQuery h $ range pg prop s Nothing
 
-runFilter :: (Document a, ToKey (Sortable c), LogState l, MonadIO m) =>
-              Handle l -> Maybe (Reference b) -> Maybe (Sortable c) -> Property a ->
-              Property a -> Int -> m (Either TransactionAbort [(Reference a, a)])
-runFilter h k s fprop sprop pg = runQuery h $
-  filter k s Nothing fprop sprop pg
+runRangeF :: (Document a, ToKey (Sortable c), LogState l, MonadIO m) =>
+              Handle l -> Int -> Property a -> Maybe (Reference b) ->
+              Property a -> Maybe (Sortable c) ->
+              m (Either TransactionAbort [(Reference a, a)])
+runRangeF h pg fprop k sprop s = runQuery h $
+  rangeF pg fprop k sprop s Nothing
 
 runInsert :: (Document a, LogState l, MonadIO m) =>
               Handle l -> a -> m (Either TransactionAbort (Reference a))
@@ -74,16 +74,16 @@ runDelete :: (LogState l, MonadIO m) =>
 runDelete h did = runQuery h (delete did)
 
 deleteRange :: (Document a, ToKey (Sortable b), MonadIO m) =>
-               Sortable b -> Property a -> Int -> Transaction l m Int
-deleteRange did prop pg = do
-  ks <- rangeK (Just did) Nothing prop pg
+               Int -> Property a -> Sortable b -> Transaction l m Int
+deleteRange pg prop s = do
+  ks <- rangeK pg prop (Just s) Nothing
   forM_ ks $ \k -> delete k
   return $ length ks
 
 runDeleteRange :: (Document a, ToKey (Sortable b), LogState l, MonadIO m) =>
-                   Handle l -> Sortable b -> Property a -> Int ->
+                   Handle l -> Int -> Property a -> Sortable b ->
                    m (Either TransactionAbort Int)
-runDeleteRange h did prop pg = runQuery h (deleteRange did prop pg)
+runDeleteRange h pg prop s = runQuery h (deleteRange pg prop s)
 
 data DBStats = DBStats
   { countCats    :: Int
@@ -115,7 +115,7 @@ runToFeed h it fid feed =
 runUpdateItemStatus :: (LogState l, MonadIO m) => Handle l -> Reference Item ->
                         ItemStatusKey -> m (Either TransactionAbort ())
 runUpdateItemStatus h k stk = runQuery h $
-  lookup k >>= maybe (return ()) (\(_, it) -> do
+  lookup k >>= maybe (return ()) (\it -> do
     st <- itemStatusByKey stk
     update k it { itemStatus = st }
     return ())

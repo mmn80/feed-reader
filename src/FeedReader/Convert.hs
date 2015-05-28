@@ -51,13 +51,13 @@ class ToItem i where
 itemStatusByKey :: MonadIO m => ItemStatusKey ->
                    Transaction l m (Reference ItemStatus)
 itemStatusByKey k =
-  lookupUnique "statusKey" (Unique k) >>=
+  lookupUniqueK "statusKey" (Unique k) >>=
   maybe (insert $ ItemStatus (Unique k)) return
 
 itemStatusToKey :: (LogState l, MonadIO m) => Reference ItemStatus ->
                     Transaction l m ItemStatusKey
 itemStatusToKey k =
-  liftM (maybe StatusNew (unUnique . statusKey . snd)) (lookup k)
+  liftM (maybe StatusNew (unUnique . statusKey)) (lookup k)
 
 ------------------------------------------------------------------------------
 -- Conversion transactions for Atom
@@ -139,18 +139,12 @@ instance ToFeed A.Feed where
 updateItem :: (LogState l, MonadIO m) => URL -> Item -> Reference ItemStatus ->
                Reference ItemStatus -> Transaction l m (Reference Item, Item)
 updateItem url it stNew stUnr =
-  let ins = liftM (,it) (insert it) in
   lookupUnique "itemURL" (Unique url) >>=
-    maybe ins (\k -> lookup k >>=
-                     maybe ins (\(_, oit) ->
-                       let it' = it { itemStatus = stUpd $ itemStatus oit
-                                    , itemTags   = itemTags oit } in
-                       update k it' >> return (k, it')))
+  maybe (liftM (,it) (insert it)) (\(k, oit) ->
+    let it' = it { itemStatus = stUpd $ itemStatus oit
+                 , itemTags   = itemTags oit } in
+    update k it' >> return (k, it'))
   where stUpd st = if st == stNew then stUnr else st
-
---TODO: lookup should return just Maybe a
---TODO: specialized lookup without Maybe for the result of lookupUnique
---TODO: File backend: process file locking
 
 instance ToItem A.Entry where
   toItem i f df = do

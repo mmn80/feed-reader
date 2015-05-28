@@ -92,6 +92,8 @@ data Feed = Feed
 
 -- TODO: Sortable -> Sorted, Reference -> Ref
 -- TODO: filter on Sorted columns
+-- TODO: File backend: process file locking
+-- TODO: sort the other way
 
 instance Document Feed
 

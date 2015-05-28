@@ -207,7 +207,7 @@ cmdStats h _ = timed $ do
   yields' "Person count  : " $ shows (DB.countPersons s)
   yields' "Entry count   : " $ shows (DB.countItems s)
 
-type LookupRet a = IO (Either DB.TransactionAbort (Maybe (Reference a, a)))
+type LookupRet a = IO (Either DB.TransactionAbort (Maybe a))
 
 cmdGet h args = do
   let t = args !! 1
@@ -219,24 +219,26 @@ cmdGet h args = do
     "cat"    -> do
        (r, dt) <- timeOf $ handleAbort
                     (DB.runLookup h (fromIntegral k) :: LookupRet Cat)
-       out $ fmap (show . snd) r
+       out $ fmap show r
        showTime dt
     "feed"   -> do
        (r, dt) <- timeOf $ handleAbort
                     (DB.runLookup h (fromIntegral k) :: LookupRet Feed)
-       out $ fmap (show . snd) r
+       out $ fmap show r
        showTime dt
     "person" -> do
        (r, dt) <- timeOf $ handleAbort
                     (DB.runLookup h (fromIntegral k) :: LookupRet Person)
-       out $ fmap (show . snd) r
+       out $ fmap show r
        showTime dt
     "item"   -> do
        (r, dt) <- timeOf $ handleAbort
                     (DB.runLookup h (fromIntegral k) :: LookupRet Item)
-       out $ fmap (show . snd) r
+       out $ fmap show r
        showTime dt
     _        -> yield . shows t $ " is not a valid table name."
+
+type LookupUnqRet a = IO (Either DB.TransactionAbort (Maybe (Reference a, a)))
 
 cmdGetk h args = timed $ do
   let t = args !! 1
@@ -246,19 +248,19 @@ cmdGetk h args = timed $ do
   case t of
     "feed"   ->
       handleAbort (DB.runLookupUnique h "feedURL" (DB.Unique k)
-               :: LookupRet Feed) >>= out . fmap (show . snd)
+               :: LookupUnqRet Feed) >>= out . fmap (show . snd)
     "person" ->
       handleAbort (DB.runLookupUnique h "personName" (DB.Unique k)
-               :: LookupRet Person) >>= out . fmap (show . snd)
+               :: LookupUnqRet Person) >>= out . fmap (show . snd)
     "item"   ->
       handleAbort (DB.runLookupUnique h "itemURL" (DB.Unique k)
-               :: LookupRet Item) >>= out . fmap (show . snd)
+               :: LookupUnqRet Item) >>= out . fmap (show . snd)
     _        -> yield . shows t $ " is not a valid table name."
 
 page h c p s mk o now dft = handleAbort $
-  maybe (DB.runRange h (parseVal s now) (fromString fprop) p)
-  (\k -> DB.runFilter h (nk k) (parseVal s now)
-                  (fromString fprop) (fromString oprop) p)
+  maybe (DB.runRange h p (fromString fprop) (parseVal s now))
+  (\k -> DB.runRangeF h p (fromString fprop) (nk k)
+                          (fromString oprop)(parseVal s now))
   mk
   where fprop = if c == "*" then dft else c
         oprop = if o == "*" then dft else o
@@ -365,7 +367,7 @@ cmdAdd h args = timed $ do
                   randomPerson >>= DB.runInsert h)
                 >>= showIDs
     "feed" -> do
-      cs' <- handleAbort $ DB.runRange h nothing "catName" 100
+      cs' <- handleAbort $ DB.runRange h maxBound "catName" nothing
       let cs = S.fromList cs'
       let rs = take n $ randomRs (0, S.length cs - 1) g
       fs <- handleAbort $ liftM sequence . P.toListM . for (each rs) $ \r ->
@@ -374,7 +376,7 @@ cmdAdd h args = timed $ do
         yield
       showIDs fs
     "item" -> do
-      fs' <- handleAbort $ DB.runRange h nothing "feedUpdated" 1000
+      fs' <- handleAbort $ DB.runRange h maxBound "feedUpdated" nothing
       let fs = S.fromList fs'
       let rfids = (fst . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
       stNew <- handleAbort . DB.runQuery h $ DB.itemStatusByKey StatusNew
@@ -409,13 +411,13 @@ cmdRangeDel h args = timed $ do
   sz <- maybe (yield "Explicit value required." >> return 0)
     (\k -> case t of
       "cat"    ->
-        handleAbort (DB.runDeleteRange h k (def c "catName"     :: Property Cat   ) p)
+        handleAbort (DB.runDeleteRange h p (def c "catName"     :: Property Cat   ) k)
       "feed"   ->
-        handleAbort (DB.runDeleteRange h k (def c "feedUpdated" :: Property Feed  ) p)
+        handleAbort (DB.runDeleteRange h p (def c "feedUpdated" :: Property Feed  ) k)
       "person" ->
-        handleAbort (DB.runDeleteRange h k (def c "personName"  :: Property Person) p)
+        handleAbort (DB.runDeleteRange h p (def c "personName"  :: Property Person) k)
       "item"   ->
-        handleAbort (DB.runDeleteRange h k (def c "itemUpdated" :: Property Item  ) p)
+        handleAbort (DB.runDeleteRange h p (def c "itemUpdated" :: Property Item  ) k)
       _        -> yield (shows t " is not a valid table name.") >> return 0)
     (parseVal s now)
   yields $ shows sz . showString " records deleted."

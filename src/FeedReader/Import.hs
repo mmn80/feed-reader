@@ -101,7 +101,7 @@ updateFeed :: (LogState l, MonadIO m) => Handle l -> Reference Feed ->
 updateFeed h fid =
   runLookup h fid >>=
   either (return . Left) (
-    maybe (return $ Right (Nothing, [])) (\(_, feed) ->
+    maybe (return $ Right (Nothing, [])) (\feed ->
       downloadFeed (unUnique $ feedURL feed) >>=
       either (\err -> let f' = feed { feedLastError = Just err } in
                       runUpdate h fid f' >>=
@@ -130,8 +130,7 @@ importOPML h p = do
 opmlToDb :: (LogState l, MonadIO m) => Maybe (Reference Cat) -> [Outline] ->
             Transaction l m [(Reference Feed, Feed)]
 opmlToDb pcat os = do
--- TODO: filter -> (filter, filterRange)
-  cs <- filter pcat (Nothing :: Maybe (Sortable Int)) Nothing "catName" "catName" 10000
+  cs <- filter "catName" pcat "catName"
   rss <- forM os $ \o -> case parseOutline o of
     Left str -> if null str then return [] else do
       cid <- case find ((== opmlText o) . unSortable . catName . snd) cs of
@@ -139,8 +138,8 @@ opmlToDb pcat os = do
         Just (cid, _) -> return cid
       opmlToDb (Just cid) $ opmlOutlineChildren o
     Right (ti, xmlUrl, htmlUrl) -> do
-      mbfid <- lookupUnique "feedURL" (Unique xmlUrl)
-      case mbfid of
+      mb <- lookupUnique "feedURL" (Unique xmlUrl)
+      case mb of
         Nothing -> do
           let f' = Feed { feedCat          = pcat
                         , feedURL          = Unique xmlUrl
@@ -159,7 +158,7 @@ opmlToDb pcat os = do
                         }
           fid <- insert f'
           return [(fid, f')]
-        Just fid -> maybe [] pure <$> lookup fid
+        Just (fid, f) -> return [(fid, f)]
 
   return $ concat rss
   where parseOutline o =
