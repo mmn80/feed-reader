@@ -212,7 +212,7 @@ cmdGet h args = do
   let t = args !! 1
   let kstr = args !! 2
   let k = read kstr :: Int
-  let out = maybe (yields' "No record found with ID = " $ showString kstr)
+  let out = maybe (yields' "No record found with Id = " $ showString kstr)
                   (each . lines)
   case t of
     "cat"    -> do
@@ -284,17 +284,17 @@ cmdPage h args s mk o = do
   case t of
     "cat"    -> do
       (as, dt) <- timeOf $ page h c p s mk o now "catName"
-      yields $ format "ID" . showString "Name"
+      yields $ format "Id" . showString "Name"
       each $ sCat <$> as
       showTime dt
     "feed"   -> do
       (as, dt) <- timeOf $ page h c p s mk o now "feedUpdated"
-      yields $ format "ID" . format "Category" . showString "Updated"
+      yields $ format "Id" . format "Category" . showString "Updated"
       each $ sFeed <$> as
       showTime dt
     "person" -> do
       (as, dt) <- timeOf $ page h c p s mk o now "personName"
-      yields $ format "ID" . showString "Name"
+      yields $ format "Id" . showString "Name"
       each $ sPerson <$> as
       showTime dt
     "item"   -> do
@@ -309,13 +309,18 @@ formatsK k i = let str = take (k - 1) $ i "" in
 formats = formatsK 12
 format = formats . showString
 
-content2Str (Text str)  = take 24 str ++ "..."
-content2Str (HTML str)  = take 24 str ++ "..."
-content2Str (XHTML str) = take 24 str ++ "..."
+content2Str (Text str)  = take 27 str ++ "..."
+content2Str (HTML str)  = take 27 str ++ "..."
+content2Str (XHTML str) = take 27 str ++ "..."
+
+showStatus StatusNew     = "(?)"
+showStatus StatusUnread  = " ?"
+showStatus StatusRead    = " ~"
+showStatus StatusStarred = "{*}"
 
 showItems h as = do
-  yields $ format "ID" . format "FeedID" .
-    formatsK 20 (showString "Updated") . showString "Status Title"
+  yields $ format "Id" . format "Feed" .
+    formatsK 20 (showString "Updated") . showString "Sta Title"
   as' <- traverse (\(iid, i) -> do
     st <- handleAbort . DB.runQuery h . DB.itemStatusToKey $ itemStatus i
     return (iid, i, st)) as
@@ -323,7 +328,7 @@ showItems h as = do
   where sItem (iid, i, st) = formats (shows iid) .
                              formats (shows $ itemFeed i) .
                              formatsK 20 (shows $ itemUpdated i) .
-                             formatsK 7 (showString . drop 6 $ show st) $
+                             formatsK 4 (showString $ showStatus st) $
                              content2Str (itemTitle i)
 
 cmdRange h args = do
@@ -340,8 +345,8 @@ showIDs is = do
   let ids = map show is
   let l = length ids
   let (prefix, suffix) = if l > 10
-                         then (showString "First 10 IDs: ", showString "...")
-                         else (showString "IDs: ", showString ".")
+                         then (showString "First 10 Ids: ", showString "...")
+                         else (showString "Ids: ", showString ".")
   yields $ shows l . showString " records generated."
   yields $ prefix . showString (intercalate ", " (take 10 ids)) . suffix
 
@@ -443,10 +448,11 @@ cmdItemStatus h args = timed $ do
   let s = args !! 2
   let iid = fromIntegral i
   case s of
-    "New"    -> handleAbort $ DB.runUpdateItemStatus h iid StatusNew
-    "Unread" -> handleAbort $ DB.runUpdateItemStatus h iid StatusUnread
-    "Read"   -> handleAbort $ DB.runUpdateItemStatus h iid StatusRead
-    _        -> yield "Status unknown."
+    "New"     -> handleAbort $ DB.runUpdateItemStatus h iid StatusNew
+    "Unread"  -> handleAbort $ DB.runUpdateItemStatus h iid StatusUnread
+    "Read"    -> handleAbort $ DB.runUpdateItemStatus h iid StatusRead
+    "Starred" -> handleAbort $ DB.runUpdateItemStatus h iid StatusStarred
+    _         -> yield "Status unknown."
 
 showsFeedCat f = maybe (showString "-") shows $ feedCat f
 
@@ -455,7 +461,7 @@ cmdOPML h args = timed $ do
   res <- importOPML h path
   either yield (\rs -> do
     yield $ shows (length rs) " feeds merged:"
-    yields $ format "ID" . format "Category" . showString "URL"
+    yields $ format "Id" . format "Category" . showString "URL"
     each $ map (\(fid, f) -> formats (shows fid) .
                              formats (showsFeedCat f) .
                              shows (feedURL f) $ "") rs )

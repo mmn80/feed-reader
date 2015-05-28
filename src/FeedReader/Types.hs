@@ -94,7 +94,7 @@ data Feed = Feed
 
 instance Document Feed
 
-data ItemStatusKey = StatusNew | StatusUnread | StatusRead
+data ItemStatusKey = StatusNew | StatusUnread | StatusRead | StatusStarred
   deriving (Show, Generic, Serialize, Indexable, Hashable)
 
 data ItemStatus = ItemStatus
