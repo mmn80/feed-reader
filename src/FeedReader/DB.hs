@@ -3,15 +3,15 @@
 
 -----------------------------------------------------------------------------
 -- |
--- Module : FeedReader.Data.DB
--- Copyright : (c) 2015 Călin Ardelean
--- License : BSD-style
+-- Module      : Main
+-- Copyright   : (c) 2015 Călin Ardelean
+-- License     : BSD-style
 --
--- Maintainer : Călin Ardelean <calinucs@gmail.com>
--- Stability : experimental
+-- Maintainer  : Călin Ardelean <calinucs@gmail.com>
+-- Stability   : experimental
 -- Portability : portable
 --
--- This module provides DB access functions for Feed Reader.
+-- Database access functions.
 ----------------------------------------------------------------------------
 
 module FeedReader.DB

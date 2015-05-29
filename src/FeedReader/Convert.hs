@@ -4,15 +4,15 @@
 
 -----------------------------------------------------------------------------
 -- |
--- Module : FeedReader.Import
--- Copyright : (c) 2015 Călin Ardelean
--- License : BSD-style
+-- Module      : Main
+-- Copyright   : (c) 2015 Călin Ardelean
+-- License     : BSD-style
 --
--- Maintainer : Călin Ardelean <calinucs@gmail.com>
--- Stability : experimental
+-- Maintainer  : Călin Ardelean <calinucs@gmail.com>
+-- Stability   : experimental
 -- Portability : portable
 --
--- This module provides DB conversion/import instances for Feed Reader.
+-- Database conversion+import queries.
 ----------------------------------------------------------------------------
 
 module FeedReader.Convert

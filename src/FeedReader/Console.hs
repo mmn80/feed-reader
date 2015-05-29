@@ -4,6 +4,19 @@
 
 {-# OPTIONS_GHC -fno-warn-missing-signatures #-}
 
+-----------------------------------------------------------------------------
+-- |
+-- Module      : Main
+-- Copyright   : (c) 2015 Călin Ardelean
+-- License     : BSD-style
+--
+-- Maintainer  : Călin Ardelean <calinucs@gmail.com>
+-- Stability   : experimental
+-- Portability : portable
+--
+-- A REPL for testing purposes.
+-----------------------------------------------------------------------------
+
 module Main (main) where
 
 import           Control.Monad         (liftM, replicateM, unless)
@@ -230,17 +243,16 @@ showStatus StatusUnread  = " ?"
 showStatus StatusRead    = " ~"
 showStatus StatusStarred = "{★}"
 
-printRecords :: forall a l m x x'. (Printable a, DB.LogState l, MonadSafe m) =>
-                DB.Handle l -> [(Reference a, a)] -> Proxy x' x () String m ()
+printRecords :: forall a l m. (Printable a, DB.LogState l, MonadSafe m) =>
+                DB.Handle l -> [(Reference a, a)] -> Pipe String String m ()
 printRecords h rs = do
   let ns = getFieldNames (undefined :: a)
   vs <- traverse (uncurry $ getFieldValues h) rs
   let szs = map (+1) $ foldr (zipWith max . map length) (map length ns) vs
   let szs' = take (length szs - 1) szs
   let ss = szs' ++ [78 - sum szs']
-  let strs = map (concat . zipWith (\sz str -> take (sz - 1) str ++
-             replicate (sz - length str) ' ') ss) (ns : vs)
-  each strs
+  each $ map (concat . zipWith (\sz str -> take (sz - 1) str ++
+         replicate (sz - length str) ' ') ss) (ns : vs)
 
 ------------------------------------------------------------------------------
 -- Command Functions
