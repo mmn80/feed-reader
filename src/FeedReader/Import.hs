@@ -87,12 +87,14 @@ writeFeed h f fid feed =
     F.AtomFeed af -> runToFeed h af fid feed
     F.RSSFeed rss -> runToFeed h (R.rssChannel rss) fid feed
     F.RSS1Feed rf -> runToFeed h rf fid feed
+    F.XMLFeed _   -> error "Impossibru"
   >>=
   either (return . Left) (\feed' -> liftM (liftM (Just feed',) . sequence) $
     case f of
       F.AtomFeed af -> addItems $ A.feedEntries af
       F.RSSFeed rss -> addItems . R.rssItems $ R.rssChannel rss
-      F.RSS1Feed rf -> addItems $ R1.feedItems rf)
+      F.RSS1Feed rf -> addItems $ R1.feedItems rf
+      F.XMLFeed _   -> error "Impossibru" )
   where addItems is = P.toListM $ for (each is) $ \i ->
           lift (runToItem h i fid) >>= yield
 
@@ -130,7 +132,7 @@ importOPML h p = do
 opmlToDb :: (LogState l, MonadIO m) => Maybe (Reference Cat) -> [Outline] ->
             Transaction l m [(Reference Feed, Feed)]
 opmlToDb pcat os = do
-  cs <- filter "catName" pcat "catName"
+  cs <- filter "catName" pcat "catName" SortAsc
   rss <- forM os $ \o -> case parseOutline o of
     Left str -> if null str then return [] else do
       cid <- case find ((== opmlText o) . unSortable . catName . snd) cs of

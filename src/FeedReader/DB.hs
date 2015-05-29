@@ -50,16 +50,16 @@ runUnique :: (Document a, ToKey (Unique b), LogState l, MonadIO m) =>
 runUnique h p k = runQuery h $ unique p k
 
 runRange :: (Document a, ToKey (Sortable b), LogState l, MonadIO m) =>
-             Handle l -> Int -> Property a -> Maybe (Sortable b) ->
+             Handle l -> Int -> Property a -> Maybe (Sortable b) -> SortOrder ->
              m (Either TransactionAbort [(Reference a, a)])
-runRange h pg prop s = runQuery h $ range pg prop s Nothing
+runRange h pg prop s so = runQuery h $ range pg prop s Nothing so
 
 runFilterRange :: (Document a, ToKey (Sortable c), LogState l, MonadIO m) =>
               Handle l -> Int -> Property a -> Maybe (Reference b) ->
-              Property a -> Maybe (Sortable c) ->
+              Property a -> Maybe (Sortable c) -> SortOrder ->
               m (Either TransactionAbort [(Reference a, a)])
-runFilterRange h pg fprop k sprop s = runQuery h $
-  filterRange pg fprop k sprop s Nothing
+runFilterRange h pg fprop k sprop s so = runQuery h $
+  filterRange pg fprop k sprop s Nothing so
 
 runInsert :: (Document a, LogState l, MonadIO m) =>
               Handle l -> a -> m (Either TransactionAbort (Reference a))
@@ -74,16 +74,16 @@ runDelete :: (LogState l, MonadIO m) =>
 runDelete h did = runQuery h (delete did)
 
 deleteRange :: (Document a, ToKey (Sortable b), MonadIO m) =>
-               Int -> Property a -> Sortable b -> Transaction l m Int
-deleteRange pg prop s = do
-  ks <- range' pg prop (Just s) Nothing
+               Int -> Property a -> Sortable b -> SortOrder -> Transaction l m Int
+deleteRange pg prop s so = do
+  ks <- range' pg prop (Just s) Nothing so
   forM_ ks $ \k -> delete k
   return $ length ks
 
 runDeleteRange :: (Document a, ToKey (Sortable b), LogState l, MonadIO m) =>
-                   Handle l -> Int -> Property a -> Sortable b ->
+                   Handle l -> Int -> Property a -> Sortable b -> SortOrder ->
                    m (Either TransactionAbort Int)
-runDeleteRange h pg prop s = runQuery h (deleteRange pg prop s)
+runDeleteRange h pg prop s so = runQuery h (deleteRange pg prop s so)
 
 data DBStats = DBStats
   { countCats    :: Int

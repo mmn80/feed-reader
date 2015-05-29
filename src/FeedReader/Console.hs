@@ -36,20 +36,21 @@ helpMessage = do
   yield "  getk t k: SELECT * FROM t WHERE UniqueKey = k"
   yield "          : t: 'feed', 'person' or 'item'"
   yield "          : UniqueKey: 'URL', 'Name' or 'URL'"
-  yield "  range p t c s"
-  yield "          : SELECT TOP p * FROM t WHERE c < s ORDER BY c DESC"
+  yield "  range p t c s z"
+  yield "          : SELECT TOP p * FROM t WHERE c < s ORDER BY c z"
   yield "          : c: '*' will use a default column"
   yield "          : s: for date columns, start with 'D:' and replace ' ' with '_'"
-  yield "          : s: for string columns, start with 'S:' (only first 4 chars matter)"
+  yield "          : s: for string columns, start with 'S:'"
   yield "          : s: use '*' to start at the top"
-  yield "  filter p t c k o s"
-  yield "          : SELECT TOP p * FROM t WHERE c = k AND o < s ORDER BY o DESC"
+  yield "          : z: ASC or DESC"
+  yield "  filter p t c k o s z"
+  yield "          : SELECT TOP p * FROM t WHERE c = k AND o < s ORDER BY o z"
   yield "  add n t : inserts n random records into the DB (t as above)"
   yield "  cat n p : inserts a category"
   yield "          : n: name"
   yield "          : p: parent ID"
   yield "  del k   : deletes document with ID = k"
-  yield "  range_del p t c s"
+  yield "  range_del p t c s z"
   yield "          : deletes a range of documents starting at k"
   yield "          : params as in 'range'"
   yield "  gc      : performs GC"
@@ -73,12 +74,12 @@ processCommand h = do
       "stats"     -> doAbortable 0 args h cmdStats
       "get"       -> doAbortable 2 args h cmdGet
       "getk"      -> doAbortable 2 args h cmdGetk
-      "range"     -> doAbortable 4 args h cmdRange
-      "filter"    -> doAbortable 6 args h cmdFilter
+      "range"     -> doAbortable 5 args h cmdRange
+      "filter"    -> doAbortable 7 args h cmdFilter
       "add"       -> doAbortable 2 args h cmdAdd
       "cat"       -> doAbortable 2 args h cmdAddCat
       "del"       -> doAbortable 1 args h cmdDel
-      "range_del" -> doAbortable 4 args h cmdRangeDel
+      "range_del" -> doAbortable 5 args h cmdRangeDel
       "gc"        -> doAbortable 0 args h cmdGC
       "debug"     -> doAbortable 2 args h cmdDebug
       "curl"      -> doAbortable 1 args h cmdCurl
@@ -257,14 +258,15 @@ cmdGetk h args = timed $ do
                :: LookupUnqRet Item) >>= out . fmap (show . snd)
     _        -> yield . shows t $ " is not a valid table name."
 
-page h c p s mk o now dft = handleAbort $
-  maybe (DB.runRange h p (fromString fprop) (parseVal s now))
+page h c p s mk o now dft z = handleAbort $
+  maybe (DB.runRange h p (fromString fprop) (parseVal s now) so)
   (\k -> DB.runFilterRange h p (fromString fprop) (nk k)
-                          (fromString oprop)(parseVal s now))
+                          (fromString oprop)(parseVal s now) so)
   mk
   where fprop = if c == "*" then dft else c
         oprop = if o == "*" then dft else o
         nk k  = if k == 0 then Nothing else Just $ fromIntegral (k :: Int)
+        so    = if z == "ASC" then DB.SortAsc else DB.SortDesc
 
 parseVal s now
   | "D:" `isPrefixOf` s = Just . DB.Sortable . DB.toKey . DB.Sortable $
@@ -274,7 +276,7 @@ parseVal s now
   | otherwise           = Just . DB.Sortable . DB.toKey . DB.Sortable $
                             (read s :: Int)
 
-cmdPage h args s mk o = do
+cmdPage h args s mk o z = do
   let p = (read $ args !! 1) :: Int
   let t = args !! 2
   let c = args !! 3
@@ -286,22 +288,22 @@ cmdPage h args s mk o = do
   now <- DB.DateTime <$> liftBase getCurrentTime
   case t of
     "cat"    -> do
-      (as, dt) <- timeOf $ page h c p s mk o now "catName"
+      (as, dt) <- timeOf $ page h c p s mk o now "catName" z
       yields $ format "Id" . showString "Name"
       each $ sCat <$> as
       showTime dt
     "feed"   -> do
-      (as, dt) <- timeOf $ page h c p s mk o now "feedUpdated"
+      (as, dt) <- timeOf $ page h c p s mk o now "feedUpdated" z
       yields $ format "Id" . format "Category" . showString "Updated"
       each $ sFeed <$> as
       showTime dt
     "person" -> do
-      (as, dt) <- timeOf $ page h c p s mk o now "personName"
+      (as, dt) <- timeOf $ page h c p s mk o now "personName" z
       yields $ format "Id" . showString "Name"
       each $ sPerson <$> as
       showTime dt
     "item"   -> do
-      (as, dt) <- timeOf $ page h c p s mk o now "itemUpdated"
+      (as, dt) <- timeOf $ page h c p s mk o now "itemUpdated" z
       showItems h as
       showTime dt
     _        -> yield . shows t $ " is not a valid table name."
@@ -336,13 +338,15 @@ showItems h as = do
 
 cmdRange h args = do
   let s = args !! 4
-  cmdPage h args s Nothing ""
+  let z = args !! 5
+  cmdPage h args s Nothing "" z
 
 cmdFilter h args = do
   let k = (read $ args !! 4) :: Int
   let o = args !! 5
   let s = args !! 6
-  cmdPage h args s (Just k) o
+  let z = args !! 7
+  cmdPage h args s (Just k) o z
 
 showIDs is = do
   let ids = map show is
@@ -367,7 +371,7 @@ cmdAdd h args = timed $ do
                   randomPerson >>= DB.runInsert h)
                 >>= showIDs
     "feed" -> do
-      cs' <- handleAbort $ DB.runRange h maxBound "catName" nothing
+      cs' <- handleAbort $ DB.runRange h maxBound "catName" nothing DB.SortAsc
       let cs = S.fromList cs'
       let rs = take n $ randomRs (0, S.length cs - 1) g
       fs <- handleAbort $ liftM sequence . P.toListM . for (each rs) $ \r ->
@@ -376,7 +380,7 @@ cmdAdd h args = timed $ do
         yield
       showIDs fs
     "item" -> do
-      fs' <- handleAbort $ DB.runRange h maxBound "feedUpdated" nothing
+      fs' <- handleAbort $ DB.runRange h maxBound "feedUpdated" nothing DB.SortAsc
       let fs = S.fromList fs'
       let rfids = (fst . S.index fs) <$> take n (randomRs (0, S.length fs - 1) g)
       stNew <- handleAbort . DB.runQuery h $ DB.itemStatusByKey StatusNew
@@ -407,17 +411,19 @@ cmdRangeDel h args = timed $ do
   let p = (read $ args !! 1) :: Int
   let c = args !! 3
   let s = args !! 4
+  let z = args !! 5
+  let so = if z == "ASC" then DB.SortAsc else DB.SortDesc
   now <- DB.DateTime <$> liftBase getCurrentTime
   sz <- maybe (yield "Explicit value required." >> return 0)
     (\k -> case t of
-      "cat"    ->
-        handleAbort (DB.runDeleteRange h p (def c "catName"     :: Property Cat   ) k)
-      "feed"   ->
-        handleAbort (DB.runDeleteRange h p (def c "feedUpdated" :: Property Feed  ) k)
-      "person" ->
-        handleAbort (DB.runDeleteRange h p (def c "personName"  :: Property Person) k)
-      "item"   ->
-        handleAbort (DB.runDeleteRange h p (def c "itemUpdated" :: Property Item  ) k)
+      "cat"    -> handleAbort (DB.runDeleteRange h p
+                  (def c "catName"     :: Property Cat   ) k so)
+      "feed"   -> handleAbort (DB.runDeleteRange h p
+                  (def c "feedUpdated" :: Property Feed  ) k so)
+      "person" -> handleAbort (DB.runDeleteRange h p
+                  (def c "personName"  :: Property Person) k so)
+      "item"   -> handleAbort (DB.runDeleteRange h p
+                  (def c "itemUpdated" :: Property Item  ) k so)
       _        -> yield (shows t " is not a valid table name.") >> return 0)
     (parseVal s now)
   yields $ shows sz . showString " records deleted."
