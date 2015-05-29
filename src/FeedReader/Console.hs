@@ -1,5 +1,6 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeFamilies      #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies        #-}
 
 {-# OPTIONS_GHC -fno-warn-missing-signatures #-}
 
@@ -173,6 +174,75 @@ randomItem f s =
           <*> pure s
 
 ------------------------------------------------------------------------------
+-- Record Printing
+------------------------------------------------------------------------------
+
+class Printable a where
+  getFieldNames :: a -> [String]
+  getFieldValues :: (DB.LogState l, MonadSafe m) => DB.Handle l ->
+                     Reference a -> a -> m [String]
+
+instance Printable Cat where
+  getFieldNames _ = [ "Id", "Parent", "Name" ]
+  getFieldValues _ k it =
+    return [ show k
+           , maybe "-" show (catParent it)
+           , unSortable $ catName it
+           ]
+
+instance Printable Person where
+  getFieldNames _ = [ "Id", "Name", "Email", "URL" ]
+  getFieldValues _ k it =
+    return [ show k
+           , unSortable . unUnique $ personName it
+           , personEmail it
+           , personURL it
+           ]
+
+instance Printable Feed where
+  getFieldNames _ = [ "Id", "Cat", "Updated", "Sub", "Err", "Title" ]
+  getFieldValues _ k it =
+    return [ show k
+           , maybe "-" show $ feedCat it
+           , take 19 . show $ feedUpdated it
+           , if feedUnsubscribed it then " x" else " -"
+           , if null $ feedLastError it then " -" else "ERR"
+           , content2Str . unSortable $ feedTitle it
+           ]
+
+instance Printable Item where
+  getFieldNames _ = [ "Id", "Feed", "Updated", "Sta", "Title" ]
+  getFieldValues h k it = do
+    st <- handleAbort . DB.runQuery h . DB.itemStatusToKey $ itemStatus it
+    return [ show k
+           , show $ itemFeed it
+           , take 19 . show $ itemUpdated it
+           , showStatus st
+           , content2Str (itemTitle it)
+           ]
+
+content2Str (Text str)  = str
+content2Str (HTML str)  = str
+content2Str (XHTML str) = str
+
+showStatus StatusNew     = "(?)"
+showStatus StatusUnread  = " ?"
+showStatus StatusRead    = " ~"
+showStatus StatusStarred = "{★}"
+
+printRecords :: forall a l m x x'. (Printable a, DB.LogState l, MonadSafe m) =>
+                DB.Handle l -> [(Reference a, a)] -> Proxy x' x () String m ()
+printRecords h rs = do
+  let ns = getFieldNames (undefined :: a)
+  vs <- traverse (uncurry $ getFieldValues h) rs
+  let szs = map (+1) $ foldr (zipWith max . map length) (map length ns) vs
+  let szs' = take (length szs - 1) szs
+  let ss = szs' ++ [78 - sum szs']
+  let strs = map (concat . zipWith (\sz str -> take (sz - 1) str ++
+             replicate (sz - length str) ' ') ss) (ns : vs)
+  each strs
+
+------------------------------------------------------------------------------
 -- Command Functions
 ------------------------------------------------------------------------------
 
@@ -280,61 +350,25 @@ cmdPage h args s mk o z = do
   let p = (read $ args !! 1) :: Int
   let t = args !! 2
   let c = args !! 3
-  let sCat (iid, i) = formats (shows iid) . showString (unSortable $ catName i) $ ""
-  let sFeed (iid, i) = formats (shows iid) . formats (showsFeedCat i) .
-                       shows (feedUpdated i) $ ""
-  let sPerson (iid, i) = formats (shows iid) . showString (unSortable .
-                         unUnique $ personName i) $ ""
   now <- DB.DateTime <$> liftBase getCurrentTime
   case t of
     "cat"    -> do
       (as, dt) <- timeOf $ page h c p s mk o now "catName" z
-      yields $ format "Id" . showString "Name"
-      each $ sCat <$> as
+      printRecords h (as :: [(Reference Cat, Cat)])
       showTime dt
     "feed"   -> do
       (as, dt) <- timeOf $ page h c p s mk o now "feedUpdated" z
-      yields $ format "Id" . format "Category" . showString "Updated"
-      each $ sFeed <$> as
+      printRecords h (as :: [(Reference Feed, Feed)])
       showTime dt
     "person" -> do
       (as, dt) <- timeOf $ page h c p s mk o now "personName" z
-      yields $ format "Id" . showString "Name"
-      each $ sPerson <$> as
+      printRecords h (as :: [(Reference Person, Person)])
       showTime dt
     "item"   -> do
       (as, dt) <- timeOf $ page h c p s mk o now "itemUpdated" z
-      showItems h as
+      printRecords h (as :: [(Reference Item, Item)])
       showTime dt
     _        -> yield . shows t $ " is not a valid table name."
-
-formatsK k i = let str = take (k - 1) $ i "" in
-               showString str .
-               showString (replicate (k - length str) ' ')
-formats = formatsK 12
-format = formats . showString
-
-content2Str (Text str)  = take 27 str ++ "..."
-content2Str (HTML str)  = take 27 str ++ "..."
-content2Str (XHTML str) = take 27 str ++ "..."
-
-showStatus StatusNew     = "(?)"
-showStatus StatusUnread  = " ?"
-showStatus StatusRead    = " ~"
-showStatus StatusStarred = "{★}"
-
-showItems h as = do
-  yields $ format "Id" . format "Feed" .
-    formatsK 20 (showString "Updated") . showString "Sta Title"
-  as' <- traverse (\(iid, i) -> do
-    st <- handleAbort . DB.runQuery h . DB.itemStatusToKey $ itemStatus i
-    return (iid, i, st)) as
-  each $ sItem <$> as'
-  where sItem (iid, i, st) = formats (shows iid) .
-                             formats (shows $ itemFeed i) .
-                             formatsK 20 (shows $ itemUpdated i) .
-                             formatsK 4 (showString $ showStatus st) $
-                             content2Str (itemTitle i)
 
 cmdRange h args = do
   let s = args !! 4
@@ -450,7 +484,7 @@ cmdFeed h args = timed $ do
     yield ""
     each . lines $ show feed
     yield ""
-    showItems h is ) mbf
+    printRecords h is ) mbf
 
 cmdItemStatus h args = timed $ do
   let i = (read $ args !! 1) :: Int
@@ -463,17 +497,12 @@ cmdItemStatus h args = timed $ do
     "Starred" -> handleAbort $ DB.runUpdateItemStatus h iid StatusStarred
     _         -> yield "Status unknown."
 
-showsFeedCat f = maybe (showString "-") shows $ feedCat f
-
 cmdOPML h args = timed $ do
   let path = args !! 1
   res <- importOPML h path
   either yield (\rs -> do
     yield $ shows (length rs) " feeds merged:"
-    yields $ format "Id" . format "Category" . showString "URL"
-    each $ map (\(fid, f) -> formats (shows fid) .
-                             formats (showsFeedCat f) .
-                             shows (feedURL f) $ "") rs )
+    printRecords h rs)
     res
 
 pipeLine h =
