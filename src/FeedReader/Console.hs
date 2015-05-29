@@ -247,19 +247,19 @@ cmdGetk h args = timed $ do
                   (each . lines)
   case t of
     "feed"   ->
-      handleAbort (DB.runLookupUnique h "feedURL" (DB.Unique k)
+      handleAbort (DB.runUnique h "feedURL" (DB.Unique k)
                :: LookupUnqRet Feed) >>= out . fmap (show . snd)
     "person" ->
-      handleAbort (DB.runLookupUnique h "personName" (DB.Unique k)
+      handleAbort (DB.runUnique h "personName" (DB.Unique k)
                :: LookupUnqRet Person) >>= out . fmap (show . snd)
     "item"   ->
-      handleAbort (DB.runLookupUnique h "itemURL" (DB.Unique k)
+      handleAbort (DB.runUnique h "itemURL" (DB.Unique k)
                :: LookupUnqRet Item) >>= out . fmap (show . snd)
     _        -> yield . shows t $ " is not a valid table name."
 
 page h c p s mk o now dft = handleAbort $
   maybe (DB.runRange h p (fromString fprop) (parseVal s now))
-  (\k -> DB.runRangeF h p (fromString fprop) (nk k)
+  (\k -> DB.runFilterRange h p (fromString fprop) (nk k)
                           (fromString oprop)(parseVal s now))
   mk
   where fprop = if c == "*" then dft else c

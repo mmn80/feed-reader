@@ -138,7 +138,7 @@ opmlToDb pcat os = do
         Just (cid, _) -> return cid
       opmlToDb (Just cid) $ opmlOutlineChildren o
     Right (ti, xmlUrl, htmlUrl) -> do
-      mb <- lookupUnique "feedURL" (Unique xmlUrl)
+      mb <- unique "feedURL" (Unique xmlUrl)
       case mb of
         Nothing -> do
           let f' = Feed { feedCat          = pcat

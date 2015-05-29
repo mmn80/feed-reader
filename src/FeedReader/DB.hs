@@ -17,9 +17,9 @@
 module FeedReader.DB
   ( module Exports
   , runRange
-  , runRangeF
+  , runFilterRange
   , runLookup
-  , runLookupUnique
+  , runUnique
   , runInsert
   , runUpdate
   , runDelete
@@ -44,22 +44,22 @@ runLookup :: (Document a, LogState l, MonadIO m) => Handle l -> Reference a ->
               m (Either TransactionAbort (Maybe a))
 runLookup h k = runQuery h (lookup k)
 
-runLookupUnique :: (Document a, ToKey (Unique b), LogState l, MonadIO m) =>
+runUnique :: (Document a, ToKey (Unique b), LogState l, MonadIO m) =>
                    Handle l -> Property a -> Unique b ->
                    m (Either TransactionAbort (Maybe (Reference a, a)))
-runLookupUnique h p k = runQuery h $ lookupUnique p k
+runUnique h p k = runQuery h $ unique p k
 
 runRange :: (Document a, ToKey (Sortable b), LogState l, MonadIO m) =>
              Handle l -> Int -> Property a -> Maybe (Sortable b) ->
              m (Either TransactionAbort [(Reference a, a)])
 runRange h pg prop s = runQuery h $ range pg prop s Nothing
 
-runRangeF :: (Document a, ToKey (Sortable c), LogState l, MonadIO m) =>
+runFilterRange :: (Document a, ToKey (Sortable c), LogState l, MonadIO m) =>
               Handle l -> Int -> Property a -> Maybe (Reference b) ->
               Property a -> Maybe (Sortable c) ->
               m (Either TransactionAbort [(Reference a, a)])
-runRangeF h pg fprop k sprop s = runQuery h $
-  rangeF pg fprop k sprop s Nothing
+runFilterRange h pg fprop k sprop s = runQuery h $
+  filterRange pg fprop k sprop s Nothing
 
 runInsert :: (Document a, LogState l, MonadIO m) =>
               Handle l -> a -> m (Either TransactionAbort (Reference a))
@@ -76,7 +76,7 @@ runDelete h did = runQuery h (delete did)
 deleteRange :: (Document a, ToKey (Sortable b), MonadIO m) =>
                Int -> Property a -> Sortable b -> Transaction l m Int
 deleteRange pg prop s = do
-  ks <- rangeK pg prop (Just s) Nothing
+  ks <- range' pg prop (Just s) Nothing
   forM_ ks $ \k -> delete k
   return $ length ks
 

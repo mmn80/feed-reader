@@ -51,7 +51,7 @@ class ToItem i where
 itemStatusByKey :: MonadIO m => ItemStatusKey ->
                    Transaction l m (Reference ItemStatus)
 itemStatusByKey k =
-  lookupUniqueK "statusKey" (Unique k) >>=
+  unique' "statusKey" (Unique k) >>=
   maybe (insert $ ItemStatus (Unique k)) return
 
 itemStatusToKey :: (LogState l, MonadIO m) => Reference ItemStatus ->
@@ -139,7 +139,7 @@ instance ToFeed A.Feed where
 updateItem :: (LogState l, MonadIO m) => URL -> Item -> Reference ItemStatus ->
                Reference ItemStatus -> Transaction l m (Reference Item, Item)
 updateItem url it stNew stUnr =
-  lookupUnique "itemURL" (Unique url) >>=
+  unique "itemURL" (Unique url) >>=
   maybe (liftM (,it) (insert it)) (\(k, oit) ->
     let it' = it { itemStatus = stUpd $ itemStatus oit
                  , itemTags   = itemTags oit } in

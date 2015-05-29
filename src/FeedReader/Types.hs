@@ -94,6 +94,8 @@ data Feed = Feed
 -- TODO: filter on Sorted columns
 -- TODO: File backend: process file locking
 -- TODO: sort the other way
+-- TODO: optimize getDocument (hash id => multiple caches)
+-- TODO: add the rest of _K functions
 
 instance Document Feed
 
