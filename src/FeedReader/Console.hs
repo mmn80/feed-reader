@@ -129,11 +129,11 @@ doAbortable n args h f =
 
 randomString l r = do
   ln <- randomRIO (l, r)
-  replicateM ln $ randomRIO (' ', '~')
+  DB.pack <$> replicateM ln (randomRIO (' ', '~'))
 
 randomStringIx l r = Sortable <$> randomString l r
 
-randomContentIx l r = Sortable . Text <$> randomString l r
+randomContentIx l r = Sortable . Plain <$> randomString l r
 
 time2Int str = fromInteger . round . utcTimeToPOSIXSeconds .
                DB.unDateTime . text2DateTime str
@@ -157,11 +157,11 @@ randomFeed c =
         <*> pure Nothing
         <*> randomString 100 300
         <*> randomContentIx 100 300
-        <*> (Text <$> randomString 100 300)
+        <*> (Plain <$> randomString 100 300)
         <*> randomString 2 10
         <*> pure []
         <*> pure []
-        <*> (Text <$> randomString 10 50)
+        <*> (Plain <$> randomString 10 50)
         <*> pure Nothing
         <*> randomTimeIx
         <*> pure False
@@ -175,13 +175,13 @@ randomPerson =
 randomItem f s =
      Item <$> pure f
           <*> (Unique <$> randomString 100 300)
-          <*> (Text <$> randomString 100 300)
-          <*> (Text <$> randomString 100 300)
+          <*> (Plain <$> randomString 100 300)
+          <*> (Plain <$> randomString 100 300)
           <*> pure []
           <*> pure []
           <*> pure []
-          <*> (Text <$> randomString 10 50)
-          <*> (Text <$> randomString 200 300)
+          <*> (Plain <$> randomString 10 50)
+          <*> (Plain <$> randomString 200 300)
           <*> randomTimeIx
           <*> randomTimeIx
           <*> pure s
@@ -200,16 +200,16 @@ instance Printable Cat where
   getFieldValues _ k it =
     return [ show k
            , maybe "-" show (catParent it)
-           , unSortable $ catName it
+           , unpack . unSortable $ catName it
            ]
 
 instance Printable Person where
   getFieldNames _ = [ "Id", "Name", "Email", "URL" ]
   getFieldValues _ k it =
     return [ show k
-           , unSortable . unUnique $ personName it
-           , personEmail it
-           , personURL it
+           , unpack . unSortable . unUnique $ personName it
+           , unpack $ personEmail it
+           , unpack $ personURL it
            ]
 
 instance Printable Feed where
@@ -234,9 +234,9 @@ instance Printable Item where
            , content2Str (itemTitle it)
            ]
 
-content2Str (Text str)  = str
-content2Str (HTML str)  = str
-content2Str (XHTML str) = str
+content2Str (Plain str) = unpack str
+content2Str (HTML  str) = unpack str
+content2Str (XHTML str) = unpack str
 
 showStatus StatusNew     = "(?)"
 showStatus StatusUnread  = " ?"
@@ -441,7 +441,7 @@ cmdAdd h args = timed $ do
 cmdAddCat h args = timed $ do
   let n = args !! 1
   let p = (read $ args !! 2) :: Int
-  let c = Cat (Sortable n) (if p == 0 then Nothing else Just $ fromIntegral p)
+  let c = Cat (Sortable $ pack n) (if p == 0 then Nothing else Just $ fromIntegral p)
   cid <- handleAbort $ DB.runInsert h c
   yields' "Category " $ shows cid . showString " inserted."
 
@@ -485,7 +485,7 @@ cmdDebug h args = timed $ do
 
 cmdCurl _ args = timed $ do
   let url = args !! 1
-  liftBase (show <$> downloadFeed url) >>= each . lines
+  liftBase (show <$> downloadFeed (DB.pack url)) >>= each . lines
 
 cmdFeed h args = timed $ do
   let f = (read $ args !! 1) :: Int

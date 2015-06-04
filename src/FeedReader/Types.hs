@@ -22,6 +22,9 @@ module FeedReader.Types
   , Item (..)
   , ItemStatus (..)
   , ItemStatusKey (..)
+  , Text (..)
+  , pack
+  , unpack
   , URL
   , Language
   , Tag
@@ -32,45 +35,73 @@ module FeedReader.Types
   , Unique (..)
   ) where
 
+import           Control.Arrow         (first)
 import           Data.Hashable         (Hashable (..))
 import           Data.Serialize        (Serialize (..))
+import           Data.String           (IsString (..))
+import qualified Data.Text             as T
+import           Data.Text.Encoding    (decodeUtf8, encodeUtf8)
 import           Database.Muesli.Types
 import           GHC.Generics          (Generic)
 
-type URL      = String
-type Language = String
-type Tag      = String
+newtype Text = Text { unText :: T.Text }
+  deriving (Eq, Ord, Generic, Hashable)
 
-data Content  = Text String | HTML String | XHTML String
+instance Read Text where
+  readsPrec p = map (first Text) . readsPrec p
+
+instance Show Text where
+  showsPrec p = showsPrec p . unText
+
+instance IsString Text where
+  fromString = Text . fromString
+
+instance Serialize Text where
+  put t = put . encodeUtf8 $ unText t
+  get   = Text . decodeUtf8 <$> get
+
+instance Indexable Text
+
+pack :: String -> Text
+pack = Text . T.pack
+
+unpack :: Text -> String
+unpack = T.unpack . unText
+
+type URL      = Text
+type Language = Text
+type Tag      = Text
+
+data Content  = Plain Text | HTML Text | XHTML Text
   deriving (Show, Generic, Serialize, Indexable)
 
 data Cat = Cat
-  { catName   :: Sortable String
+  { catName   :: Sortable Text
   , catParent :: Maybe (Reference Cat)
   } deriving (Show, Generic, Serialize)
 
 instance Document Cat
 
 data Person = Person
-  { personName  :: Unique (Sortable String)
+  { personName  :: Unique (Sortable Text)
   , personURL   :: URL
-  , personEmail :: String
+  , personEmail :: Text
   } deriving (Show, Generic, Serialize)
 
 instance Document Person
 
 data Image = Image
   { imageURL         :: URL
-  , imageTitle       :: String
-  , imageDescription :: String
+  , imageTitle       :: Text
+  , imageDescription :: Text
   , imageLink        :: URL
   , imageWidth       :: Int
   , imageHeight      :: Int
   } deriving (Show, Generic, Serialize, Indexable)
 
 data HTTPAuth = HTTPAuth
-  { authUserName :: String
-  , authPassword :: String
+  { authUserName :: Text
+  , authPassword :: Text
   } deriving (Show, Generic, Serialize, Indexable)
 
 data Feed = Feed
@@ -87,7 +118,7 @@ data Feed = Feed
   , feedImage        :: Maybe Image
   , feedUpdated      :: Sortable DateTime
   , feedUnsubscribed :: Bool
-  , feedLastError    :: Maybe String
+  , feedLastError    :: Maybe Text
   } deriving (Show, Generic, Serialize)
 
 -- TODO: Sortable -> Sorted, Reference -> Ref

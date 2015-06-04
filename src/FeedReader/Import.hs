@@ -23,7 +23,7 @@ module FeedReader.Import
 import           Control.Exception         (throw, try)
 import           Control.Monad             (forM, liftM)
 import           Data.ByteString           (ByteString)
-import           Data.ByteString.Char8     (unpack)
+import qualified Data.ByteString.Char8     as C8
 import           Data.List                 (find)
 import           Data.Maybe                (fromMaybe)
 import           Data.Time.Clock.POSIX     (posixSecondsToUTCTime)
@@ -46,7 +46,7 @@ import           Text.XML.Light.Input      (parseXMLDoc)
 downloadFeed :: MonadIO m => URL -> m (Either String F.Feed)
 downloadFeed url = do
   res <- liftIO . try $ do
-    req <- parseUrl url
+    req <- parseUrl $ unpack url
     withManager tlsManagerSettings $ \m ->
       withHTTP req m $ \resp ->
         let st = responseStatus resp in
@@ -56,7 +56,7 @@ downloadFeed url = do
   return $ case res of
     Left  err -> Left $ case err of
       StatusCodeException (Status c m) _ _ ->
-        "HTTP Status " ++ show c ++ ": " ++ unpack m
+        "HTTP Status " ++ show c ++ ": " ++ C8.unpack m
       InvalidUrlException s t ->
         "Invalid URL: " ++ s ++ ". " ++ t ++ ""
       FailedConnectionException2 _ _ _ ex ->
@@ -105,7 +105,7 @@ updateFeed h fid =
   either (return . Left) (
     maybe (return $ Right (Nothing, [])) (\feed ->
       downloadFeed (unUnique $ feedURL feed) >>=
-      either (\err -> let f' = feed { feedLastError = Just err } in
+      either (\err -> let f' = feed { feedLastError = Just (pack err) } in
                       runUpdate h fid f' >>=
                       either (return . Left)
                              (return . const (Right (Just f', []))) )
@@ -135,8 +135,8 @@ opmlToDb pcat os = do
   cs <- filter "catName" pcat "catName" SortAsc
   rss <- forM os $ \o -> case parseOutline o of
     Left str -> if null str then return [] else do
-      cid <- case find ((== opmlText o) . unSortable . catName . snd) cs of
-        Nothing       -> insert $ Cat (Sortable str) pcat
+      cid <- case find ((== opmlText o) . unpack . unSortable . catName . snd) cs of
+        Nothing       -> insert $ Cat (Sortable $ pack str) pcat
         Just (cid, _) -> return cid
       opmlToDb (Just cid) $ opmlOutlineChildren o
     Right (ti, xmlUrl, htmlUrl) -> do
@@ -144,15 +144,15 @@ opmlToDb pcat os = do
       case mb of
         Nothing -> do
           let f' = Feed { feedCat          = pcat
-                        , feedURL          = Unique xmlUrl
+                        , feedURL          = Unique $ pack xmlUrl
                         , feedHTTPAuth     = Nothing
-                        , feedWebURL       = fromMaybe "" htmlUrl
-                        , feedTitle        = Sortable $ Text ti
-                        , feedDescription  = Text ""
+                        , feedWebURL       = pack $ fromMaybe "" htmlUrl
+                        , feedTitle        = Sortable . Plain $ pack ti
+                        , feedDescription  = Plain ""
                         , feedLanguage     = ""
                         , feedAuthors      = []
                         , feedContributors = []
-                        , feedRights       = Text ""
+                        , feedRights       = Plain ""
                         , feedImage        = Nothing
                         , feedUpdated      = Sortable nullDate
                         , feedUnsubscribed = False
