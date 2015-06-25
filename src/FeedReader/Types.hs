@@ -125,6 +125,11 @@ data Feed = Feed
 -- TODO: filter on Sorted columns
 -- TODO: File backend: process file locking
 -- TODO: optimize getDocument (hash id => multiple caches)
+-- TODO: index on disk
+-- TODO: cursor (zipper) in & out of transactions
+-- TODO: lenses/prisms/folds/traversals
+-- TODO: free/cofree pairing interpreter
+-- TODO: query serialization
 
 instance Document Feed
 

@@ -45,8 +45,8 @@ runLookup :: (Document a, LogState l, MonadIO m) => Handle l -> Reference a ->
 runLookup h k = runQuery h (lookup k)
 
 runUnique :: (Document a, ToKey (Unique b), LogState l, MonadIO m) =>
-                   Handle l -> Property a -> Unique b ->
-                   m (Either TransactionAbort (Maybe (Reference a, a)))
+              Handle l -> Property a -> Unique b ->
+              m (Either TransactionAbort (Maybe (Reference a, a)))
 runUnique h p k = runQuery h $ unique p k
 
 runRange :: (Document a, ToKey (Sortable b), LogState l, MonadIO m) =>
@@ -55,9 +55,9 @@ runRange :: (Document a, ToKey (Sortable b), LogState l, MonadIO m) =>
 runRange h pg prop s so = runQuery h $ range pg prop s Nothing so
 
 runFilterRange :: (Document a, ToKey (Sortable c), LogState l, MonadIO m) =>
-              Handle l -> Int -> Property a -> Maybe (Reference b) ->
-              Property a -> Maybe (Sortable c) -> SortOrder ->
-              m (Either TransactionAbort [(Reference a, a)])
+                   Handle l -> Int -> Property a -> Maybe (Reference b) ->
+                   Property a -> Maybe (Sortable c) -> SortOrder ->
+                   m (Either TransactionAbort [(Reference a, a)])
 runFilterRange h pg fprop k sprop s so = runQuery h $
   filterRange pg fprop k sprop s Nothing so
 
@@ -74,7 +74,7 @@ runDelete :: (LogState l, MonadIO m) =>
 runDelete h did = runQuery h (delete did)
 
 deleteRange :: (Document a, ToKey (Sortable b), MonadIO m) =>
-               Int -> Property a -> Sortable b -> SortOrder -> Transaction l m Int
+                Int -> Property a -> Sortable b -> SortOrder -> Transaction l m Int
 deleteRange pg prop s so = do
   ks <- range' pg prop (Just s) Nothing so
   forM_ ks $ \k -> delete k

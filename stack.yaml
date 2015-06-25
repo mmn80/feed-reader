@@ -1,0 +1,8 @@
+flags: {}
+packages:
+- '.'
+- location: ../muesli
+  valid-wanted: false
+extra-deps:
+- opml-0.4
+resolver: nightly-2015-06-25
