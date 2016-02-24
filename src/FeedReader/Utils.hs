@@ -1,10 +1,10 @@
 -----------------------------------------------------------------------------
 -- |
 -- Module : FeedReader.Data.DB
--- Copyright : (C) 2015 Călin Ardelean,
+-- Copyright : (c) 2015-16 Călin Ardelean,
 -- License : BSD-style (see the file LICENSE)
 --
--- Maintainer : Călin Ardelean <calinucs@gmail.com>
+-- Maintainer : Călin Ardelean <mmn80cpu@gmail.com>
 -- Stability : experimental
 -- Portability : portable
 --

@@ -5,10 +5,10 @@
 -----------------------------------------------------------------------------
 -- |
 -- Module      : Main
--- Copyright   : (c) 2015 Călin Ardelean
+-- Copyright   : (c) 2015-16 Călin Ardelean
 -- License     : BSD-style
 --
--- Maintainer  : Călin Ardelean <calinucs@gmail.com>
+-- Maintainer  : Călin Ardelean <mmn80cpu@gmail.com>
 -- Stability   : experimental
 -- Portability : portable
 --
@@ -130,6 +130,12 @@ data Feed = Feed
 -- TODO: lenses/prisms/folds/traversals
 -- TODO: free/cofree pairing interpreter
 -- TODO: query serialization
+-- TODO: Alternative instance for Transaction
+-- TODO: retry and orElse like in STM
+-- TODO: tests, benchmarks
+-- TODO: tutorial module (move example from README there)
+-- TODO: travis button in README
+-- TODO: migration
 
 instance Document Feed
 

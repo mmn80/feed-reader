@@ -4,11 +4,11 @@ version:             0.1.0.0
 synopsis:            RSS/Atom feed reader server
 description:
   RSS/Atom feed reader server
-homepage:            https://github.com/clnx/feed-reader
-bug-reports:         https://github.com/clnx/feed-reader/issues
+homepage:            https://github.com/mmn80/feed-reader
+bug-reports:         https://github.com/mmn80/feed-reader/issues
 author:              Călin Ardelean
-maintainer:          Călin Ardelean <calinucs@gmail.com>
-copyright:           Copyright (c) 2015 Călin Ardelean
+maintainer:          Călin Ardelean <mmn80cpu@gmail.com>
+copyright:           Copyright (c) 2015-16 Călin Ardelean
 license:             BSD3
 license-file:        LICENSE
 stability:           experimental
@@ -17,7 +17,7 @@ cabal-version:       >=1.10
 
 source-repository head
   type:     git
-  location: https://github.com/clnx/feed-reader.git
+  location: https://github.com/mmn80/feed-reader.git
 
 library
   ghc-options:       -Wall

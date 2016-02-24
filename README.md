@@ -10,7 +10,7 @@ Features / TODO
 
 ### DB
 
-* uses [Muesli](https://github.com/clnx/muesli/), a MVCC document-oriented
+* uses [Muesli](https://github.com/mmn80/muesli/), a MVCC document-oriented
 database with automatic index management implemented in Haskell.
 
 ### Backend

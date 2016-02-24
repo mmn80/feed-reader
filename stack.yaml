@@ -1,8 +1,10 @@
 flags: {}
 packages:
 - '.'
-- location: ../muesli
-  valid-wanted: false
+#- location: ../muesli
+#  extra-dep: true
 extra-deps:
+- pipes-http-1.0.2
 - opml-0.4
-resolver: nightly-2015-06-25
+- muesli-0.1.1.0
+resolver: lts-5.1
