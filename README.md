@@ -1,6 +1,8 @@
 counter-feeder
 ==============
 
+[![Build Status](https://travis-ci.org/mmn80/feed-reader.png)](https://travis-ci.org/mmn80/feed-reader)
+
 Multi-platform, multi-node RSS/Atom feed reader
 
 Features / TODO
