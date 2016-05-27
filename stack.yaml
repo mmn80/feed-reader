@@ -4,4 +4,4 @@ packages:
 extra-deps:
 - opml-0.4
 - muesli-0.1.1.0
-resolver: lts-5.4
+resolver: lts-6.0
