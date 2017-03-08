@@ -3,5 +3,6 @@ packages:
 - '.'
 extra-deps:
 - opml-0.4
+- pipes-http-1.0.5
 - muesli-0.1.1.0
-resolver: lts-7.0
+resolver: lts-8.4

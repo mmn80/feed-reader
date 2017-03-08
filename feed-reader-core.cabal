@@ -72,3 +72,9 @@ executable feeds-console
     pipes-http,
     http-types,
     muesli
+  other-modules:
+    FeedReader.Types,
+    FeedReader.DB,
+    FeedReader.Convert,
+    FeedReader.Import,
+    FeedReader.Utils

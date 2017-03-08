@@ -20,7 +20,7 @@ module FeedReader.Import
   , importOPML
   ) where
 
-import           Control.Exception         (throw, try)
+import           Control.Exception         (try)
 import           Control.Monad             (forM, liftM)
 import           Data.ByteString           (ByteString)
 import qualified Data.ByteString.Char8     as C8
@@ -28,7 +28,7 @@ import           Data.List                 (find)
 import           Data.Maybe                (fromMaybe)
 import           Data.Time.Clock.POSIX     (posixSecondsToUTCTime)
 import           FeedReader.DB
-import           Network.HTTP.Types.Status (Status (..), statusIsSuccessful)
+import           Network.HTTP.Types.Status (Status (..))
 import           Pipes
 import           Pipes.HTTP
 import qualified Pipes.Prelude             as P
@@ -46,22 +46,20 @@ import           Text.XML.Light.Input      (parseXMLDoc)
 downloadFeed :: MonadIO m => URL -> m (Either String F.Feed)
 downloadFeed url = do
   res <- liftIO . try $ do
-    req <- parseUrl $ unpack url
-    withManager tlsManagerSettings $ \m ->
-      withHTTP req m $ \resp ->
-        let st = responseStatus resp in
-        if statusIsSuccessful st
-        then liftM mconcat (P.toListM $ responseBody resp)
-        else throw $ StatusCodeException st (responseHeaders resp) mempty
+    req <- parseUrlThrow $ unpack url
+    m <- newManager tlsManagerSettings
+    withHTTP req m $ \resp ->
+      liftM mconcat (P.toListM $ responseBody resp)
   return $ case res of
     Left  err -> Left $ case err of
-      StatusCodeException (Status c m) _ _ ->
-        "HTTP Status " ++ show c ++ ": " ++ C8.unpack m
       InvalidUrlException s t ->
         "Invalid URL: " ++ s ++ ". " ++ t ++ ""
-      FailedConnectionException2 _ _ _ ex ->
+      HttpExceptionRequest _ (StatusCodeException r _) ->
+        let Status c m = responseStatus r in
+        "HTTP Status " ++ show c ++ ": " ++ C8.unpack m
+      HttpExceptionRequest _ (ConnectionFailure ex) ->
         "Connection Error: " ++ show ex
-      ResponseTimeout ->
+      HttpExceptionRequest _ ResponseTimeout ->
         "Timeout Error"
       _ -> show err
     Right bs  ->
