@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 -- |
 -- Module      : Main
--- Copyright   : (c) 2015-16 Călin Ardelean
+-- Copyright   : (c) 2015-18 Călin Ardelean
 -- License     : BSD-style
 --
 -- Maintainer  : Călin Ardelean <mmn80cpu@gmail.com>
@@ -26,6 +26,7 @@ import           Data.String           (fromString)
 import           Data.Time.Clock       (getCurrentTime)
 import           Data.Time.Clock.POSIX (posixSecondsToUTCTime,
                                         utcTimeToPOSIXSeconds)
+import qualified Data.Text             as T
 import           FeedReader.DB         (Property, Reference)
 import qualified FeedReader.DB         as DB
 import           FeedReader.Import     (downloadFeed, importOPML, updateFeed)
@@ -352,8 +353,8 @@ page h c p s mk o now dft z = handleAbort $
 
 parseVal s now
   | "D:" `isPrefixOf` s = Just . DB.Sortable . DB.toKey . DB.Sortable $
-                            text2DateTime (drop 2 s) now
-  | "S:" `isPrefixOf` s = Just . DB.Sortable . DB.toKey . DB.Sortable $ drop 2 s
+                          text2DateTime (T.pack $ drop 2 s) now
+  | "S:" `isPrefixOf` s = Just . DB.Sortable . DB.toKey . DB.Sortable . T.pack $ drop 2 s
   | s == "*"            = Nothing
   | otherwise           = Just . DB.Sortable . DB.toKey . DB.Sortable $
                             (read s :: Int)

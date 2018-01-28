@@ -5,7 +5,7 @@
 -----------------------------------------------------------------------------
 -- |
 -- Module      : Main
--- Copyright   : (c) 2015-16 Călin Ardelean
+-- Copyright   : (c) 2015-18 Călin Ardelean
 -- License     : BSD-style
 --
 -- Maintainer  : Călin Ardelean <mmn80cpu@gmail.com>
@@ -26,12 +26,13 @@ module FeedReader.Convert
 import           Control.Applicative   ((<|>))
 import           Control.Monad         (liftM)
 import           Control.Monad.Trans   (MonadIO)
-import           Data.List             (find, isPrefixOf)
+import           Data.List             (find)
 import           Data.Maybe            (fromMaybe, listToMaybe)
 import           Database.Muesli.Query hiding (filter)
 import           FeedReader.Types
 import           FeedReader.Utils      (text2DateTime)
 import           Prelude               hiding (lookup)
+import qualified Data.Text             as T
 import qualified Text.Atom.Feed        as A
 import qualified Text.DublinCore.Types as DC
 import qualified Text.RSS.Syntax       as R
@@ -65,8 +66,8 @@ itemStatusToKey k =
 
 content2DB :: A.TextContent -> Content
 content2DB = \case
-  A.TextString  s -> Plain $ pack s
-  A.HTMLString  s -> HTML $ pack s
+  A.TextString  s -> Plain $ Text s
+  A.HTMLString  s -> HTML $ Text s
   A.XHTMLString e -> XHTML . pack $ show e
 
 tryContent2DB :: Maybe A.TextContent -> Content
@@ -74,54 +75,54 @@ tryContent2DB c = content2DB $ fromMaybe (A.TextString "") c
 
 eContent2DB :: A.EntryContent -> Content
 eContent2DB = \case
-  A.TextContent       s -> Plain $ pack s
-  A.HTMLContent       s -> HTML $ pack s
+  A.TextContent       s -> Plain $ Text s
+  A.HTMLContent       s -> HTML $ Text s
   A.XHTMLContent      e -> XHTML . pack $ show e
-  A.MixedContent   j cs -> Plain . pack $ foldl (flip shows) (fromMaybe "" j) cs
+  A.MixedContent   j cs -> Plain . pack $ foldl (flip shows) (T.unpack $ fromMaybe T.empty j) cs
   A.ExternalContent j u -> Plain . pack . maybe (showString "")
-    (\s -> showString "MediaType: " . showString s . showString "\n") j
-    . showString "URL: " $ u
+    (\s -> showString "MediaType: " . showString (T.unpack s) . showString "\n") j
+    . showString "URL: " $ T.unpack u
 
 tryEContent2DB :: Maybe A.EntryContent -> Content
 tryEContent2DB c = eContent2DB $ fromMaybe (A.TextContent "") c
 
-imageFromURL :: String -> Image
+imageFromURL :: T.Text -> Image
 imageFromURL u = Image
-  { imageURL         = pack u
+  { imageURL         = Text u
   , imageTitle       = ""
   , imageDescription = ""
-  , imageLink        = pack u
+  , imageLink        = Text u
   , imageWidth       = 0
   , imageHeight      = 0
   }
 
 instance ToPerson A.Person where
   toPerson p = do
-    let name = Sortable . pack $ A.personName p
+    let name = Sortable . Text $ A.personName p
     let p' = Person { personName  = Unique name
-                    , personURL   = pack . fromMaybe "" $ A.personURI p
-                    , personEmail = pack . fromMaybe "" $ A.personEmail p
+                    , personURL   = Text . fromMaybe T.empty $ A.personURI p
+                    , personEmail = Text . fromMaybe T.empty $ A.personEmail p
                     }
     pid <- updateUnique "personName" (Unique name) p'
     return (pid, p')
 
-toStr :: Maybe (Either String String) -> String
-toStr Nothing = ""
+toStr :: Maybe (Either T.Text T.Text) -> T.Text
+toStr Nothing = T.empty
 toStr (Just (Left x)) = x
 toStr (Just (Right x)) = x
 
 isSelf :: A.Link -> Bool
-isSelf lr = toStr (A.linkRel lr) == "alternate" && isHTMLType (A.linkType lr)
+isSelf lr = toStr (A.linkRel lr) == T.pack "alternate" && isHTMLType (A.linkType lr)
 
-isHTMLType :: Maybe String -> Bool
-isHTMLType (Just str) = "lmth" `isPrefixOf` reverse str
+isHTMLType :: Maybe T.Text -> Bool
+isHTMLType (Just str) = T.pack "lmth" `T.isPrefixOf` T.reverse str
 isHTMLType _ = True
 
 instance ToFeed A.Feed where
   toFeed f fid feed df = do
     as <- mapM toPerson $ A.feedAuthors f
     cs <- mapM toPerson $ A.feedContributors f
-    let f' = feed { feedWebURL       = pack . maybe "" A.linkHref . listToMaybe .
+    let f' = feed { feedWebURL       = Text . maybe T.empty A.linkHref . listToMaybe .
                                        filter isSelf $ A.feedLinks f
                   , feedTitle        = Sortable . content2DB $ A.feedTitle f
                   , feedDescription  = tryContent2DB $ A.feedSubtitle f
@@ -151,8 +152,8 @@ instance ToItem A.Entry where
     as <- mapM toPerson $ A.entryAuthors i
     cs <- mapM toPerson $ A.entryContributor i
     let date = text2DateTime (A.entryUpdated i) df
-    let url = pack $ case A.entryLinks i of
-                []    -> ""
+    let url = Text $ case A.entryLinks i of
+                []    -> T.empty
                 (l:_) -> A.linkHref l
     stNew <- itemStatusByKey StatusNew
     stUnr <- itemStatusByKey StatusUnread
@@ -160,7 +161,7 @@ instance ToItem A.Entry where
                   , itemURL          = Unique url
                   , itemTitle        = content2DB $ A.entryTitle i
                   , itemSummary      = tryContent2DB $ A.entrySummary i
-                  , itemTags         = Sortable . pack . A.catTerm <$>
+                  , itemTags         = Sortable . Text . A.catTerm <$>
                                        A.entryCategories i
                   , itemAuthors      = fst <$> as
                   , itemContributors = fst <$> cs
@@ -177,11 +178,11 @@ instance ToItem A.Entry where
 -- Conversion transactions for RSS
 ------------------------------------------------------------------------------
 
-data RSSPerson = RSSPerson { rssPersonName :: String }
+data RSSPerson = RSSPerson { rssPersonName :: T.Text }
 
 instance ToPerson RSSPerson where
   toPerson p = do
-    let name = Sortable . pack $ rssPersonName p
+    let name = Sortable . Text $ rssPersonName p
     let p' = Person { personName  = Unique name
                     , personURL   = ""
                     , personEmail = ""
@@ -191,28 +192,28 @@ instance ToPerson RSSPerson where
 
 rssImageToImage :: R.RSSImage -> Image
 rssImageToImage i = Image
-  { imageURL         = pack $ R.rssImageURL i
-  , imageTitle       = pack $ R.rssImageTitle i
-  , imageDescription = pack $ fromMaybe "" $ R.rssImageDesc i
-  , imageLink        = pack $ R.rssImageLink i
+  { imageURL         = Text $ R.rssImageURL i
+  , imageTitle       = Text $ R.rssImageTitle i
+  , imageDescription = Text $ fromMaybe T.empty $ R.rssImageDesc i
+  , imageLink        = Text $ R.rssImageLink i
   , imageWidth       = fromIntegral . fromMaybe 0 $ R.rssImageWidth i
   , imageHeight      = fromIntegral . fromMaybe 0 $ R.rssImageHeight i
   }
 
-rssPersonToPerson :: Maybe String -> [RSSPerson]
+rssPersonToPerson :: Maybe T.Text -> [RSSPerson]
 rssPersonToPerson = maybe [] (pure . RSSPerson)
 
 instance ToFeed R.RSSChannel where
   toFeed f fid feed df = do
     as <- mapM toPerson . rssPersonToPerson $ R.rssEditor f
     cs <- mapM toPerson . rssPersonToPerson $ R.rssWebMaster f
-    let f' = feed { feedWebURL       = pack $ R.rssLink f
-                  , feedTitle        = Sortable . Plain . pack $ R.rssTitle f
-                  , feedDescription  = HTML . pack $ R.rssDescription f
-                  , feedLanguage     = pack . fromMaybe "" $ R.rssLanguage f
+    let f' = feed { feedWebURL       = Text $ R.rssLink f
+                  , feedTitle        = Sortable . Plain . Text $ R.rssTitle f
+                  , feedDescription  = HTML . Text $ R.rssDescription f
+                  , feedLanguage     = Text . fromMaybe T.empty $ R.rssLanguage f
                   , feedAuthors      = fst <$> as
                   , feedContributors = fst <$> cs
-                  , feedRights       = Plain . pack . fromMaybe "" $ R.rssCopyright f
+                  , feedRights       = Plain . Text . fromMaybe T.empty $ R.rssCopyright f
                   , feedImage        = rssImageToImage <$> R.rssImage f
                   , feedUpdated      = Sortable $ case R.rssLastUpdate f of
                                          Nothing -> df
@@ -225,20 +226,20 @@ instance ToFeed R.RSSChannel where
 instance ToItem R.RSSItem where
   toItem i f df = do
     as <- mapM toPerson . rssPersonToPerson $ R.rssItemAuthor i
-    let url = pack . fromMaybe "" $ R.rssItemLink i
+    let url = Text . fromMaybe T.empty $ R.rssItemLink i
     let date = Sortable $ text2DateTime (fromMaybe "" $ R.rssItemPubDate i) df
     stNew <- itemStatusByKey StatusNew
     stUnr <- itemStatusByKey StatusUnread
     let it = Item { itemFeed         = f
                   , itemURL          = Unique url
-                  , itemTitle        = Plain . pack . fromMaybe "" $ R.rssItemTitle i
+                  , itemTitle        = Plain . Text . fromMaybe T.empty $ R.rssItemTitle i
                   , itemSummary      = Plain ""
-                  , itemTags         = Sortable . pack . R.rssCategoryValue <$>
+                  , itemTags         = Sortable . Text . R.rssCategoryValue <$>
                                        R.rssItemCategories i
                   , itemAuthors      = fst <$> as
                   , itemContributors = []
                   , itemRights       = Plain ""
-                  , itemContent      = HTML . pack . fromMaybe "" $
+                  , itemContent      = HTML . Text . fromMaybe T.empty $
                                        R.rssItemDescription i
                   , itemPublished    = date
                   , itemUpdated      = date
@@ -254,18 +255,18 @@ extractDcPersons :: [DC.DCItem] -> DC.DCInfo -> [RSSPerson]
 extractDcPersons dcs con = map (RSSPerson . DC.dcText) $
                            filter (\d -> DC.dcElt d == con) dcs
 
-extractDcInfo :: [DC.DCItem] -> DC.DCInfo -> String
-extractDcInfo dcs con = maybe "" DC.dcText $ find (\d -> DC.dcElt d == con) dcs
+extractDcInfo :: [DC.DCItem] -> DC.DCInfo -> T.Text
+extractDcInfo dcs con = maybe T.empty DC.dcText $ find (\d -> DC.dcElt d == con) dcs
 
 extractDcInfo' :: [DC.DCItem] -> DC.DCInfo -> Text
-extractDcInfo' dcs con = pack $ extractDcInfo dcs con
+extractDcInfo' dcs con = Text $ extractDcInfo dcs con
 
 rss1ImageToImage :: R1.Image -> Image
 rss1ImageToImage i = Image
-  { imageURL         = pack $ R1.imageURI i
-  , imageTitle       = pack $ R1.imageTitle i
+  { imageURL         = Text $ R1.imageURI i
+  , imageTitle       = Text $ R1.imageTitle i
   , imageDescription = ""
-  , imageLink        = pack $ R1.imageLink i
+  , imageLink        = Text $ R1.imageLink i
   , imageWidth       = 0
   , imageHeight      = 0
   }
@@ -276,9 +277,9 @@ instance ToFeed R1.Feed where
     let dcs = R1.channelDC ch
     as <- mapM toPerson $ extractDcPersons dcs DC.DC_Creator
     cs <- mapM toPerson $ extractDcPersons dcs DC.DC_Contributor
-    let f' = feed { feedWebURL       = pack $ R1.channelURI ch
-                  , feedTitle        = Sortable . Plain . pack $ R1.channelTitle ch
-                  , feedDescription  = HTML . pack $ R1.channelDesc ch
+    let f' = feed { feedWebURL       = Text $ R1.channelURI ch
+                  , feedTitle        = Sortable . Plain . Text $ R1.channelTitle ch
+                  , feedDescription  = HTML . Text $ R1.channelDesc ch
                   , feedLanguage     = extractDcInfo' dcs DC.DC_Language
                   , feedAuthors      = fst <$> as
                   , feedContributors = fst <$> cs
@@ -296,19 +297,19 @@ instance ToItem R1.Item where
     let dcs = R1.itemDC i
     as <- mapM toPerson $ extractDcPersons dcs DC.DC_Creator
     cs <- mapM toPerson $ extractDcPersons dcs DC.DC_Contributor
-    let url = pack $ if null $ R1.itemLink i then R1.itemURI i else R1.itemLink i
+    let url = Text $ if T.null $ R1.itemLink i then R1.itemURI i else R1.itemLink i
     let date = Sortable $ text2DateTime (extractDcInfo dcs DC.DC_Date) df
     stNew <- itemStatusByKey StatusNew
     stUnr <- itemStatusByKey StatusUnread
     let it = Item { itemFeed         = f
                   , itemURL          = Unique url
-                  , itemTitle        = Plain . pack $ R1.itemTitle i
-                  , itemSummary      = HTML . pack . fromMaybe "" $ R1.itemDesc i
-                  , itemTags         = Sortable . pack <$> R1.itemTopics i
+                  , itemTitle        = Plain . Text $ R1.itemTitle i
+                  , itemSummary      = HTML . Text . fromMaybe T.empty $ R1.itemDesc i
+                  , itemTags         = Sortable . Text <$> R1.itemTopics i
                   , itemAuthors      = fst <$> as
                   , itemContributors = fst <$> cs
                   , itemRights       = Plain $ extractDcInfo' dcs DC.DC_Rights
-                  , itemContent      = HTML . pack . concat . concatMap (foldMap
+                  , itemContent      = HTML . Text . T.concat . concatMap (foldMap
                                        pure . R1.contentValue) $ R1.itemContent i
                   , itemPublished    = date
                   , itemUpdated      = date

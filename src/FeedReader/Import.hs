@@ -4,7 +4,8 @@
 -----------------------------------------------------------------------------
 -- |
 -- Module      : Main
--- Copyright   : (c) 2015-16 Călin Ardelean
+-- Copyright   : (c) 2015-18 Călin Ardelean
+--
 -- License     : BSD-style
 --
 -- Maintainer  : Călin Ardelean <mmn80cpu@gmail.com>
@@ -22,7 +23,7 @@ module FeedReader.Import
 
 import           Control.Exception         (try)
 import           Control.Monad             (forM, liftM)
-import           Data.ByteString           (ByteString)
+import           Data.ByteString.Lazy      (fromStrict)
 import qualified Data.ByteString.Char8     as C8
 import           Data.List                 (find)
 import           Data.Maybe                (fromMaybe)
@@ -34,7 +35,7 @@ import           Pipes.HTTP
 import qualified Pipes.Prelude             as P
 import           Prelude                   hiding (filter, lookup)
 import qualified Text.Atom.Feed            as A
-import           Text.Feed.Import          (readAtom, readRSS1, readRSS2)
+import           Text.Feed.Import
 import qualified Text.Feed.Types           as F
 import           Text.OPML.Import          (elementToOPML)
 import           Text.OPML.Syntax          (Outline (..), opmlBody)
@@ -63,19 +64,9 @@ downloadFeed url = do
         "Timeout Error"
       _ -> show err
     Right bs  ->
-      case parseFeed bs of
+      case parseFeedSource (fromStrict bs) of
         Nothing -> Left "Feed Parsing Error. Use an RSS/Atom validator for more info."
         Just f  -> Right f
-
-parseFeed :: ByteString -> Maybe F.Feed
-parseFeed bs =
-  case XML.parseXMLDoc bs of
-    Nothing -> Nothing
-    Just e  ->
-      readAtom e `mplus`
-      readRSS2 e `mplus`
-      readRSS1 e `mplus`
-      Nothing
 
 writeFeed :: (LogState l, MonadIO m) => Handle l -> F.Feed -> Reference Feed ->
               Feed -> m (Either TransactionAbort (Maybe Feed,

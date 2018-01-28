@@ -5,7 +5,7 @@
 -----------------------------------------------------------------------------
 -- |
 -- Module      : Main
--- Copyright   : (c) 2015-16 Călin Ardelean
+-- Copyright   : (c) 2015-18 Călin Ardelean
 -- License     : BSD-style
 --
 -- Maintainer  : Călin Ardelean <mmn80cpu@gmail.com>

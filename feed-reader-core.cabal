@@ -1,6 +1,6 @@
 name:                feed-reader-core
 category:            Data, Network
-version:             0.1.0.0
+version:             0.2.0.0
 synopsis:            RSS/Atom feed reader server
 description:
   RSS/Atom feed reader server
@@ -8,7 +8,7 @@ homepage:            https://github.com/mmn80/feed-reader
 bug-reports:         https://github.com/mmn80/feed-reader/issues
 author:              Călin Ardelean
 maintainer:          Călin Ardelean <mmn80cpu@gmail.com>
-copyright:           Copyright (c) 2015-16 Călin Ardelean
+copyright:           Copyright (c) 2015-18 Călin Ardelean
 license:             BSD3
 license-file:        LICENSE
 stability:           experimental
@@ -30,8 +30,9 @@ library
     hashable,
     cereal,
     text,
+    xml-conduit,
+    feed             >= 1.0,
     xml,
-    feed,
     opml,
     filepath,
     directory,
@@ -61,8 +62,9 @@ executable feeds-console
     hashable,
     cereal,
     text,
+    xml-conduit,
+    feed             >= 1.0,
     xml,
-    feed,
     opml,
     random,
     filepath,
